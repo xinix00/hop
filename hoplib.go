@@ -1,4 +1,4 @@
-package easylib
+package hoplib
 
 import (
 	"encoding/json"
@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Client is an HTTP client with API key authentication for easyrun agents.
+// Client is an HTTP client with API key authentication for hop agents.
 type Client struct {
 	HTTP   *http.Client
 	APIKey string
@@ -67,14 +67,14 @@ func ParseJobFromSSE(line string) string {
 
 // API response types shared across satellite services
 
-// Agent represents an easyrun agent
+// Agent represents an hop agent
 type Agent struct {
 	ID       string    `json:"id"`
 	Endpoint string    `json:"endpoint"`
 	LastSeen time.Time `json:"last_seen,omitempty"`
 }
 
-// Task represents an easyrun task
+// Task represents an hop task
 type Task struct {
 	ID           string         `json:"id"`
 	JobName      string         `json:"job_name"`
@@ -87,7 +87,7 @@ type Task struct {
 	MemPercent   float64        `json:"mem_percent,omitempty"`
 }
 
-// Job represents an easyrun job
+// Job represents an hop job
 type Job struct {
 	ID          string            `json:"id"`
 	Name        string            `json:"name"`
