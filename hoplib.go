@@ -1,12 +1,19 @@
 package hoplib
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// AuthHeader carries the HMAC request signature. Must match hop's
+// pkg/httputil.AuthHeader and signing scheme exactly.
+const AuthHeader = "X-Hop-Auth"
 
 // Client is an HTTP client with API key authentication for hop agents.
 type Client struct {
@@ -22,15 +29,27 @@ func NewClient(apiKey string) *Client {
 	}
 }
 
+// Sign sets the X-Hop-Auth header: HMAC-SHA256(key, METHOD\nPATH\nsha256(body)).
+// body is the exact bytes sent (nil for GETs). The key never travels on the
+// wire — only this signature does. No-op when APIKey is empty (auth disabled).
+func (c *Client) Sign(req *http.Request, body []byte) {
+	if c.APIKey == "" {
+		return
+	}
+	sum := sha256.Sum256(body)
+	msg := req.Method + "\n" + req.URL.Path + "\n" + hex.EncodeToString(sum[:])
+	mac := hmac.New(sha256.New, []byte(c.APIKey))
+	mac.Write([]byte(msg))
+	req.Header.Set(AuthHeader, hex.EncodeToString(mac.Sum(nil)))
+}
+
 // Get performs an authenticated GET request
 func (c *Client) Get(url string) (*http.Response, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	if c.APIKey != "" {
-		req.Header.Set("X-API-Key", c.APIKey)
-	}
+	c.Sign(req, nil)
 	return c.HTTP.Do(req)
 }
 
