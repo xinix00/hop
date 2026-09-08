@@ -69,6 +69,8 @@ not an error either — then the defaults *are* the configuration.
 | `paths.rootfs_base` | `/tmp/hop` | Base directory for task rootfs/working dirs |
 | `runner.isolate` | `true` | Process isolation (chroot on Linux, sandbox on macOS) |
 | `runner.docker_socket` | `/var/run/docker.sock` | Docker daemon socket for the docker driver |
+| `runner.log_tail_lines` | `50` | Lines of stdout/stderr kept per task in memory; `/logs/{id}/{stream}` serves them first. Small on purpose — hop runs on boards with a few hundred MB |
+| `runner.log_keep_seconds` | `300` | How long the tail of a stopped task stays retrievable, so a crash can be read after the fact |
 | `timeouts.health_check_interval` | `"5s"` | How often a task's health check runs |
 | `timeouts.health_check_timeout` | `"5s"` | Deadline for one health check |
 | `timeouts.node_dead_threshold` | `"30s"` | No heartbeat for this long = the node is dead |

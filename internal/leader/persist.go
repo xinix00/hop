@@ -191,6 +191,22 @@ func (d *dirtyTrackingStore) UpdateJob(job *types.Job) bool {
 	}
 	return ok
 }
+
+func (d *dirtyTrackingStore) SetJobPriority(name string, priority int) bool {
+	ok := d.inner.SetJobPriority(name, priority)
+	if ok {
+		d.dirty()
+	}
+	return ok
+}
+
+func (d *dirtyTrackingStore) SetJobDeploying(name string, deploying bool) bool {
+	ok := d.inner.SetJobDeploying(name, deploying)
+	if ok {
+		d.dirty()
+	}
+	return ok
+}
 func (d *dirtyTrackingStore) SyncJobs(jobs []*types.Job, updated time.Time) {
 	d.inner.SyncJobs(jobs, updated)
 	d.dirty()

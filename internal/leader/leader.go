@@ -39,6 +39,16 @@ type JobStore interface {
 	// resurrects jobs deleted since the snapshot was taken (measured
 	// 15-07: delete-storm zombies on the Altra).
 	UpdateJob(job *types.Job) bool
+	// SetJobPriority rewrites ONLY the priority of a stored job, atomically
+	// in the store, and reports whether the job still existed. Priority
+	// renumbering used to write back a whole snapshot copy; a rollout that
+	// cleared Deploying in between lost that write and stayed "deploying"
+	// forever (measured 2026-09-08 on traqqr: server02, hoplb, cloudflared).
+	SetJobPriority(name string, priority int) bool
+	// SetJobDeploying rewrites ONLY the Deploying flag, the same way.
+	// Update used to flip the field on the pointer that also sits in the
+	// store while handlers were encoding it.
+	SetJobDeploying(name string, deploying bool) bool
 	DeleteJob(name string) // Remove job from store by name
 	GetStateTime() time.Time
 	SyncJobs(jobs []*types.Job, updated time.Time)

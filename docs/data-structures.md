@@ -249,6 +249,7 @@ type Task struct {
     StartedAt    time.Time
     RestartCount int            // Number of times restarted
     LastFailedAt time.Time      // Last crash time (drives the restart window)
+    NextRestartAt time.Time     // When the next restart attempt runs (backoff in progress); zero while running or given up
     CPUShares    int            // Copied from the job (capacity accounting)
     MemoryLimit  uint64         // Copied from the job (capacity accounting)
     CPUPercent   float64        // Live usage, measured by the agent monitor (5s)

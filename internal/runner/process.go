@@ -88,7 +88,7 @@ func NewExecRunner(config *Config) *ExecRunner {
 		processes: make(map[string]*execProcess),
 		taskDirs:  make(map[string]string),
 		mounts:    make(map[string][]string),
-		logs:      newLogStore(),
+		logs:      newLogStoreWith(config.Logs),
 	}
 }
 
@@ -138,8 +138,7 @@ func (r *ExecRunner) Run(job *types.Job, task *types.Task) error {
 	}
 
 	// Setup log broadcasting
-	stdoutBroadcaster := NewLogBroadcaster()
-	stderrBroadcaster := NewLogBroadcaster()
+	stdoutBroadcaster, stderrBroadcaster := r.logs.newPair()
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {

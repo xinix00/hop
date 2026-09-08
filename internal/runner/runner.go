@@ -90,4 +90,8 @@ type Config struct {
 
 	// NodeAttrs are injected as ER_ATTR_* env vars in every process (node-specific, not persisted)
 	NodeAttrs map[string]string
+
+	// Logs is how much task output is kept (tail lines, and for how long
+	// after the task stopped). Zero fields mean DefaultLogPolicy.
+	Logs LogPolicy
 }

@@ -348,6 +348,33 @@ func (m *mockJobStore) UpdateJob(job *types.Job) bool {
 	return true
 }
 
+func (m *mockJobStore) SetJobPriority(name string, priority int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.jobs[name]
+	if !ok {
+		return false
+	}
+	cp := *cur
+	p := priority
+	cp.Priority = &p
+	m.jobs[name] = &cp
+	return true
+}
+
+func (m *mockJobStore) SetJobDeploying(name string, deploying bool) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.jobs[name]
+	if !ok {
+		return false
+	}
+	cp := *cur
+	cp.Deploying = deploying
+	m.jobs[name] = &cp
+	return true
+}
+
 func (m *mockJobStore) DeleteJob(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

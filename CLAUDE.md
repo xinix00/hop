@@ -51,5 +51,5 @@ go build -o bin/run ./cmd/cli
 - **Init jobs**: `cluster.init_jobs` in config seeds a baseline on a clean boot (no snapshot AND empty job store) — one-shot via the normal dispatch path, never continuous enforcement; store errors never trigger a seed. See internal/leader/init.go
 - **State persistence**: one path — the leader's `StatePersister`. Backend follows the lock: S3 or hoplockserver (remote) in a cluster, a local crash-safe file (`paths.state_file`, tmp+fsync+rename) in standalone/mem. Agents keep no statefile; a rebooted agent is re-dispatched by the leader (nodes are stateless in cluster mode).
 - **Node ID**: persisted in data/node-id, survives restarts
-- **MaxRestarts**: *int — nil/omitted = default 5, 0 = no restarts, -1 = unlimited
+- **MaxRestarts**: *int — nil/omitted = unlimited with exponential backoff (1s…30s, counter resets after `restart_window` of uptime), 0 = no restarts, N = give up after N crashes within `restart_window`, -1 = unlimited (explicit). Task shows `next_restart_at` while the backoff runs.
 - **Version**: injected at build time via `-ldflags "-X main.version=..."` (default: "dev")

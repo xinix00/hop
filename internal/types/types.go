@@ -98,7 +98,7 @@ type Job struct {
 	Tags          map[string]string `json:"tags,omitempty"`    // labels for discovery/grouping
 	Volumes       map[string]string `json:"volumes,omitempty"` // host_path -> task_path (bind-mounted on Linux, symlinked on macOS)
 	HealthCheck   *HealthCheck      `json:"health_check,omitempty"`
-	MaxRestarts   *int              `json:"max_restarts,omitempty"`   // nil = default (5), 0 = no restarts, -1 = unlimited
+	MaxRestarts   *int              `json:"max_restarts,omitempty"`   // nil = default (unlimited, with backoff), 0 = no restarts, -1 = unlimited, N = give up after N in restart_window
 	RestartWindow time.Duration     `json:"restart_window,omitempty"` // 0 = default (5m), reset restart count if last crash was longer ago
 	UpdatePolicy  UpdatePolicy      `json:"update_policy,omitempty"`  // rolling (default) | recreate | blue-green
 	Priority      *int              `json:"priority,omitempty"`       // nil=auto(end), 0=top, N=Nth position
@@ -123,10 +123,13 @@ type Task struct {
 	StartedAt    time.Time      `json:"started_at"`
 	RestartCount int            `json:"restart_count"`
 	LastFailedAt time.Time      `json:"last_failed_at,omitempty"`
-	CPUShares    int            `json:"cpu_shares,omitempty"`
-	MemoryLimit  uint64         `json:"memory_limit,omitempty"`
-	CPUPercent   float64        `json:"cpu_percent"`
-	MemPercent   float64        `json:"mem_percent"`
+	// NextRestartAt is when the agent will try again after a crash (the
+	// backoff is running); zero while running or when it gave up.
+	NextRestartAt time.Time `json:"next_restart_at,omitempty"`
+	CPUShares     int       `json:"cpu_shares,omitempty"`
+	MemoryLimit   uint64    `json:"memory_limit,omitempty"`
+	CPUPercent    float64   `json:"cpu_percent"`
+	MemPercent    float64   `json:"mem_percent"`
 
 	// Downloadvoortgang van de startfase (state "downloading"): bytes binnen
 	// en de totale image-maat. Alleen gevuld door runners die streamen.

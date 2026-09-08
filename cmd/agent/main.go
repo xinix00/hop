@@ -134,6 +134,10 @@ func run(ctx context.Context, cfg *config.Config, nodeID string, standalone bool
 		cfg.Node.Port+1000, // Leader API port
 		cfg.Timeouts.LeaderLease,
 	)
+	// Store calls run off the tick: the loop only ever reads the last
+	// answer, and the lease timer says whether we still lead (WP1).
+	elector := agentloop.NewAsyncDiscoverer(disc, cfg.Timeouts.LeaderLease)
+	go elector.Run(ctx.Done())
 
 	// Create agent (always runs)
 	ag := agent.New(cfg, nodeID, nil)
@@ -148,7 +152,7 @@ func run(ctx context.Context, cfg *config.Config, nodeID string, standalone bool
 	loop := &agentloop.Loop{
 		Cfg:  cfg,
 		Ag:   ag,
-		Disc: disc,
+		Disc: elector,
 		DoRegister: func(leaderAddr, id, ep string, placed map[string]int, key string) error {
 			return agentloop.Register(leaderAddr, id, ep, version, placed, key)
 		},
@@ -177,9 +181,8 @@ func run(ctx context.Context, cfg *config.Config, nodeID string, standalone bool
 
 	// Main loop: heartbeat to leader, handle leader election (gedeeld met
 	// agentboot — internal/agentloop, de fase-2-extractie).
-	// Cluster calls on the agent API proxy to the leader the loop knows —
-	// never a lock-store read per request (Bunny: seconds per GET).
-	ag.SetLeaderFunc(loop.LeaderAddr)
+	// Cluster calls on the agent API proxy to the leader the loop publishes
+	// into the agent (SetLeaderAddr) — never a lock-store read per request.
 	go loop.Run(ctx.Done(), 10*time.Second)
 
 	// Block on the agent HTTP server, like ag.Run(ctx) did when it ran here.
@@ -233,6 +236,7 @@ func buildBackend(cfg *config.Config, standalone bool) (hoplock.Backend, error) 
 			SecretAccessKey: c.S3.SecretAccessKey,
 			SessionToken:    c.S3.SessionToken,
 			UsePathStyle:    c.S3.UsePathStyle,
+			TakeoverAfter:   cfg.Timeouts.LeaderLease,
 		}, cfg.Cluster.Name), nil
 	case "", "hoplockserver":
 		return discovery.HoplockServerBackend(c.URL, c.APIKey, cfg.Cluster.Name), nil

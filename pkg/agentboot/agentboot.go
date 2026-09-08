@@ -138,11 +138,15 @@ func Run(ctx context.Context, o Options) error {
 			AccessKeyID:     s3.AccessKeyID,
 			SecretAccessKey: s3.SecretAccessKey,
 			UsePathStyle:    s3.UsePathStyle,
+			TakeoverAfter:   cfg.Timeouts.LeaderLease,
 		}, cfg.Cluster.Name)
 		log.Printf("agentboot: leader-election via s3 (%s/%s), cluster %q",
 			s3.Endpoint, s3.Bucket, cfg.Cluster.Name)
 	}
 	disc := discovery.New(backend, cfg.Node.IP, cfg.Node.Port+1000, cfg.Timeouts.LeaderLease)
+	// Store calls run off the tick; the lease timer answers "still leader".
+	elector := agentloop.NewAsyncDiscoverer(disc, cfg.Timeouts.LeaderLease)
+	go elector.Run(ctx.Done())
 
 	// De agent (state-loop + agent-API) moet draaien vóór registratie:
 	// RegisterAgent reconciliet en dat bevraagt de agent-state.
@@ -188,7 +192,7 @@ func Run(ctx context.Context, o Options) error {
 	loop := &agentloop.Loop{
 		Cfg:  cfg,
 		Ag:   ag,
-		Disc: disc,
+		Disc: elector,
 		DoRegister: func(leaderAddr, id, ep string, placed map[string]int, key string) error {
 			return agentloop.Register(leaderAddr, id, ep, Version, placed, key)
 		},
@@ -205,9 +209,8 @@ func Run(ctx context.Context, o Options) error {
 	// een verse cluster) = meteen leader — geen 30s takeover-drempel voor de
 	// init-desktop; lock bezet = tick 1 registreert bij de zittende leader.
 	loop.BecomeLeaderNow()
-	// Cluster calls on the agent API proxy to the leader the loop knows —
-	// never a lock-store read per request (Bunny: seconds per GET).
-	ag.SetLeaderFunc(loop.LeaderAddr)
+	// Cluster calls on the agent API proxy to the leader the loop publishes
+	// into the agent (SetLeaderAddr) — never a lock-store read per request.
 	go loop.Run(ctx.Done(), 10*time.Second)
 
 	return <-runErr

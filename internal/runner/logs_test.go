@@ -431,7 +431,7 @@ func backdateRetired(s *logStore, taskID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p := s.retired[taskID]
-	p.at = time.Now().Add(-logRetention - time.Second)
+	p.at = time.Now().Add(-s.policy.Keep - time.Second)
 	s.retired[taskID] = p
 }
 
@@ -558,5 +558,34 @@ loop:
 	// Should receive 2 lines (scanner handles no trailing newline)
 	if len(received) != 2 {
 		t.Errorf("received %d lines, want 2", len(received))
+	}
+}
+
+// ============== LOGPOLICY ==============
+
+// De tail-grootte en de bewaartijd komen uit de policy; nulvelden vallen terug
+// op de defaults (50 regels, 5 minuten) zodat een kale config niets verandert.
+func TestLogPolicyTailAndKeep(t *testing.T) {
+	if got := (LogPolicy{}).orDefault(); got != DefaultLogPolicy {
+		t.Fatalf("zero policy = %+v, want %+v", got, DefaultLogPolicy)
+	}
+
+	s := newLogStoreWith(LogPolicy{TailLines: 3, Keep: 20 * time.Millisecond})
+	out, errB := s.newPair()
+	s.put("t1", out, errB)
+	for _, l := range []string{"1", "2", "3", "4", "5"} {
+		_, _ = out.Write([]byte(l))
+	}
+	if tail := out.Tail(); len(tail) != 3 || tail[0] != "3" || tail[2] != "5" {
+		t.Fatalf("tail with TailLines=3 = %v, want [3 4 5]", tail)
+	}
+
+	s.retire("t1")
+	if s.stdout("t1") == nil {
+		t.Fatal("logs gone right after retire; want them kept for Keep")
+	}
+	time.Sleep(40 * time.Millisecond)
+	if s.stdout("t1") != nil {
+		t.Fatal("logs still served after Keep elapsed")
 	}
 }

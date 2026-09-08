@@ -89,8 +89,9 @@ func (l *Leader) UpdateJob(newJob *types.Job) error {
 	}
 
 	if err == nil {
-		newJob.Deploying = false
-		l.jobStore.StoreJob(newJob)
+		// Only the flag, in the store — newJob itself is the pointer the
+		// policy stored, and handlers may be encoding it right now.
+		l.jobStore.SetJobDeploying(newJob.Name, false)
 	}
 
 	l.normalizePriorities(l.jobStore.GetJobs())

@@ -17,7 +17,14 @@ import (
 )
 
 const (
-	defaultMaxRestarts   = 5
+	// defaultMaxRestarts is unlimited: a task that keeps crashing keeps
+	// coming back, with restartDelay's exponential backoff (capped at 30 s)
+	// between attempts. A finite default (it was 5 in 5 minutes) turned a
+	// dependency that started late into a permanent outage: the traqqr web
+	// apps burnt their budget before RavenDB was up (2026-09-08) and stayed
+	// "failed" until someone re-posted them. Jobs that must give up set
+	// max_restarts explicitly.
+	defaultMaxRestarts   = -1
 	defaultRestartWindow = 5 * time.Minute
 	proxyTimeout         = 10 * time.Second
 
@@ -31,9 +38,13 @@ const (
 
 // agentState holds all mutable state (owned by single goroutine)
 type agentState struct {
-	jobs      map[string]*types.Job  // job name → job
-	tasks     map[string]*types.Task // task ID → task
-	stateTime time.Time
+	jobs       map[string]*types.Job  // job name → job
+	tasks      map[string]*types.Task // task ID → task
+	stateTime  time.Time
+	leaderAddr string // leader API ("ip:port") the tick loop last confirmed; "" = none known
+	// leaseExpiresAt is when OUR lease lapses unless renewed; zero unless
+	// this node leads. Published by the tick loop for /leader and hopprom.
+	leaseExpiresAt time.Time
 }
 
 // Agent runs jobs and reports status
@@ -95,21 +106,28 @@ func New(cfg *config.Config, id string, r runner.Runner) *Agent {
 		attrs[k] = v
 	}
 
+	logs := runner.LogPolicy{
+		TailLines: cfg.Runner.LogTailLines,
+		Keep:      time.Duration(cfg.Runner.LogKeepSeconds) * time.Second,
+	}
 	if r == nil {
 		r = runner.NewExecRunner(&runner.Config{
 			RootfsBase:   cfg.Paths.RootfsBase,
 			MaxCPUShares: cfg.Capacity.CPUShares,
 			Isolate:      cfg.Runner.Isolate,
 			NodeAttrs:    attrs,
+			Logs:         logs,
 		})
 	}
+	dockerRunner := runner.NewDockerRunner(attrs, cfg.Runner.DockerSocket, sysInfo.CPUCores)
+	dockerRunner.SetLogPolicy(logs)
 
 	a := &Agent{
 		id:           id,
 		endpoint:     endpoint,
 		config:       cfg,
 		execRunner:   r,
-		dockerRunner: runner.NewDockerRunner(attrs, cfg.Runner.DockerSocket, sysInfo.CPUCores),
+		dockerRunner: dockerRunner,
 		sysInfo:      sysInfo,
 		attributes:   attrs,
 		ops:          make(chan func(*agentState), stateChannelBufferSize),
@@ -117,7 +135,7 @@ func New(cfg *config.Config, id string, r runner.Runner) *Agent {
 		streamClient: &httputil.Client{},
 		apiKey:       cfg.APIKey,
 		checkStates:  make(map[string]*checkState),
-		getLeader:    func() string { return "" }, // overridden by SetLeaderFunc; default = "no leader"
+		getLeader:    nil, // nil = LeaderAddr (state loop); tests override via SetLeaderFunc
 		shutdownCh:   make(chan struct{}),
 	}
 	// Runners met een zichtbare startfase (streamende download) melden hun
@@ -158,7 +176,42 @@ func (a *Agent) WithHopRunner(r runner.Runner) *Agent {
 	return a
 }
 
-// SetLeaderFunc sets the function to get the current leader address (for proxying cluster requests)
+// SetLeaderAddr records the leader the tick loop is registered with (or
+// our own leader API while we hold the lease). The agent proxies cluster
+// calls there. It goes through the state loop like every other agent
+// fact — nobody asks the lock store "who leads?" per request.
+func (a *Agent) SetLeaderAddr(addr string) {
+	a.do(func(s *agentState) { s.leaderAddr = addr })
+}
+
+// LeaderAddr returns the leader API address to proxy to, or "" while no
+// leader is known.
+func (a *Agent) LeaderAddr() string {
+	return query(a, func(s *agentState) string { return s.leaderAddr })
+}
+
+// SetLeaseExpiresAt records when this node's own lease lapses (zero when it
+// does not lead). The lease is the leader's timer; /leader shows it and
+// hopprom turns it into hop_leader_lease_seconds.
+func (a *Agent) SetLeaseExpiresAt(t time.Time) {
+	a.do(func(s *agentState) { s.leaseExpiresAt = t })
+}
+
+// LeaseExpiresAt returns the published lease expiry (zero unless leading).
+func (a *Agent) LeaseExpiresAt() time.Time {
+	return query(a, func(s *agentState) time.Time { return s.leaseExpiresAt })
+}
+
+// leaderAddr is what the handlers use: the test override if set, else the
+// state-loop value.
+func (a *Agent) leaderAddr() string {
+	if a.getLeader != nil {
+		return a.getLeader()
+	}
+	return a.LeaderAddr()
+}
+
+// SetLeaderFunc overrides where the leader address comes from (tests).
 func (a *Agent) SetLeaderFunc(fn func() string) {
 	a.getLeader = fn
 }
@@ -525,6 +578,40 @@ func (a *Agent) UpdateJob(job *types.Job) bool {
 			return false
 		}
 		s.jobs[job.Name] = job
+		s.stateTime = time.Now()
+		return true
+	})
+}
+
+// SetJobPriority rewrites only the priority of a stored job (JobStore
+// interface). A fresh copy replaces the stored pointer, so readers that
+// hold the old pointer never see a field change under them.
+func (a *Agent) SetJobPriority(name string, priority int) bool {
+	return query(a, func(s *agentState) bool {
+		cur, ok := s.jobs[name]
+		if !ok {
+			return false
+		}
+		cp := *cur
+		p := priority
+		cp.Priority = &p
+		s.jobs[name] = &cp
+		s.stateTime = time.Now()
+		return true
+	})
+}
+
+// SetJobDeploying rewrites only the Deploying flag of a stored job (JobStore
+// interface); copy-on-write like SetJobPriority.
+func (a *Agent) SetJobDeploying(name string, deploying bool) bool {
+	return query(a, func(s *agentState) bool {
+		cur, ok := s.jobs[name]
+		if !ok {
+			return false
+		}
+		cp := *cur
+		cp.Deploying = deploying
+		s.jobs[name] = &cp
 		s.stateTime = time.Now()
 		return true
 	})

@@ -38,15 +38,19 @@ func (m *mockDiscoverer) TryBecomeLeader() bool {
 }
 
 type mockAgent struct {
-	id           string
-	endpoint     string
-	placed       map[string]int
-	stopAllCalls int
+	id             string
+	endpoint       string
+	placed         map[string]int
+	stopAllCalls   int
+	leaderAddr     string
+	leaseExpiresAt time.Time
 }
 
 func (m *mockAgent) ID() string                          { return m.id }
 func (m *mockAgent) Endpoint() string                    { return m.endpoint }
 func (m *mockAgent) GetPlacedTaskCounts() map[string]int { return m.placed }
+func (m *mockAgent) SetLeaderAddr(addr string)           { m.leaderAddr = addr }
+func (m *mockAgent) SetLeaseExpiresAt(t time.Time)       { m.leaseExpiresAt = t }
 func (m *mockAgent) StopAllTasks()                       { m.stopAllCalls++ }
 
 type mockLeader struct {
@@ -475,13 +479,14 @@ func TestTick_SelfHeartbeatTransportFout_AlleenTellen(t *testing.T) {
 // knowledge — never a lock-store read per request.
 func TestLeaderAddrFollowsTheLoop(t *testing.T) {
 	disc := &mockDiscoverer{leader: "leader:9080"}
-	loop := newTestLoop(disc, &mockAgent{})
-	if got := loop.LeaderAddr(); got != "" {
+	ag := &mockAgent{}
+	loop := newTestLoop(disc, ag)
+	if got := ag.leaderAddr; got != "" {
 		t.Fatalf("before first tick LeaderAddr() = %q, want empty", got)
 	}
 
 	loop.Tick() // discovers leader:9080 and registers there
-	if got := loop.LeaderAddr(); got != "leader:9080" {
+	if got := ag.leaderAddr; got != "leader:9080" {
 		t.Fatalf("after register LeaderAddr() = %q, want leader:9080", got)
 	}
 
@@ -489,7 +494,7 @@ func TestLeaderAddrFollowsTheLoop(t *testing.T) {
 	// address stays — it is still the same leader.
 	loop.DoHeartbeat = errHeartbeat(ErrNotRegistered)
 	loop.Tick()
-	if got := loop.LeaderAddr(); got != "leader:9080" {
+	if got := ag.leaderAddr; got != "leader:9080" {
 		t.Fatalf("after not-registered LeaderAddr() = %q, want leader:9080", got)
 	}
 
@@ -501,17 +506,60 @@ func TestLeaderAddrFollowsTheLoop(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		loop.Tick()
 	}
-	if got := loop.LeaderAddr(); got != "" {
+	if got := ag.leaderAddr; got != "" {
 		t.Fatalf("after leader lost LeaderAddr() = %q, want empty", got)
 	}
 	disc.becomeLeaderOK = true
 	loop.Tick()
-	if got := loop.LeaderAddr(); got != "127.0.0.1:9080" {
+	if got := ag.leaderAddr; got != "127.0.0.1:9080" {
 		t.Fatalf("as leader LeaderAddr() = %q, want 127.0.0.1:9080", got)
 	}
 
 	loop.stepDown(true)
-	if got := loop.LeaderAddr(); got != "" {
+	if got := ag.leaderAddr; got != "" {
 		t.Fatalf("after step-down LeaderAddr() = %q, want empty", got)
+	}
+}
+
+// No leader at all (election in progress, lease lapsed, store out): tasks
+// keep running however long it takes. Measured 2026-09-08: a ghost lease left
+// traqqr leaderless and after 70 s both agents had stopped every task.
+func TestTick_NoLeader_NeverStopsTasks(t *testing.T) {
+	disc := &mockDiscoverer{leader: ""}
+	ag := &mockAgent{id: "a1"}
+	loop := newTestLoop(disc, ag)
+
+	for range 20 {
+		loop.Tick()
+	}
+
+	if ag.stopAllCalls != 0 {
+		t.Fatalf("StopAllTasks called %d time(s) without any leader", ag.stopAllCalls)
+	}
+	if disc.tryBecomeLeaderCalls == 0 {
+		t.Fatal("never tried to take over")
+	}
+}
+
+// A leader we cannot reach whose lease has meanwhile lapsed is not an
+// isolation: the store says nobody leads, so nobody re-places our tasks.
+func TestTick_LeaderGoneFromStore_NeverStopsTasks(t *testing.T) {
+	disc := &mockDiscoverer{leader: "leader:9080"}
+	ag := &mockAgent{id: "a1"}
+	loop := newTestLoop(disc, ag)
+	loop.registered = true
+	loop.lastLeaderAddr = "leader:9080"
+	loop.DoHeartbeat = errHeartbeat(errors.New("connection refused"))
+	loop.DoRegister = errRegister(errors.New("connection refused"))
+
+	for i := range 12 {
+		if i == 4 {
+			disc.leader = "" // the lease lapsed: the store reports no leader
+		}
+		loop.Tick()
+	}
+
+	if ag.stopAllCalls != 0 {
+		t.Fatalf("StopAllTasks called %d time(s) while the store reported no leader", ag.stopAllCalls)
 	}
 }

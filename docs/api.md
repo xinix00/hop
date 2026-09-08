@@ -66,11 +66,13 @@ Returns cluster overview (from placed data, no HTTP calls to agents):
   "placed": {
     "my-api": 3,
     "worker": 2
-  }
+  },
+  "deploying": []
 }
 ```
 
 - **cluster_name:** Cluster name from config — used by hopdns for federation discovery.
+- **deploying:** Jobs whose last update did not complete (a rollout failed or a leader died mid-rollout). Empty when every rollout finished.
 - **settling:** `true` during the settle period after leader election (30s). During this period, jobs are stored but not dispatched until agents have registered with their placed counts.
 - **placed:** Job name → total placed count across all agents.
 
@@ -338,9 +340,14 @@ GET /health
 GET /leader
 ```
 
-Returns the current leader address:
+Returns the current leader address as the agent's tick loop knows it — no lock-store read per request:
 ```json
 {"leader": "10.0.0.5:9080"}
+```
+
+On the leader itself the response also carries when its lease lapses unless renewed (the lease is the leader's timer; hopprom exposes it as `hop_leader_lease_seconds`):
+```json
+{"leader": "10.0.0.5:9080", "lease_expires_at": "2026-09-08T17:01:48+02:00"}
 ```
 
 ### Capacity

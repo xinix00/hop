@@ -103,12 +103,17 @@ func (l *Leader) normalizePriorities(jobs []*types.Job) {
 	for i, job := range jobs {
 		if job.Priority == nil || *job.Priority != i {
 			p := i
+			// Alleen de prioriteit, in de store zelf. Deze lus werkt op een
+			// snapshot: een upsert vanaf een snapshot herrees een job die
+			// intussen gedeletet was (de delete-storm-zombies van 15-07), en
+			// een hele-job-write vanaf een snapshot overschreef het
+			// Deploying=false dat een update net had weggeschreven (traqqr,
+			// 2026-09-08: server02/hoplb/cloudflared bleven "deploying").
+			if !l.jobStore.SetJobPriority(job.Name, p) {
+				continue // deleted since the snapshot: leave it dead
+			}
 			updated := *job
 			updated.Priority = &p
-			// UpdateJob, niet StoreJob: deze lus werkt op een snapshot, en
-			// een upsert vanaf een snapshot herrijst een job die intussen
-			// gedeletet is (de delete-storm-zombies van 15-07).
-			l.jobStore.UpdateJob(&updated)
 			jobs[i] = &updated
 		}
 	}

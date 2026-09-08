@@ -95,6 +95,10 @@ type S3BackendConfig struct {
 	SecretAccessKey string
 	SessionToken    string
 	UsePathStyle    bool
+	// TakeoverAfter lets hoplock take over a "ghost" lease (404 on GET,
+	// 200 on HEAD, 412 on create) once its ETag sat unchanged this long.
+	// Set to the lease TTL; a live owner renews well within it.
+	TakeoverAfter time.Duration
 }
 
 // S3Backend wires a hoplock/s3 backend for the given cluster.
@@ -108,6 +112,7 @@ func S3Backend(cfg S3BackendConfig, clusterName string) hoplock.Backend {
 		SecretAccessKey: cfg.SecretAccessKey,
 		SessionToken:    cfg.SessionToken,
 		UsePathStyle:    cfg.UsePathStyle,
+		TakeoverAfter:   cfg.TakeoverAfter,
 	}
 }
 

@@ -681,7 +681,10 @@ func TestHandleLeader(t *testing.T) {
 	cfg := testConfig()
 	mockRunner := NewMockRunner()
 	agent := New(cfg, "test-agent", mockRunner)
-	// No getLeader set
+	// No leader published yet: the answer comes from the state loop.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go agent.stateLoop(ctx)
 
 	req := leanhttp.NewRequest(leanhttp.MethodGet, "/leader", nil)
 	w := leanhttp.NewRecorder()
@@ -702,10 +705,60 @@ func TestHandleLeader(t *testing.T) {
 	}
 }
 
+// The tick loop publishes the leader into the agent state; /leader reports it.
+func TestHandleLeaderFromState(t *testing.T) {
+	cfg := testConfig()
+	agent := New(cfg, "test-agent", NewMockRunner())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go agent.stateLoop(ctx)
+
+	agent.SetLeaderAddr("10.0.0.7:9080")
+
+	w := leanhttp.NewRecorder()
+	agent.handleLeader(w, leanhttp.NewRequest(leanhttp.MethodGet, "/leader", nil))
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["leader"] != "10.0.0.7:9080" {
+		t.Errorf("leader = %q, want 10.0.0.7:9080", resp["leader"])
+	}
+
+	agent.SetLeaderAddr("")
+	if got := agent.LeaderAddr(); got != "" {
+		t.Errorf("after clearing LeaderAddr() = %q, want empty", got)
+	}
+
+	// Leading: the lease expiry rides along; not leading: it is absent.
+	exp := time.Now().Add(90 * time.Second).Truncate(time.Second)
+	agent.SetLeaseExpiresAt(exp)
+	w = leanhttp.NewRecorder()
+	agent.handleLeader(w, leanhttp.NewRequest(leanhttp.MethodGet, "/leader", nil))
+	var withLease map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&withLease); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, _ := withLease["lease_expires_at"].(string); got == "" {
+		t.Fatalf("lease_expires_at missing while leading: %v", withLease)
+	}
+	agent.SetLeaseExpiresAt(time.Time{})
+	w = leanhttp.NewRecorder()
+	agent.handleLeader(w, leanhttp.NewRequest(leanhttp.MethodGet, "/leader", nil))
+	var without map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&without)
+	if _, ok := without["lease_expires_at"]; ok {
+		t.Fatalf("lease_expires_at present while not leading: %v", without)
+	}
+}
+
 func TestHandleLeaderWithFunc(t *testing.T) {
 	cfg := testConfig()
 	mockRunner := NewMockRunner()
 	agent := New(cfg, "test-agent", mockRunner)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go agent.stateLoop(ctx) // /leader also reads the lease expiry from the state
 	agent.SetLeaderFunc(func() string {
 		return "10.0.0.1:9080"
 	})
@@ -735,7 +788,10 @@ func TestProxyToLeaderNoFunc(t *testing.T) {
 	cfg := testConfig()
 	mockRunner := NewMockRunner()
 	agent := New(cfg, "test-agent", mockRunner)
-	// No getLeader set
+	// No leader published: the state loop answers "" and the proxy says 503.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go agent.stateLoop(ctx)
 
 	req := leanhttp.NewRequest(leanhttp.MethodGet, "/v1/agents", nil)
 	w := leanhttp.NewRecorder()

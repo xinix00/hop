@@ -272,7 +272,7 @@ SSE format, live stream only, no storage. Pipe to external tools for persistence
 
 ### Task Failures
 - Agent detects crash (monitor loop, 5s interval)
-- Auto-restart locally (up to max_restarts: default 5, 0 = no restarts, -1 = unlimited)
+- Auto-restart locally with exponential backoff (max_restarts: default unlimited, 0 = no restarts, N = give up after N in restart_window)
 - Health check failures -> kill + restart (after failure_threshold consecutive failures, default 3)
 
 ### Agent Failures

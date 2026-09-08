@@ -113,6 +113,13 @@ type PathsConfig struct {
 type RunnerConfig struct {
 	Isolate      bool   `json:"isolate"`       // Enable process isolation (chroot on Linux, sandbox on macOS). Default: true
 	DockerSocket string `json:"docker_socket"` // Docker daemon socket path. Default: /var/run/docker.sock
+	// LogTailLines is how many lines of stdout/stderr per task are kept in
+	// memory (served first by /logs). Default 50 — small on purpose, hop runs
+	// on boards with a few hundred MB.
+	LogTailLines int `json:"log_tail_lines"`
+	// LogKeepSeconds is how long the tail of a STOPPED task stays
+	// retrievable, so a crash can be read after the fact. Default 300.
+	LogKeepSeconds int `json:"log_keep_seconds"`
 }
 
 // TimeoutsConfig holds timeout configuration. Durations are written the way Go
@@ -213,8 +220,10 @@ func DefaultConfig() *Config {
 			RootfsBase: "/tmp/hop",
 		},
 		Runner: RunnerConfig{
-			Isolate:      true,
-			DockerSocket: "/var/run/docker.sock",
+			Isolate:        true,
+			DockerSocket:   "/var/run/docker.sock",
+			LogTailLines:   50,
+			LogKeepSeconds: 300,
 		},
 		Timeouts: TimeoutsConfig{
 			HealthCheckInterval: 5 * time.Second,

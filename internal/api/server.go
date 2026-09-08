@@ -331,6 +331,13 @@ func (s *Server) handleStatus(w leanhttp.ResponseWriter, r *leanhttp.Request) {
 		totalPlaced += count
 	}
 
+	// Jobs whose last rollout did not finish: honest "not healthy yet".
+	deploying := []string{}
+	for _, j := range jobs {
+		if j.Deploying {
+			deploying = append(deploying, j.Name)
+		}
+	}
 	httputil.WriteJSON(w, leanhttp.StatusOK, map[string]any{
 		"cluster_name": s.clusterName,
 		"agents":       len(agents),
@@ -338,6 +345,7 @@ func (s *Server) handleStatus(w leanhttp.ResponseWriter, r *leanhttp.Request) {
 		"total_placed": totalPlaced,
 		"settling":     !s.leader.IsSettled(),
 		"placed":       placed,
+		"deploying":    deploying,
 	})
 }
 

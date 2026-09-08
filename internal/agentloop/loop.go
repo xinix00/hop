@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"sync/atomic"
 	"time"
 
 	"github.com/xinix00/hop/pkg/httputil"
@@ -35,6 +34,13 @@ type AgentAPI interface {
 	Endpoint() string
 	GetPlacedTaskCounts() map[string]int
 	StopAllTasks()
+	// SetLeaderAddr receives the leader API the loop wants cluster calls
+	// proxied to: our own while we lead, else the leader we heartbeat
+	// with, "" while none is known.
+	SetLeaderAddr(addr string)
+	// SetLeaseExpiresAt receives when our own lease lapses; zero when we
+	// stopped leading.
+	SetLeaseExpiresAt(t time.Time)
 }
 
 // LeaderAPI is the subset of leader.Leader used in the tick loop.
@@ -60,24 +66,27 @@ type Loop struct {
 	selfBeatFails  int // opeenvolgende mislukte self-heartbeats (zie Tick)
 	registered     bool
 	lastLeaderAddr string
-
-	// leaderAddr is what the agent's API proxies to: our own leader API
-	// while we hold the lease, otherwise the leader we register/heartbeat
-	// with. Published from the tick, read from HTTP handlers. Nobody asks
-	// the lock store "who leads?" per request — the lease is the timer
-	// and the loop already keeps this answer for its own heartbeats.
-	leaderAddr atomic.Value // string
 }
 
-// LeaderAddr returns the leader API address ("ip:port") the agent should
-// proxy cluster calls to, or "" while no leader is known. Wire it into
-// agent.SetLeaderFunc.
-func (s *Loop) LeaderAddr() string {
-	v, _ := s.leaderAddr.Load().(string)
-	return v
+// publishLeader tells the agent which leader API to proxy cluster calls
+// to: our own while we hold the lease, otherwise the leader we
+// register/heartbeat with. The lease is the timer and this loop already
+// keeps the answer for its own heartbeats — nobody asks the lock store
+// "who leads?" per request. The agent keeps it in its state loop.
+func (s *Loop) publishLeader(addr string) {
+	s.Ag.SetLeaderAddr(addr)
+	if addr != s.ownLeaderAddr() {
+		s.Ag.SetLeaseExpiresAt(time.Time{})
+	}
 }
 
-func (s *Loop) publishLeader(addr string) { s.leaderAddr.Store(addr) }
+// publishLease pushes the lease expiry into the agent while we lead. Only
+// a Discoverer that tracks the lease timer (AsyncDiscoverer) can tell.
+func (s *Loop) publishLease() {
+	if le, ok := s.Disc.(interface{ LeaseExpiresAt() time.Time }); ok {
+		s.Ag.SetLeaseExpiresAt(le.LeaseExpiresAt())
+	}
+}
 
 // ownLeaderAddr is this node's leader API (agent port + 1000).
 func (s *Loop) ownLeaderAddr() string {
@@ -92,7 +101,15 @@ func (s *Loop) BecomeLeaderNow() bool {
 	if s.stopLeader != nil {
 		return true
 	}
-	if !s.Disc.TryBecomeLeader() {
+	// Boot wants a real answer now, not "asked, come back next tick": an
+	// AsyncDiscoverer offers a synchronous claim for exactly this moment.
+	claimed := false
+	if sync, ok := s.Disc.(interface{ TryBecomeLeaderSync() bool }); ok {
+		claimed = sync.TryBecomeLeaderSync()
+	} else {
+		claimed = s.Disc.TryBecomeLeader()
+	}
+	if !claimed {
 		return false
 	}
 	stop, l := s.DoBecomeLeader()
@@ -154,6 +171,12 @@ func (s *Loop) tryTakeOver(reason string) {
 	log.Printf("%s, trying to become leader...", reason)
 	s.lastLeaderAddr = ""
 	s.publishLeader("")
+	// The next tick must ask the store again, not a cached answer: whether
+	// a live leader still exists decides between "keep trying" and
+	// "isolated" (see leaderFailed).
+	if inv, ok := s.Disc.(interface{ Invalidate() }); ok {
+		inv.Invalidate()
+	}
 	if s.Disc.TryBecomeLeader() {
 		stop, l := s.DoBecomeLeader()
 		s.stopLeader = stop
@@ -163,6 +186,13 @@ func (s *Loop) tryTakeOver(reason string) {
 	}
 }
 
+// leaderFailed: a leader we know of did not answer. After four ticks we try
+// to take over; after seven we assume WE are the isolated party — a live
+// leader is out there re-placing our tasks elsewhere — and stop ours to
+// avoid duplicates. That last step is only right while the lock store still
+// reports a live leader: with no leader at all nobody re-places anything,
+// and stopping is pure loss. Measured 2026-09-08 on traqqr: a ghost lease
+// left the cluster leaderless, and after 70 s both agents killed every task.
 func (s *Loop) leaderFailed(format string, args ...any) {
 	s.failCount++
 	log.Printf(format, args...)
@@ -170,9 +200,28 @@ func (s *Loop) leaderFailed(format string, args ...any) {
 		s.tryTakeOver("Leader unreachable")
 	}
 	if s.failCount >= 7 {
+		if s.Disc.GetLeader() == "" {
+			log.Println("Leader unreachable but the lock store reports no live leader: keeping tasks running")
+			s.failCount = 4
+			return
+		}
 		log.Println("Likely network isolated, stopping all tasks to avoid duplicates")
 		s.Ag.StopAllTasks()
 		s.failCount = 4
+	}
+}
+
+// noLeader: the store reports no live leader (election in progress, lease
+// lapsed, or the store itself is out). Nothing can be duplicating our tasks,
+// so they keep running; we only keep trying to take over.
+func (s *Loop) noLeader() {
+	s.failCount++
+	log.Printf("No leader found (%d)", s.failCount)
+	if s.failCount >= 4 {
+		s.tryTakeOver("No leader")
+		if s.stopLeader == nil {
+			s.failCount = 4 // keep trying every tick; a fresh leader starts its count at 0
+		}
 	}
 }
 
@@ -186,6 +235,7 @@ func (s *Loop) Tick() {
 	if s.stopLeader != nil {
 		// We are leader — renew the lock lease.
 		renewed, displaced := s.Disc.RenewLease()
+		s.publishLease()
 		switch {
 		case renewed:
 			s.failCount = 0
@@ -279,7 +329,7 @@ func (s *Loop) Tick() {
 		}
 	} else {
 		// No leader known
-		s.leaderFailed("No leader found (%d)", s.failCount+1)
+		s.noLeader()
 	}
 }
 

@@ -41,5 +41,6 @@ func (*DockerRunner) Status(*types.Task) (types.TaskState, error) {
 	return types.TaskFailed, errNoDocker
 }
 
+func (*DockerRunner) SetLogPolicy(LogPolicy)           {}
 func (*DockerRunner) GetStdout(string) *LogBroadcaster { return nil }
 func (*DockerRunner) GetStderr(string) *LogBroadcaster { return nil }

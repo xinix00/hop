@@ -88,7 +88,7 @@ go test -run=TestChaos -v -race ./internal/...
 
 **Mass task failure:** PASS
 - 10 tasks crash -> all restarted
-- Up to max_restarts limit (0 = default 5, -1 = unlimited)
+- Up to max_restarts limit (omitted = unlimited with backoff, 0 = no restarts, N = give up after N)
 
 **Crash loops:** PASS
 - Agent gives up after max attempts
@@ -176,7 +176,7 @@ Linux OOM killer terminates tasks
 
 Agent behavior:
   - Monitor detects crashed tasks (5s check interval)
-  - Restarts up to max_restarts (0 = default 5, -1 = unlimited)
+  - Restarts up to max_restarts (omitted = unlimited with backoff, 0 = no restarts, N = give up after N)
   - Health check initial_timeout gives grace period after restart
 
 Result: Prevents infinite crash loops (when max_restarts > 0)

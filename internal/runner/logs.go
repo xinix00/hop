@@ -7,23 +7,56 @@ import (
 	"time"
 )
 
-const tailSize = 50
+// defaultTailLines is the ring-buffer size of a broadcaster made with
+// NewLogBroadcaster; runners size theirs from their LogPolicy.
+const defaultTailLines = 50
+
+// LogPolicy is what a runner keeps of a task's output: the last TailLines
+// lines per stream while it runs, and — after it stopped — the same tail for
+// Keep. Both come from the node config (runner.log_tail_lines,
+// runner.log_keep_seconds); the defaults are deliberately small because hop
+// also runs on boards with a few hundred MB.
+type LogPolicy struct {
+	TailLines int
+	Keep      time.Duration
+}
+
+// DefaultLogPolicy: 50 lines, 5 minutes.
+var DefaultLogPolicy = LogPolicy{TailLines: defaultTailLines, Keep: 5 * time.Minute}
+
+// orDefault fills zero fields from DefaultLogPolicy.
+func (p LogPolicy) orDefault() LogPolicy {
+	if p.TailLines <= 0 {
+		p.TailLines = DefaultLogPolicy.TailLines
+	}
+	if p.Keep <= 0 {
+		p.Keep = DefaultLogPolicy.Keep
+	}
+	return p
+}
 
 // LogBroadcaster broadcasts log lines to multiple listeners
-// and keeps the last 50 lines in a ring buffer for post-crash debugging.
+// and keeps the last N lines in a ring buffer for post-crash debugging.
 type LogBroadcaster struct {
 	listeners []chan string
-	tail      [tailSize]string
+	tail      []string
 	tailPos   int
 	tailCount int
 	closed    bool
 	mu        sync.RWMutex
 }
 
-// NewLogBroadcaster creates a new log broadcaster
-func NewLogBroadcaster() *LogBroadcaster {
+// NewLogBroadcaster creates a broadcaster with the default tail size.
+func NewLogBroadcaster() *LogBroadcaster { return newLogBroadcasterN(defaultTailLines) }
+
+// newLogBroadcasterN creates a broadcaster keeping the last n lines.
+func newLogBroadcasterN(n int) *LogBroadcaster {
+	if n <= 0 {
+		n = defaultTailLines
+	}
 	return &LogBroadcaster{
 		listeners: make([]chan string, 0),
+		tail:      make([]string, n),
 	}
 }
 
@@ -32,9 +65,9 @@ func (b *LogBroadcaster) Write(p []byte) (n int, err error) {
 	line := string(p)
 
 	b.mu.Lock()
-	b.tail[b.tailPos%tailSize] = line
+	b.tail[b.tailPos%len(b.tail)] = line
 	b.tailPos++
-	if b.tailCount < tailSize {
+	if b.tailCount < len(b.tail) {
 		b.tailCount++
 	}
 	for _, ch := range b.listeners {
@@ -56,7 +89,7 @@ func (b *LogBroadcaster) Tail() []string {
 	lines := make([]string, b.tailCount)
 	start := b.tailPos - b.tailCount
 	for i := range b.tailCount {
-		lines[i] = b.tail[(start+i)%tailSize]
+		lines[i] = b.tail[(start+i)%len(b.tail)]
 	}
 	return lines
 }
@@ -75,7 +108,7 @@ func (b *LogBroadcaster) Subscribe() chan string {
 	// Push tail history
 	start := b.tailPos - b.tailCount
 	for i := range b.tailCount {
-		ch <- b.tail[(start+i)%tailSize]
+		ch <- b.tail[(start+i)%len(b.tail)]
 	}
 	if b.closed {
 		close(ch)
@@ -115,10 +148,10 @@ func (b *LogBroadcaster) Close() {
 	b.closed = true
 }
 
-// logRetention is hoe lang de logs van een AFGELOPEN task opvraagbaar blijven.
-// Lang genoeg om ná de melding "task failed" te gaan kijken, kort genoeg dat een
-// node die dagen restart-lussen draait geen geschiedenis opstapelt.
-const logRetention = 5 * time.Minute
+// Hoe lang de logs van een AFGELOPEN task opvraagbaar blijven staat in
+// LogPolicy.Keep (default 5 minuten): lang genoeg om ná de melding "task
+// failed" te gaan kijken, kort genoeg dat een node die dagen restart-lussen
+// draait geen geschiedenis opstapelt.
 
 // logStore is de log-boekhouding van één runner: de broadcasters van de LOPENDE
 // tasks, plus die van net-afgelopen tasks — die gaan niet weg maar met pensioen
@@ -131,6 +164,7 @@ const logRetention = 5 * time.Minute
 // een headless node bestond het waarom dan nergens meer. In een restart-lus is
 // dat elke keer.
 type logStore struct {
+	policy  LogPolicy
 	mu      sync.RWMutex
 	live    map[string]logPair
 	retired map[string]logPair
@@ -144,11 +178,21 @@ type logPair struct {
 	at     time.Time
 }
 
-func newLogStore() *logStore {
+func newLogStore() *logStore { return newLogStoreWith(DefaultLogPolicy) }
+
+// newLogStoreWith maakt een store met de gegeven policy (nulvelden = default).
+func newLogStoreWith(p LogPolicy) *logStore {
 	return &logStore{
+		policy:  p.orDefault(),
 		live:    make(map[string]logPair),
 		retired: make(map[string]logPair),
 	}
+}
+
+// newPair maakt de twee broadcasters van een task, met de tail-grootte van
+// deze store. Registreren doet de aanroeper met put.
+func (s *logStore) newPair() (stdout, stderr *LogBroadcaster) {
+	return newLogBroadcasterN(s.policy.TailLines), newLogBroadcasterN(s.policy.TailLines)
 }
 
 // put legt de broadcasters van een startende task vast. Een hergebruikte taskID
@@ -183,7 +227,7 @@ func (s *logStore) retire(taskID string) {
 	// Opruimen gebeurt hier en niet op een achtergrond-timer: het juiste moment
 	// om verlopen geschiedenis te lozen is precies wanneer er weer iets bij komt.
 	for id, p := range s.retired {
-		if time.Since(p.at) > logRetention {
+		if time.Since(p.at) > s.policy.Keep {
 			delete(s.retired, id)
 		}
 	}
@@ -208,7 +252,7 @@ func (s *logStore) lookup(taskID string) (logPair, bool) {
 	if p, ok := s.live[taskID]; ok {
 		return p, true
 	}
-	if p, ok := s.retired[taskID]; ok && time.Since(p.at) <= logRetention {
+	if p, ok := s.retired[taskID]; ok && time.Since(p.at) <= s.policy.Keep {
 		return p, true
 	}
 	return logPair{}, false

@@ -409,6 +409,10 @@ func (r *DockerRunner) Usage(task *types.Task) (float64, uint64, bool) {
 	return usedCores / cores * 100, mem, true
 }
 
+// SetLogPolicy sets how much task output this runner keeps. Call before the
+// first Start; it replaces the (still empty) log store.
+func (r *DockerRunner) SetLogPolicy(p LogPolicy) { r.logs = newLogStoreWith(p) }
+
 // GetStdout returns the stdout log broadcaster for a task, or the retired one of
 // a task that finished less than logRetention ago (see logStore).
 func (r *DockerRunner) GetStdout(taskID string) *LogBroadcaster { return r.logs.stdout(taskID) }
@@ -449,8 +453,7 @@ func (r *DockerRunner) Cleanup() error {
 
 // startLogStreaming streams container logs via Docker API
 func (r *DockerRunner) startLogStreaming(taskID, containerName string) {
-	stdoutB := NewLogBroadcaster()
-	stderrB := NewLogBroadcaster()
+	stdoutB, stderrB := r.logs.newPair()
 
 	ctx, cancel := context.WithCancel(context.Background())
 

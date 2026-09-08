@@ -36,7 +36,7 @@ func (a *Agent) setAuth(call *leanhttp.Call, incoming *leanhttp.Request) {
 // For long-lived endpoints (SSE events, log tailing) use proxyStreamToLeader
 // instead — io.Copy's buffering would delay chunk delivery here.
 func (a *Agent) proxyToLeader(w leanhttp.ResponseWriter, r *leanhttp.Request) {
-	leaderAddr := a.getLeader()
+	leaderAddr := a.leaderAddr()
 	if leaderAddr == "" {
 		httputil.WriteError(w, leanhttp.StatusServiceUnavailable, "no leader available")
 		return
@@ -79,7 +79,7 @@ func (a *Agent) proxyToLeader(w leanhttp.ResponseWriter, r *leanhttp.Request) {
 // response back chunk-by-chunk, flushing as data arrives. Used for SSE
 // (/v1/events) and live log tailing where buffering would delay output.
 func (a *Agent) proxyStreamToLeader(w leanhttp.ResponseWriter, r *leanhttp.Request) {
-	leaderAddr := a.getLeader()
+	leaderAddr := a.leaderAddr()
 	if leaderAddr == "" {
 		httputil.WriteError(w, leanhttp.StatusServiceUnavailable, "no leader available")
 		return
@@ -156,7 +156,7 @@ func proxyBody(w leanhttp.ResponseWriter, r *leanhttp.Request) ([]byte, bool) {
 // notifyLeader sends a lightweight event to the leader's /v1/notify endpoint.
 // Events: "start" (process started), "started" (healthy), "crash", "stop".
 func (a *Agent) notifyLeader(jobName, event string) {
-	addr := a.getLeader()
+	addr := a.leaderAddr()
 	if addr == "" {
 		return
 	}
@@ -181,7 +181,13 @@ func (a *Agent) notifyLeader(jobName, event string) {
 
 // handleLeader returns the current leader address
 func (a *Agent) handleLeader(w leanhttp.ResponseWriter, r *leanhttp.Request) {
-	httputil.WriteJSON(w, leanhttp.StatusOK, map[string]string{"leader": a.getLeader()})
+	resp := map[string]any{"leader": a.leaderAddr()}
+	if exp := a.LeaseExpiresAt(); !exp.IsZero() {
+		// Only the leader itself knows its lease; a follower reports the
+		// leader address alone.
+		resp["lease_expires_at"] = exp
+	}
+	httputil.WriteJSON(w, leanhttp.StatusOK, resp)
 }
 
 // handleHealth returns basic health status
@@ -722,6 +728,13 @@ func (a *Agent) restartTask(task *types.Task, ran bool) {
 		if restartCount > 0 {
 			delay := restartDelay(restartCount)
 			log.Printf("Task %s restart #%d, waiting %s before retry", task.ID, restartCount, delay)
+			next := time.Now().Add(delay)
+			query(a, func(s *agentState) struct{} {
+				if t := s.tasks[task.ID]; t != nil {
+					t.NextRestartAt = next
+				}
+				return struct{}{}
+			})
 			if !a.waitRestart(delay) {
 				return
 			}

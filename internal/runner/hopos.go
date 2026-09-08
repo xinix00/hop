@@ -115,9 +115,10 @@ func (r *HopRunner) Run(job *types.Job, task *types.Task) error {
 	// want zonder slot is er niets te pompen.
 	stdout := r.logs.stdout(task.ID)
 	if stdout == nil {
-		stdout = NewLogBroadcaster()
+		var stderr *LogBroadcaster
+		stdout, stderr = r.logs.newPair()
 		// hop apps have a single log ring; stderr stays empty
-		r.logs.put(task.ID, stdout, NewLogBroadcaster())
+		r.logs.put(task.ID, stdout, stderr)
 	}
 	err := r.run(job, task)
 	if err != nil {
@@ -497,8 +498,8 @@ func (r *HopRunner) AdoptRunning(slots map[string]int, cores map[string]int) {
 		}
 		// The old kernel's log pump and broadcasters did not survive the
 		// flip. Reconnect the adopted task to its existing slot log stream.
-		stdout := NewLogBroadcaster()
-		r.logs.put(id, stdout, NewLogBroadcaster())
+		stdout, stderr := r.logs.newPair()
+		r.logs.put(id, stdout, stderr)
 		logLines := r.sm.Logs(slot)
 		go func() {
 			for line := range logLines {
