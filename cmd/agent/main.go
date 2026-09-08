@@ -139,7 +139,6 @@ func run(ctx context.Context, cfg *config.Config, nodeID string, standalone bool
 	ag := agent.New(cfg, nodeID, nil)
 
 	// Set leader discovery for proxy endpoints
-	ag.SetLeaderFunc(disc.GetLeader)
 
 	// Cleanup old task directories (fresh start)
 	if err := ag.Init(); err != nil {
@@ -178,6 +177,9 @@ func run(ctx context.Context, cfg *config.Config, nodeID string, standalone bool
 
 	// Main loop: heartbeat to leader, handle leader election (gedeeld met
 	// agentboot — internal/agentloop, de fase-2-extractie).
+	// Cluster calls on the agent API proxy to the leader the loop knows —
+	// never a lock-store read per request (Bunny: seconds per GET).
+	ag.SetLeaderFunc(loop.LeaderAddr)
 	go loop.Run(ctx.Done(), 10*time.Second)
 
 	// Block on the agent HTTP server, like ag.Run(ctx) did when it ran here.

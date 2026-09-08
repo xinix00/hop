@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/xinix00/hop/pkg/httputil"
@@ -59,6 +60,28 @@ type Loop struct {
 	selfBeatFails  int // opeenvolgende mislukte self-heartbeats (zie Tick)
 	registered     bool
 	lastLeaderAddr string
+
+	// leaderAddr is what the agent's API proxies to: our own leader API
+	// while we hold the lease, otherwise the leader we register/heartbeat
+	// with. Published from the tick, read from HTTP handlers. Nobody asks
+	// the lock store "who leads?" per request — the lease is the timer
+	// and the loop already keeps this answer for its own heartbeats.
+	leaderAddr atomic.Value // string
+}
+
+// LeaderAddr returns the leader API address ("ip:port") the agent should
+// proxy cluster calls to, or "" while no leader is known. Wire it into
+// agent.SetLeaderFunc.
+func (s *Loop) LeaderAddr() string {
+	v, _ := s.leaderAddr.Load().(string)
+	return v
+}
+
+func (s *Loop) publishLeader(addr string) { s.leaderAddr.Store(addr) }
+
+// ownLeaderAddr is this node's leader API (agent port + 1000).
+func (s *Loop) ownLeaderAddr() string {
+	return fmt.Sprintf("%s:%d", s.Cfg.Node.IP, s.Cfg.Node.Port+1000)
 }
 
 // BecomeLeaderNow doet één directe election-poging — voor de boot: is de
@@ -76,6 +99,7 @@ func (s *Loop) BecomeLeaderNow() bool {
 	s.stopLeader = stop
 	s.l = l
 	s.failCount = 0
+	s.publishLeader(s.ownLeaderAddr())
 	return true
 }
 
@@ -116,6 +140,7 @@ func (s *Loop) stepDown(release bool) {
 	s.l = nil
 	s.registered = false
 	s.lastLeaderAddr = ""
+	s.publishLeader("")
 	if stop == nil {
 		return
 	}
@@ -128,11 +153,13 @@ func (s *Loop) stepDown(release bool) {
 func (s *Loop) tryTakeOver(reason string) {
 	log.Printf("%s, trying to become leader...", reason)
 	s.lastLeaderAddr = ""
+	s.publishLeader("")
 	if s.Disc.TryBecomeLeader() {
 		stop, l := s.DoBecomeLeader()
 		s.stopLeader = stop
 		s.l = l
 		s.failCount = 0
+		s.publishLeader(s.ownLeaderAddr())
 	}
 }
 
@@ -185,7 +212,7 @@ func (s *Loop) Tick() {
 		}
 		// Self-heartbeat: puur liveness (LastSeen); job-sync is gesloopt —
 		// gewenste staat heeft één auteur (leader → S3, leader/persist.go).
-		leaderAddr = fmt.Sprintf("%s:%d", s.Cfg.Node.IP, s.Cfg.Node.Port+1000)
+		leaderAddr = s.ownLeaderAddr()
 		if err := s.DoHeartbeat(leaderAddr, s.Ag.ID(), s.Ag.Endpoint(), s.Cfg.APIKey); err != nil {
 			// Eén antwoord ís herstelbaar: "not registered". Dan is de eigen
 			// leader-API gewoon bereikbaar maar is hij deze agent VERGETEN —
@@ -230,6 +257,7 @@ func (s *Loop) Tick() {
 				s.registered = true
 				s.failCount = 0
 				s.lastLeaderAddr = leaderAddr
+				s.publishLeader(leaderAddr)
 			}
 			return
 		}
@@ -247,6 +275,7 @@ func (s *Loop) Tick() {
 		} else {
 			s.failCount = 0
 			s.lastLeaderAddr = leaderAddr
+			s.publishLeader(leaderAddr)
 		}
 	} else {
 		// No leader known

@@ -143,7 +143,6 @@ func Run(ctx context.Context, o Options) error {
 			s3.Endpoint, s3.Bucket, cfg.Cluster.Name)
 	}
 	disc := discovery.New(backend, cfg.Node.IP, cfg.Node.Port+1000, cfg.Timeouts.LeaderLease)
-	ag.SetLeaderFunc(disc.GetLeader)
 
 	// De agent (state-loop + agent-API) moet draaien vóór registratie:
 	// RegisterAgent reconciliet en dat bevraagt de agent-state.
@@ -206,6 +205,9 @@ func Run(ctx context.Context, o Options) error {
 	// een verse cluster) = meteen leader — geen 30s takeover-drempel voor de
 	// init-desktop; lock bezet = tick 1 registreert bij de zittende leader.
 	loop.BecomeLeaderNow()
+	// Cluster calls on the agent API proxy to the leader the loop knows —
+	// never a lock-store read per request (Bunny: seconds per GET).
+	ag.SetLeaderFunc(loop.LeaderAddr)
 	go loop.Run(ctx.Done(), 10*time.Second)
 
 	return <-runErr

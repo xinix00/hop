@@ -470,3 +470,48 @@ func TestTick_SelfHeartbeatTransportFout_AlleenTellen(t *testing.T) {
 		t.Errorf("selfBeatFails = %d, wil 2", loop.selfBeatFails)
 	}
 }
+
+// LeaderAddr is what the agent API proxies to. It must follow the loop's own
+// knowledge — never a lock-store read per request.
+func TestLeaderAddrFollowsTheLoop(t *testing.T) {
+	disc := &mockDiscoverer{leader: "leader:9080"}
+	loop := newTestLoop(disc, &mockAgent{})
+	if got := loop.LeaderAddr(); got != "" {
+		t.Fatalf("before first tick LeaderAddr() = %q, want empty", got)
+	}
+
+	loop.Tick() // discovers leader:9080 and registers there
+	if got := loop.LeaderAddr(); got != "leader:9080" {
+		t.Fatalf("after register LeaderAddr() = %q, want leader:9080", got)
+	}
+
+	// The leader forgot us: re-discovery is forced, but the published
+	// address stays — it is still the same leader.
+	loop.DoHeartbeat = errHeartbeat(ErrNotRegistered)
+	loop.Tick()
+	if got := loop.LeaderAddr(); got != "leader:9080" {
+		t.Fatalf("after not-registered LeaderAddr() = %q, want leader:9080", got)
+	}
+
+	// Leader unreachable for 4 ticks → takeover attempt clears it, and a
+	// successful takeover publishes our own leader API.
+	loop.DoHeartbeat = errHeartbeat(errors.New("connection refused"))
+	loop.DoRegister = errRegister(errors.New("connection refused"))
+	disc.becomeLeaderOK = false
+	for i := 0; i < 4; i++ {
+		loop.Tick()
+	}
+	if got := loop.LeaderAddr(); got != "" {
+		t.Fatalf("after leader lost LeaderAddr() = %q, want empty", got)
+	}
+	disc.becomeLeaderOK = true
+	loop.Tick()
+	if got := loop.LeaderAddr(); got != "127.0.0.1:9080" {
+		t.Fatalf("as leader LeaderAddr() = %q, want 127.0.0.1:9080", got)
+	}
+
+	loop.stepDown(true)
+	if got := loop.LeaderAddr(); got != "" {
+		t.Fatalf("after step-down LeaderAddr() = %q, want empty", got)
+	}
+}
