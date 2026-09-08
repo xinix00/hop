@@ -198,3 +198,21 @@ func (c *fakeClock) Now() time.Time { return c.now }
 
 // Ensure compile-time that hoplock errors are still in scope.
 var _ = hoplock.ErrNoLease
+
+func TestBackendTimeoutScalesWithLease(t *testing.T) {
+	cases := []struct {
+		ttl, want time.Duration
+	}{
+		{30 * time.Second, 10 * time.Second},  // default lease: a third
+		{15 * time.Second, 5 * time.Second},   // floor, never below 5s
+		{120 * time.Second, 40 * time.Second}, // slow store: a third of the lease
+	}
+	for _, c := range cases {
+		if got := backendTimeoutFor(c.ttl); got != c.want {
+			t.Errorf("backendTimeoutFor(%v) = %v, want %v", c.ttl, got, c.want)
+		}
+	}
+	if d := New(mem.New(), "10.0.0.1", 8080, 120*time.Second); d.timeout != 40*time.Second {
+		t.Errorf("New: timeout = %v, want 40s", d.timeout)
+	}
+}

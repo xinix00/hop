@@ -85,12 +85,13 @@ type Leader struct {
 
 	ops chan func(*leaderState) // all state access goes through here
 
-	httpClient   *httputil.Client
-	deleteClient *httputil.Client
-	agentTimeout time.Duration
-	settleDelay  time.Duration // wait before first reconciliation (0 = settled immediately)
-	eventBus     *EventBus
-	apiKey       string
+	httpClient     *httputil.Client
+	deleteClient   *httputil.Client
+	agentTimeout   time.Duration
+	persistTimeout time.Duration // 0 = defaultPersistTimeout; see SetLeaseTTL
+	settleDelay    time.Duration // wait before first reconciliation (0 = settled immediately)
+	eventBus       *EventBus
+	apiKey         string
 
 	// Committed cluster state (persist.go): extern gecommitte gewenste
 	// staat, met de leader als enige auteur. nil = geen persistentie

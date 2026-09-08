@@ -44,6 +44,7 @@ func BecomeLeader(ctx context.Context, cfg *config.Config, host LeaderHost, vers
 	if settle {
 		l.EnableSettle()
 	}
+	l.SetLeaseTTL(cfg.Timeouts.LeaderLease)
 
 	// Gecommitte clusterstaat: de leader commit zijn gewenste staat naast de
 	// lease en een verse leader laadt hem terug — failover zonder

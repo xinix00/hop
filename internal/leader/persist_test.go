@@ -137,3 +137,18 @@ func TestCommittedState_BootLoad(t *testing.T) {
 		t.Fatalf("schone boot hoort leeg te zijn, kreeg %d jobs", len(jobs))
 	}
 }
+
+func TestCommitTimeoutIsHalfTheLease(t *testing.T) {
+	l := New("n1", nil, nil)
+	if got := l.commitTimeout(); got != defaultPersistTimeout {
+		t.Fatalf("default = %v, want %v", got, defaultPersistTimeout)
+	}
+	l.SetLeaseTTL(120 * time.Second)
+	if got := l.commitTimeout(); got != 60*time.Second {
+		t.Fatalf("after SetLeaseTTL(120s) = %v, want 60s", got)
+	}
+	l.SetLeaseTTL(0) // no TTL wired: keep what we have
+	if got := l.commitTimeout(); got != 60*time.Second {
+		t.Fatalf("after SetLeaseTTL(0) = %v, want 60s", got)
+	}
+}

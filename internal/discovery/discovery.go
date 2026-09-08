@@ -25,7 +25,24 @@ import (
 	"github.com/xinix00/hop/pkg/config"
 )
 
-const backendTimeout = 5 * time.Second
+// minBackendTimeout is the floor for one lock-store round-trip. The actual
+// per-call budget scales with the lease: see backendTimeoutFor.
+const minBackendTimeout = 5 * time.Second
+
+// backendTimeoutFor returns the per-call timeout for a lease of the given
+// TTL: a third of the lease, never under minBackendTimeout. A renew is a
+// Read plus a conditional Write; on a slow object store (Bunny Storage was
+// measured at 4–20 s per PUT, 2026-09-08) a fixed 5 s made every renew and
+// takeover time out, so the cluster lost its leader as soon as the lease
+// expired. Tying the budget to the TTL lets an operator absorb a slow store
+// by raising timeouts.leader_lease alone: with a 120 s lease each call may
+// take 40 s and still leaves two more ticks before expiry.
+func backendTimeoutFor(ttl time.Duration) time.Duration {
+	if t := ttl / 3; t > minBackendTimeout {
+		return t
+	}
+	return minBackendTimeout
+}
 
 // Discovery is the leader-election handle used by the agent main loop. It
 // is safe to call from multiple goroutines.
@@ -33,6 +50,7 @@ type Discovery struct {
 	backend hoplock.Backend
 	owner   string
 	ttl     time.Duration
+	timeout time.Duration // per backend call, derived from ttl
 	now     func() time.Time
 
 	mu     sync.Mutex
@@ -47,6 +65,7 @@ func New(backend hoplock.Backend, nodeIP string, nodePort int, ttl time.Duration
 		backend: backend,
 		owner:   fmt.Sprintf("%s:%d", nodeIP, nodePort),
 		ttl:     ttl,
+		timeout: backendTimeoutFor(ttl),
 		now:     time.Now,
 	}
 }
@@ -278,7 +297,7 @@ func (d *Discovery) GetLeader() string {
 	if d.backend == nil {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), backendTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 	defer cancel()
 	state, _, err := d.backend.Read(ctx)
 	if err != nil {
@@ -316,7 +335,7 @@ func (d *Discovery) TryBecomeLeader() bool {
 	if d.backend == nil {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), backendTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 	defer cancel()
 	return d.tryClaim(ctx) == nil
 }
@@ -333,7 +352,7 @@ func (d *Discovery) RenewLease() (renewed, displaced bool) {
 	if d.backend == nil {
 		return false, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), backendTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 	defer cancel()
 	err := d.tryClaim(ctx)
 	if err == nil {
@@ -355,7 +374,7 @@ func (d *Discovery) ReleaseLeadership() {
 	if handle == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), backendTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 	defer cancel()
 	_ = d.backend.Delete(ctx, handle)
 }

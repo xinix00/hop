@@ -134,7 +134,7 @@ func (l *Leader) persistLoop(ctx context.Context) {
 			log.Printf("state commit: marshal: %v", err)
 			continue
 		}
-		sctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		sctx, cancel := context.WithTimeout(ctx, l.commitTimeout())
 		err = l.persister.Save(sctx, snapshot)
 		cancel()
 		if err != nil {
@@ -144,6 +144,32 @@ func (l *Leader) persistLoop(ctx context.Context) {
 			l.markStateDirty()
 		}
 	}
+}
+
+// defaultPersistTimeout bounds one state PUT when no lease TTL was wired
+// (tests, standalone). With a TTL it is half the lease — see
+// SetLeaseTTL — so the same slow store that gets a longer lock budget
+// (discovery.backendTimeoutFor) also gets a longer commit budget: the two
+// hit the same bucket. Half of the default 30 s lease is the 15 s this
+// constant always was.
+const defaultPersistTimeout = 15 * time.Second
+
+// SetLeaseTTL derives the state-commit timeout from the leader lease: half
+// of it. The snapshot is tens of kilobytes and a slow object store (Bunny:
+// 4–20 s per PUT, measured 2026-09-08) blew a fixed 15 s, after which the
+// state was only retried on the NEXT job change — a failover in between
+// would have started from an empty store.
+func (l *Leader) SetLeaseTTL(ttl time.Duration) {
+	if ttl > 0 {
+		l.persistTimeout = ttl / 2
+	}
+}
+
+func (l *Leader) commitTimeout() time.Duration {
+	if l.persistTimeout > 0 {
+		return l.persistTimeout
+	}
+	return defaultPersistTimeout
 }
 
 // dirtyTrackingStore decorates a JobStore so every mutation marks the
