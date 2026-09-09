@@ -29,12 +29,15 @@ func (g *gate) count() int { g.mu.Lock(); defer g.mu.Unlock(); return g.calls }
 type slowDiscoverer struct {
 	read, claim, renew, rel *gate
 	leader                  string
+	storeOK                 bool
 	claimOK                 bool
 	renewOK, displaced      bool
 }
 
+func (d *slowDiscoverer) LeaderState() (string, bool) { d.read.wait(); return d.leader, d.storeOK }
+
 func newSlowDiscoverer() *slowDiscoverer {
-	return &slowDiscoverer{read: newGate(), claim: newGate(), renew: newGate(), rel: newGate()}
+	return &slowDiscoverer{read: newGate(), claim: newGate(), renew: newGate(), rel: newGate(), storeOK: true}
 }
 
 func (d *slowDiscoverer) GetLeader() string        { d.read.wait(); return d.leader }
@@ -224,4 +227,26 @@ func TestAsyncInvalidateForcesARead(t *testing.T) {
 	eventually(t, "second read", func() bool { return d.read.count() == 2 })
 	d.read.release <- struct{}{}
 	eventually(t, "fresh answer", func() bool { a.GetLeader(); return d.read.count() == 2 && a.GetLeader() == "" })
+}
+
+// StoreReachable follows the last read: false before any read, false when
+// the store did not answer, true when it did (even with no leader).
+func TestAsyncStoreReachableFollowsTheRead(t *testing.T) {
+	d := newSlowDiscoverer()
+	d.leader, d.storeOK = "", false
+	a, _ := newAsync(t, d, 30*time.Second, time.Hour)
+	if a.StoreReachable() {
+		t.Fatal("reachable before any read")
+	}
+	a.GetLeader()
+	d.read.release <- struct{}{}
+	eventually(t, "read done", func() bool { return d.read.count() == 1 && !a.reading() })
+	if a.StoreReachable() {
+		t.Fatal("reachable although the store did not answer")
+	}
+	a.Invalidate()
+	d.storeOK = true
+	a.GetLeader()
+	d.read.release <- struct{}{}
+	eventually(t, "store answers", func() bool { return a.StoreReachable() })
 }

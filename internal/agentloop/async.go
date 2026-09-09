@@ -34,6 +34,7 @@ type electState struct {
 	// answer older than ttl is stale: the lease it described has expired.
 	leader   string
 	leaderAt time.Time
+	storeOK  bool // the last read got an answer from the store
 	reading  bool
 
 	// Our own lease.
@@ -115,11 +116,32 @@ func (a *AsyncDiscoverer) Invalidate() {
 }
 
 func (a *AsyncDiscoverer) readWorker() {
-	leader := a.inner.GetLeader()
+	leader, storeOK := "", true
+	if ls, ok := a.inner.(interface{ LeaderState() (string, bool) }); ok {
+		leader, storeOK = ls.LeaderState()
+	} else {
+		leader = a.inner.GetLeader()
+	}
 	a.do(func(st *electState) {
 		st.reading = false
-		st.leader, st.leaderAt = leader, a.now()
+		st.leader, st.leaderAt, st.storeOK = leader, a.now(), storeOK
 	})
+}
+
+// reading reports whether a leader read is in flight (tests).
+func (a *AsyncDiscoverer) reading() bool {
+	var r bool
+	a.query(func(st *electState) { r = st.reading })
+	return r
+}
+
+// StoreReachable reports whether the last leader read got an answer from
+// the store. With GetLeader() == "" it separates "nobody leads" (true) from
+// "we cannot tell" (false) — the fail-safe in the loop hangs on that.
+func (a *AsyncDiscoverer) StoreReachable() bool {
+	var ok bool
+	a.query(func(st *electState) { ok = !st.leaderAt.IsZero() && st.storeOK })
+	return ok
 }
 
 // TryBecomeLeader reports true once for every background claim that

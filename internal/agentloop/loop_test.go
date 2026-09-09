@@ -14,6 +14,7 @@ import (
 
 type mockDiscoverer struct {
 	leader                 string
+	storeDown              bool // GetLeader()=="" because the store is out, not because nobody leads
 	becomeLeaderOK         bool
 	renewLeaseOK           bool
 	renewLeaseDisplaced    bool
@@ -22,7 +23,8 @@ type mockDiscoverer struct {
 	onRelease              func()
 }
 
-func (m *mockDiscoverer) GetLeader() string { return m.leader }
+func (m *mockDiscoverer) GetLeader() string    { return m.leader }
+func (m *mockDiscoverer) StoreReachable() bool { return !m.storeDown }
 func (m *mockDiscoverer) RenewLease() (bool, bool) {
 	return m.renewLeaseOK, m.renewLeaseDisplaced
 }
@@ -258,11 +260,19 @@ func TestTick_HeartbeatNotRegistered_Reregisters(t *testing.T) {
 	if loop.failCount != 0 {
 		t.Errorf("failCount = %d, want 0 (no failure counted for 404)", loop.failCount)
 	}
-	if loop.lastLeaderAddr != "" {
-		t.Errorf("lastLeaderAddr = %q, want empty (force re-discovery)", loop.lastLeaderAddr)
+	if loop.lastLeaderAddr != "leader:9080" {
+		t.Errorf("lastLeaderAddr = %q, want the known leader kept (re-register there, no store read)", loop.lastLeaderAddr)
 	}
 	if disc.tryBecomeLeaderCalls != 0 {
 		t.Errorf("TryBecomeLeader calls = %d, want 0 (just re-register)", disc.tryBecomeLeaderCalls)
+	}
+	// Next tick re-registers at the same address without asking the store.
+	registeredAt := ""
+	loop.DoRegister = func(addr, _, _ string, _ map[string]int, _ string) error { registeredAt = addr; return nil }
+	loop.DoHeartbeat = okHeartbeat()
+	loop.Tick()
+	if registeredAt != "leader:9080" || !loop.registered {
+		t.Fatalf("re-register went to %q (registered=%v), want leader:9080", registeredAt, loop.registered)
 	}
 }
 
@@ -561,5 +571,28 @@ func TestTick_LeaderGoneFromStore_NeverStopsTasks(t *testing.T) {
 
 	if ag.stopAllCalls != 0 {
 		t.Fatalf("StopAllTasks called %d time(s) while the store reported no leader", ag.stopAllCalls)
+	}
+}
+
+// Store AND leader unreachable: we cannot tell whether we are the isolated
+// party, so the fail-safe stays: stop after 7 ticks (as it always did).
+func TestTick_LeaderAndStoreUnreachable_StopsTasks(t *testing.T) {
+	disc := &mockDiscoverer{leader: "leader:9080"}
+	ag := &mockAgent{id: "a1"}
+	loop := newTestLoop(disc, ag)
+	loop.registered = true
+	loop.lastLeaderAddr = "leader:9080"
+	loop.DoHeartbeat = errHeartbeat(errors.New("connection refused"))
+	loop.DoRegister = errRegister(errors.New("connection refused"))
+
+	for i := range 12 {
+		if i == 3 {
+			disc.leader, disc.storeDown = "", true // the store went dark too
+		}
+		loop.Tick()
+	}
+
+	if ag.stopAllCalls == 0 {
+		t.Fatal("fail-safe did not stop tasks with leader and store both unreachable")
 	}
 }

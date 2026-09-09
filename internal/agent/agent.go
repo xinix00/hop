@@ -601,6 +601,22 @@ func (a *Agent) SetJobPriority(name string, priority int) bool {
 	})
 }
 
+// keepRolloutFlag makes a job received from the leader carry the store's
+// CURRENT Deploying flag, not the one in the payload. Deploying has one
+// author, the leader's Update; on the leader node the agent's store IS the
+// leader's job store, so a dispatch to ourselves that stored the payload
+// as-is wrote "deploying" back over the "done" the update had just set
+// (traqqr 2026-09-08: server02 and cloudflared stayed deploying after every
+// rollout that ended in a self-dispatch or a reconcile). On a follower the
+// flag means nothing, and stays false.
+func keepRolloutFlag(s *agentState, job *types.Job) {
+	if cur, ok := s.jobs[job.Name]; ok && cur != nil {
+		job.Deploying = cur.Deploying
+		return
+	}
+	job.Deploying = false
+}
+
 // SetJobDeploying rewrites only the Deploying flag of a stored job (JobStore
 // interface); copy-on-write like SetJobPriority.
 func (a *Agent) SetJobDeploying(name string, deploying bool) bool {

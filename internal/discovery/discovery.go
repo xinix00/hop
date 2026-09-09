@@ -53,8 +53,9 @@ type Discovery struct {
 	timeout time.Duration // per backend call, derived from ttl
 	now     func() time.Time
 
-	mu     sync.Mutex
-	handle string
+	mu         sync.Mutex
+	handle     string
+	generation int64 // of the lease we hold, for a renew without a read
 }
 
 // New returns a Discovery bound to backend. The owner string is the
@@ -299,19 +300,32 @@ func (d *Discovery) NodeAddr() string { return d.owner }
 // GetLeader returns the current leader address, or "" if there is no
 // active lease or the backend cannot be reached.
 func (d *Discovery) GetLeader() string {
+	leader, _ := d.LeaderState()
+	return leader
+}
+
+// LeaderState is GetLeader plus whether the store actually answered. The
+// two empty answers mean opposite things to an agent that lost its leader:
+// "the store says nobody leads" (nobody re-places our tasks; keep them) and
+// "the store is unreachable" (we may be the isolated one; the fail-safe
+// applies). A nil backend counts as answered: standalone has no store.
+func (d *Discovery) LeaderState() (leader string, storeOK bool) {
 	if d.backend == nil {
-		return ""
+		return "", true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 	defer cancel()
 	state, _, err := d.backend.Read(ctx)
-	if err != nil {
-		return ""
+	switch {
+	case errors.Is(err, hoplock.ErrNoLease):
+		return "", true
+	case err != nil:
+		return "", false
 	}
 	if d.now().After(state.ExpiresAt) {
-		return ""
+		return "", true
 	}
-	return state.Owner
+	return state.Owner, true
 }
 
 // tryClaim performs one acquire/renew attempt. A nil error means we now hold
@@ -359,7 +373,19 @@ func (d *Discovery) RenewLease() (renewed, displaced bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 	defer cancel()
-	err := d.tryClaim(ctx)
+	// Renew on the handle we hold — one conditional PUT, no read. The CAS
+	// is the proof: if anyone else wrote the lease since, the store says
+	// 412 and we are displaced. Keeps the leader's store traffic to a
+	// single call per renew (Bunny: every call costs seconds).
+	d.mu.Lock()
+	handle, gen := d.handle, d.generation
+	d.mu.Unlock()
+	var err error
+	if handle != "" {
+		err = d.refresh(ctx, handle, gen)
+	} else {
+		err = d.tryClaim(ctx) // no handle yet (fresh process): the full path
+	}
 	if err == nil {
 		return true, false
 	}
@@ -403,7 +429,7 @@ func (d *Discovery) refresh(ctx context.Context, prevHandle string, gen int64) e
 		return err
 	}
 	d.mu.Lock()
-	d.handle = newHandle
+	d.handle, d.generation = newHandle, gen
 	d.mu.Unlock()
 	return nil
 }

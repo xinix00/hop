@@ -200,7 +200,7 @@ func (s *Loop) leaderFailed(format string, args ...any) {
 		s.tryTakeOver("Leader unreachable")
 	}
 	if s.failCount >= 7 {
-		if s.Disc.GetLeader() == "" {
+		if s.storeSaysNoLeader() {
 			log.Println("Leader unreachable but the lock store reports no live leader: keeping tasks running")
 			s.failCount = 4
 			return
@@ -211,9 +211,21 @@ func (s *Loop) leaderFailed(format string, args ...any) {
 	}
 }
 
-// noLeader: the store reports no live leader (election in progress, lease
-// lapsed, or the store itself is out). Nothing can be duplicating our tasks,
-// so they keep running; we only keep trying to take over.
+// storeSaysNoLeader is the one answer that makes losing the leader safe:
+// the store answered, and nobody holds a live lease. Then nobody re-places
+// our tasks and keeping them is right. An unreachable store is NOT that
+// answer — we may be the isolated one — so the fail-safe stays on.
+func (s *Loop) storeSaysNoLeader() bool {
+	if s.Disc.GetLeader() != "" {
+		return false
+	}
+	r, ok := s.Disc.(interface{ StoreReachable() bool })
+	return ok && r.StoreReachable()
+}
+
+// noLeader: the store answered that no live leader exists (election in
+// progress, lease lapsed). Nothing can be duplicating our tasks, so they
+// keep running; we only keep trying to take over.
 func (s *Loop) noLeader() {
 	s.failCount++
 	log.Printf("No leader found (%d)", s.failCount)
@@ -316,9 +328,11 @@ func (s *Loop) Tick() {
 		err := s.DoHeartbeat(leaderAddr, s.Ag.ID(), s.Ag.Endpoint(), s.Cfg.APIKey)
 		if err != nil {
 			if errors.Is(err, ErrNotRegistered) {
-				log.Printf("Not registered with leader, will re-register...")
+				// The leader forgot us (it restarted); it is still the
+				// leader, so re-register at the same address next tick —
+				// no trip to the lock store to rediscover what we know.
+				log.Printf("Not registered with leader %s, will re-register...", leaderAddr)
 				s.registered = false
-				s.lastLeaderAddr = ""
 			} else {
 				s.leaderFailed("Heartbeat failed (%d): %v", s.failCount+1, err)
 			}
@@ -328,8 +342,13 @@ func (s *Loop) Tick() {
 			s.publishLeader(leaderAddr)
 		}
 	} else {
-		// No leader known
-		s.noLeader()
+		// No leader known: from the store's mouth, or because the store is
+		// out. Only the first is safe to sit out with tasks running.
+		if s.storeSaysNoLeader() {
+			s.noLeader()
+		} else {
+			s.leaderFailed("No leader found (%d), lock store unreachable", s.failCount+1)
+		}
 	}
 }
 

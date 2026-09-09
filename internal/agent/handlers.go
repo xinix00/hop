@@ -366,6 +366,7 @@ func (a *Agent) handleRun(w leanhttp.ResponseWriter, r *leanhttp.Request) {
 				}
 			}
 		}
+		keepRolloutFlag(s, &job)
 		s.jobs[job.Name] = &job
 		s.tasks[task.ID] = task
 		return true
@@ -546,6 +547,7 @@ func (a *Agent) startJob(job *types.Job, task *types.Task) error {
 		if task.State == types.TaskStopping {
 			return false
 		}
+		keepRolloutFlag(s, job)
 		s.jobs[job.Name] = job
 		return true
 	})
@@ -585,6 +587,7 @@ func (a *Agent) startJob(job *types.Job, task *types.Task) error {
 		if _, ok := s.jobs[job.Name]; !ok {
 			return false // job deleted mid-start → ghost: stop it again below
 		}
+		keepRolloutFlag(s, job)
 		s.jobs[job.Name] = job
 		// Een /stop die de start kruiste heeft de task op Stopping gezet — dan
 		// is dit een ghost. Anders is dit HET moment waarop de task echt

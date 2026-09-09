@@ -216,3 +216,58 @@ func TestBackendTimeoutScalesWithLease(t *testing.T) {
 		t.Errorf("New: timeout = %v, want 40s", d.timeout)
 	}
 }
+
+// LeaderState tells "nobody leads" from "cannot tell": the loop keeps tasks
+// only on the first.
+func TestLeaderStateSeparatesNoLeaderFromUnreachable(t *testing.T) {
+	if leader, ok := New(mem.New(), "10.0.0.1", 8080, 30*time.Second).LeaderState(); leader != "" || !ok {
+		t.Fatalf("empty store: (%q,%v), want (\"\", true)", leader, ok)
+	}
+	if leader, ok := New(errBackend{}, "10.0.0.1", 8080, 30*time.Second).LeaderState(); leader != "" || ok {
+		t.Fatalf("unreachable store: (%q,%v), want (\"\", false)", leader, ok)
+	}
+	if leader, ok := New(nil, "10.0.0.1", 8080, 30*time.Second).LeaderState(); leader != "" || !ok {
+		t.Fatalf("standalone: (%q,%v), want (\"\", true)", leader, ok)
+	}
+}
+
+// countingBackend counts store reads.
+type countingBackend struct {
+	hoplock.Backend
+	reads int
+}
+
+func (c *countingBackend) Read(ctx context.Context) (*hoplock.State, string, error) {
+	c.reads++
+	return c.Backend.Read(ctx)
+}
+
+// A renew is one conditional write on the handle we hold — no read.
+func TestRenewLeaseDoesNotRead(t *testing.T) {
+	be := &countingBackend{Backend: mem.New()}
+	d := New(be, "10.0.0.1", 8080, 30*time.Second)
+	if !d.TryBecomeLeader() {
+		t.Fatal("acquire")
+	}
+	before := be.reads
+	for i := 0; i < 3; i++ {
+		if renewed, displaced := d.RenewLease(); !renewed || displaced {
+			t.Fatalf("renew %d = (%v,%v)", i, renewed, displaced)
+		}
+	}
+	if be.reads != before {
+		t.Fatalf("renews read the store %d time(s); want 0", be.reads-before)
+	}
+	// Someone else took the lease: the CAS says so, no read needed either.
+	other := New(be, "10.0.0.2", 8080, 30*time.Second)
+	d.ReleaseLeadership()
+	if !other.TryBecomeLeader() {
+		t.Fatal("other should acquire after release")
+	}
+	d.mu.Lock()
+	d.handle = "stale" // pretend we still think we hold it
+	d.mu.Unlock()
+	if renewed, displaced := d.RenewLease(); renewed || !displaced {
+		t.Fatalf("renew with a stale handle = (%v,%v), want displaced", renewed, displaced)
+	}
+}
