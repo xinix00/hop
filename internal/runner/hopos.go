@@ -14,7 +14,8 @@ import (
 )
 
 // HopRunner runs tasks on HopOS: each task is a native Go image started on a
-// dedicated CPU core (a "slot") with its own memory partition. HopOS enforces
+// cage (a "slot") with its own memory partition. HopOS assigns physical cores
+// separately, dedicated or shared. It enforces
 // isolation and MemoryLimit in hardware, so — like DockerRunner and unlike
 // ExecRunner — this runner only passes image + env + limits along and does no
 // isolation plumbing of its own.
@@ -101,7 +102,7 @@ func NewHopRunner(sm hopos.SlotManager, nodeAttrs map[string]string) *HopRunner 
 }
 
 // Run loads the job's artifact (the native app image) and starts it on a free
-// slot. The slot number is recorded as task.Pid ("process id" = core index).
+// cage. The cage number is recorded as task.Pid; it is not a core index.
 //
 // Whatever goes wrong on the way lands in THIS task's log (see runLogged): on a
 // node there is no console to fall back on, and a start that fails has no app
@@ -159,44 +160,29 @@ func (r *HopRunner) run(job *types.Job, task *types.Task) error {
 	}
 
 	// cores = CPUShares/1024 (Docker/Nomad-conventie: 1024 shares = 1 core),
-	// minimaal 1. Met cores > 1 draait de app SMP op één primair slot plus de
-	// volgende cores-1 cores (gedeelde heap); HopOS brengt die transparant op.
+	// minimaal 1. An SMP app owns one cage with multiple physical cores;
+	// HopOS selects those cores independently of the cage number.
 	cores := job.CPUShares / 1024
 	if cores < 1 {
 		cores = 1
 	}
 
-	// Sharegroup (tag): coöperatieve core-deling op HopOS. Zonder de tag is elke
-	// app een eigen SMP-eenheid die `cores` aaneengesloten cores dedicated pakt
-	// (het bestaande gedrag). Mét de tag deelt de app een POOL van `cores` hele
-	// cores met gelijk-getagde apps: dan reserveren we hier maar één kooi (HopOS
-	// stapelt ze op de pool), draait de app zelf op één core, en is `cores` de
-	// poolgrootte. Andere drivers (exec/docker) negeren de tag.
+	// Every app owns one cage. Without a sharegroup it gets dedicated cores;
+	// with a sharegroup it runs on one core within a pool shared by apps with
+	// the same tag. In that case CPUShares specifies the pool's core count.
 	sharegroup := job.Tags["sharegroup"]
-	appCores, poolCores, allocCages := cores, 1, cores
+	appCores, poolCores := cores, 1
 	if sharegroup != "" {
-		appCores, poolCores, allocCages = 1, cores, 1
+		appCores, poolCores = 1, cores
 	}
 
-	// Kooi EERST alloceren, dán pas downloaden: op een volle node reject dit
-	// meteen (geen vrije kooi) zonder één byte te trekken. Zo kan een storm
-	// van jobs nooit meer images tegelijk laten downloaden dan er kooien zijn
-	// — en met StartStream landt elke download rechtstreeks in de eigen
-	// partitie i.p.v. de HOP-kern (geen core-0-OOM meer, gemeten 14-07).
+	// Reserve one cage before starting the stream. HopOS independently checks
+	// and reserves the requested physical cores and memory.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	r.mu.Lock()
-	slot, err := r.allocateSlotLocked(job.Tags["core-class"], allocCages, sharegroup != "")
-	if err != nil {
-		r.mu.Unlock()
-		cancel()
-		return err
-	}
-	// De kooi(en) van deze app als bezet vastleggen (SMP: primair + secundairen;
-	// sharegroup: één kooi — de pool-cores beheert HopOS, niet HOP's kooi-tabel).
-	for c := slot; c < slot+allocCages; c++ {
-		r.inUse[c] = task.ID
-	}
+	slot := r.allocateSlotLocked()
+	r.inUse[slot] = task.ID
 	r.slots[task.ID] = slot
 	r.cancels[task.ID] = cancel
 	r.dones[task.ID] = done
@@ -404,61 +390,17 @@ func (r *HopRunner) GetStderr(taskID string) *LogBroadcaster { return r.logs.std
 // partition, and after a node reboot all cores are off by construction.
 func (r *HopRunner) Cleanup() error { return nil }
 
-// allocateSlotLocked finds a run of `cores` contiguous free slots (each
-// honoring an optional core-class tag) and returns the first (the primary).
-// For cores == 1 this is just the first free slot; for an SMP app the run is
-// the primary plus its secondary cores. Caller holds r.mu.
-func (r *HopRunner) allocateSlotLocked(coreClass string, cores int, shared bool) (int, error) {
-	// Shared cage IDs live above the physical range, leaving low IDs available
-	// for SMP (whose primary cage must equal its primary core). Core class is
-	// checked by the node against physical pool cores, never these cage IDs.
-	first, limit := 1, -1
-	if shared {
-		first = r.sm.NumCores() + 1
-	} else if coreClass != "" || cores > 1 {
-		limit = r.sm.NumCores()
+// allocateSlotLocked returns the first free cage. Core placement belongs to
+// HopOS, including class selection, SMP and sharegroups. Caller holds r.mu.
+func (r *HopRunner) allocateSlotLocked() int {
+	for slot := 1; ; slot++ {
+		// Reserve starts still in flight, and ask the node about residents
+		// that survived a kernel flip before this runner was reconstructed.
+		if _, busy := r.inUse[slot]; busy || r.sm.Status(slot).CoreOn {
+			continue
+		}
+		return slot
 	}
-	for slot := first; limit < 0 || slot+cores-1 <= limit; slot++ {
-		if !shared && slot+cores-1 <= r.sm.NumCores() {
-			if placement, ok := r.sm.(hopos.DedicatedPlacement); ok && !placement.CanPlaceDedicated(slot, cores) {
-				continue
-			}
-		}
-		ok := true
-		for c := slot; c < slot+cores; c++ {
-			// Twee vragen, en maar één ervan is van ons. r.inUse is puur een
-			// RESERVERING voor starts die nog onderweg zijn (tussen deze
-			// toewijzing en StartStream weet de node nog van niets, en twee
-			// gelijktijdige dispatches mogen niet dezelfde kooi pakken).
-			// Wat er ECHT draait weet alleen HopOS, en dat vragen we hem —
-			// in plaats van een eigen kopie bij te houden die kan afdrijven.
-			//
-			// Dat afdrijven is geen theorie: na een kern-flip adopteert de
-			// nieuwe kern de bewoners en krijgt de agent zijn taken terug,
-			// maar deze map is dan een verse map in geheugen. Hij deelde
-			// vrolijk kooi 1 opnieuw uit terwijl welcome erin draaide, en de
-			// node weigerde dat terecht met "slot 1 still live" (GEMETEN
-			// 02-09, M4, eerste job ná een geslaagde flip). Derek: "als HopOS
-			// het weet en HOP weet wat er draait, waarom is er dan nog een
-			// derde afhankelijkheid?"
-			if _, busy := r.inUse[c]; busy {
-				ok = false
-				break
-			}
-			if r.sm.Status(c).CoreOn {
-				ok = false
-				break
-			}
-			if !shared && coreClass != "" && r.sm.CoreClass(c) != coreClass {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			return slot, nil
-		}
-	}
-	return 0, fmt.Errorf("%w: hop driver: no %d contiguous free %q cores", ErrNoCapacity, cores, coreClass)
 }
 
 // AdoptRunning draagt de kooien van al-draaiende taken over aan deze runner:
@@ -474,9 +416,8 @@ func (r *HopRunner) allocateSlotLocked(coreClass string, cores int, shared bool)
 // kooi straks stoppen. Idempotent; het pakt nooit een kooi af die deze runner
 // zelf al uitdeelde.
 //
-// slots is task-ID → kooinummer (types.Task.Pid, door de node gevuld); cores
-// hoeveel kooien die taak houdt (SMP-apps houden er meer).
-func (r *HopRunner) AdoptRunning(slots map[string]int, cores map[string]int) {
+// slots maps task IDs to their single cage (types.Task.Pid), also for SMP.
+func (r *HopRunner) AdoptRunning(slots map[string]int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for id, slot := range slots {
@@ -486,16 +427,11 @@ func (r *HopRunner) AdoptRunning(slots map[string]int, cores map[string]int) {
 		if _, known := r.slots[id]; known {
 			continue
 		}
-		n := cores[id]
-		if n < 1 {
-			n = 1
+		if _, busy := r.inUse[slot]; busy {
+			continue
 		}
 		r.slots[id] = slot
-		for c := slot; c < slot+n; c++ {
-			if _, busy := r.inUse[c]; !busy {
-				r.inUse[c] = id
-			}
-		}
+		r.inUse[slot] = id
 		// The old kernel's log pump and broadcasters did not survive the
 		// flip. Reconnect the adopted task to its existing slot log stream.
 		stdout, stderr := r.logs.newPair()
@@ -515,7 +451,7 @@ func (r *HopRunner) release(taskID string) {
 	if cancel := r.cancels[taskID]; cancel != nil {
 		cancel()
 	}
-	// Free every core held by this task (an SMP app holds several).
+	// Release the cage; HopOS releases physical cores when their last resident stops.
 	for slot, id := range r.inUse {
 		if id == taskID {
 			delete(r.inUse, slot)

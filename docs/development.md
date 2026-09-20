@@ -152,3 +152,19 @@ bare-metal image. `github.com/google/uuid` was dropped because it dragged
 `database/sql/driver` in there for two ID calls, and `gopkg.in/yaml.v3` because
 its package `init` linked the whole `regexp` engine into a kernel that never
 parses a config file.
+
+
+### Streamed artifact idle timeout
+
+The HopOS download path writes the artifact directly into its app partition. Its 60-second idle timeout is refreshed by every successful read, independently of batched task-progress updates. A slow stream can take longer than 60 seconds overall; a stream that stops delivering bytes is closed and its unstarted placement is released. Header waiting has a separate 60-second limit.
+
+`TestStreamIdleTracksBytesBelowProgressBatch` covers regular small reads that never reach a progress-report batch before the idle deadline, followed by genuine silence. This prevents progress-display throttling from becoming a transport deadline.
+
+### Cage identity and physical cores
+
+Every HopOS task owns one cage, including an SMP task. HOP reserves the first
+free cage and stores that cage number in the task's `Pid`. Cage numbers are
+independent of CPU numbers: six apps sharing one core can occupy cages 1–6.
+HopOS selects physical cores using the requested core count, class and
+sharegroup. Kernel FLIP adoption restores one cage reservation per task; stopping
+a task releases its cage, while HopOS releases cores when no residents remain.

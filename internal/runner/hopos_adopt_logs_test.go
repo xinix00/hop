@@ -15,14 +15,14 @@ func TestAdoptRunningRestoresLogs(t *testing.T) {
 	sm.slots[1] = &fakeSlot{coreOn: true, app: hopos.SlotReady, logs: lines}
 	r := NewHopRunner(sm, nil)
 	slots := map[string]int{"survivor": 1}
-	r.AdoptRunning(slots, nil)
+	r.AdoptRunning(slots)
 	stdout, stderr := r.GetStdout("survivor"), r.GetStderr("survivor")
 	if stdout == nil || stderr == nil {
 		t.Fatal("adopted task has no log endpoint")
 	}
 	ch := stdout.Subscribe()
 	defer stdout.Unsubscribe(ch)
-	r.AdoptRunning(slots, nil)
+	r.AdoptRunning(slots)
 	if r.GetStdout("survivor") != stdout || r.GetStderr("survivor") != stderr {
 		t.Fatal("repeated adoption replaced a live log stream")
 	}

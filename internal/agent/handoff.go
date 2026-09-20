@@ -110,9 +110,9 @@ func (a *Agent) Restore(b []byte) error {
 	// De kooien van de herstelde taken aan de runner overdragen: hij moet ze
 	// straks kunnen stoppen, en zijn eigen boekhouding is een verse map.
 	if ad, ok := a.hopRunner.(interface {
-		AdoptRunning(map[string]int, map[string]int)
+		AdoptRunning(map[string]int)
 	}); ok {
-		slots, cores := map[string]int{}, map[string]int{}
+		slots := map[string]int{}
 		for id, t := range h.Tasks {
 			// GEEN state-filter: aanwezigheid is de maat, nooit de state —
 			// een task die queued of failed staat houdt zijn kooi net zo goed
@@ -121,11 +121,8 @@ func (a *Agent) Restore(b []byte) error {
 				continue
 			}
 			slots[id] = t.Pid
-			if n := t.CPUShares / 1024; n > 1 {
-				cores[id] = n
-			}
 		}
-		ad.AdoptRunning(slots, cores)
+		ad.AdoptRunning(slots)
 	}
 	return nil
 }

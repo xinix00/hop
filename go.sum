@@ -4,3 +4,5 @@ github.com/xinix00/hoplockserver v0.2.1 h1:vLgv+iuuExaKgb90uwxMLavRMrlXRqLerihgF
 github.com/xinix00/hoplockserver v0.2.1/go.mod h1:HPVrFPGljcbxqIV8sIsa1W67hLI5vC7yG+z8W1k0nLg=
 github.com/xinix00/lean v1.1.1 h1:ACx7zTdk3XZzetryL/euj8LJpSLjsBK9xyqWmG/cBH8=
 github.com/xinix00/lean v1.1.1/go.mod h1:gRIa2nL/SIEsi1L/eq9EUqrKQ+jnjxUGb3IAsuVQX7U=
+github.com/xinix00/lean v1.2.0 h1:9guuzdOTOA0yqLV8tXlMPhY/Ny8QfPyeIN+Dj5LhK3Y=
+github.com/xinix00/lean v1.2.0/go.mod h1:gRIa2nL/SIEsi1L/eq9EUqrKQ+jnjxUGb3IAsuVQX7U=

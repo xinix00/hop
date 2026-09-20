@@ -129,11 +129,21 @@ func (r *HopRunner) runViaStream(ctx context.Context, cancel context.CancelFunc,
 	// Stilte-bewaking op de bodyfase + voortgang naar de agent.
 	stall := time.AfterFunc(downloadStallTimeout, func() { resp.Body.Close() })
 	defer stall.Stop()
+	var lastReport uint64
 	body := &meteredReader{
 		r:     resp.Body,
 		total: uint64(size),
 		tick: func(done, total uint64) {
 			stall.Reset(downloadStallTimeout)
+			// Idle tracks every read; UI reporting remains batched.
+			step := total / 100
+			if step < 256<<10 {
+				step = 256 << 10
+			}
+			if done-lastReport < step && done != total {
+				return
+			}
+			lastReport = done
 			if s := r.sink(); s != nil {
 				s.TaskDownloading(task.ID, done, total)
 			}
@@ -187,13 +197,11 @@ func (r *HopRunner) sink() ProgressSink {
 	return r.progress
 }
 
-// meteredReader telt de bytes en meldt ze gedoseerd: elke ~1% (met een vloer
-// van 256KB) plus de laatste byte — genoeg voor een levend voortgangsbeeld,
-// zonder per 64KB-blok de agent-state-loop te raken.
+// meteredReader reports every positive read so idle tracking sees actual
+// activity. The caller batches UI progress independently.
 type meteredReader struct {
 	r           io.Reader
 	done, total uint64
-	lastReport  uint64
 	tick        func(done, total uint64)
 }
 
@@ -201,14 +209,7 @@ func (m *meteredReader) Read(p []byte) (int, error) {
 	n, err := m.r.Read(p)
 	if n > 0 {
 		m.done += uint64(n)
-		step := m.total / 100
-		if step < 256<<10 {
-			step = 256 << 10
-		}
-		if m.done-m.lastReport >= step || m.done == m.total {
-			m.lastReport = m.done
-			m.tick(m.done, m.total)
-		}
+		m.tick(m.done, m.total)
 	}
 	return n, err
 }

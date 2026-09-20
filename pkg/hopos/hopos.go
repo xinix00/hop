@@ -64,12 +64,6 @@ type SlotStatus struct {
 	Cage string
 }
 
-// DedicatedPlacement reports whether a dedicated physical core run is free.
-// The node still confirms and reserves it in StartStream.
-type DedicatedPlacement interface {
-	CanPlaceDedicated(slot, cores int) bool
-}
-
 // StartSpec carries everything a one-phase start needs. It is the union of
 // what StartLoader and StartStaged each took, because a streaming start IS
 // both phases at once.
@@ -95,8 +89,8 @@ type SlotManager interface {
 	// its own hard ceiling, and HOP simply tries to place a job — the node
 	// accepts it or it doesn't.
 	NumCores() int
-	// CoreClass returns the core class of a slot ("big", "mid" or "small").
-	CoreClass(slot int) string
+	// CoreClass returns a physical core's class ("big", "mid" or "small").
+	CoreClass(core int) string
 	// StartStream is the one-phase start: the node streams the image from r
 	// STRAIGHT into the slot's partition — every byte lands on the address it
 	// will run from. No staged copy, so the partition only ever holds the app
