@@ -14,6 +14,12 @@
 //! de weigeringen `HOPOS_API_NO_AUTH`, `HOP_NET_FAIL`.
 //!
 //! Canoniek gelinkt (applib/link.ld via build.rs), zoals appspike.
+//!
+//! Op QEMU: `tools/qemu-test-hop.sh` in de HopOS-repo boot de kern met deze
+//! ELF in slot 1 (env, token, wandklok, poorten 8080 en 9080 doorgezet),
+//! stuurt van buiten een jobspec en eist appspike in slot 2 (29-09 groen).
+//! Wat daar nog niet is: hopfs (SaveState faalt met één regel,
+//! `HOP_STATE_SKIPPED`), health probes en S3.
 
 #![cfg_attr(target_os = "none", no_std, no_main)]
 
@@ -73,6 +79,29 @@ impl Block for Nested {
             self.0.step();
         }
     }
+}
+
+/// Geeft de core één ronde terug, zodat de executor wat er gespawnd is een eigen slot geeft.
+///
+/// Nodig vóór de eerste [`Nested`]-wacht na elke spawn. De executor van
+/// applib v3.0.0-alpha.3 zet een verse spawn in het eerste lege slot, en
+/// tijdens zijn eigen poll is het slot van de eigenaar-taak leeg: de ronde
+/// binnen `Nested` zette de RX-pomp van appnet daar neer, en zodra de
+/// eigenaar Pending gaf, overschreef de buitenste ronde hem. Gemeten 29-09
+/// op QEMU virt: de pomp stond na 14 timer-wekken stil, een SYN op :8080
+/// kreeg nooit antwoord. De executor in HopOS weigert dat slot sindsdien
+/// (`Slot::polling`); tot Hop een tag met die fix volgt, is dit de wacht.
+async fn settle() {
+    let mut yielded = false;
+    poll_fn(|cx| {
+        if yielded {
+            return Poll::Ready(());
+        }
+        yielded = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    })
+    .await;
 }
 
 /// Hoe lang een verbinding naar een artifact-server mag duren.
@@ -220,6 +249,8 @@ async fn resident(app: &'static App) {
             return;
         }
     };
+    // De RX-pomp is net gespawnd: eerst een slot voor hem (zie `settle`).
+    settle().await;
     let [a, b, c, d] = net.ip();
     let slot_ip = format!("{a}.{b}.{c}.{d}");
     let cfg = match BootConfig::from_env(|k| app.env(k).map(String::from), app.slot(), &slot_ip) {
@@ -267,6 +298,7 @@ async fn resident(app: &'static App) {
         log!("hop: cannot spawn the listeners: {e} HOP_SPAWN_FAIL");
         return;
     }
+    settle().await;
     log!(
         "hop: agent up node={} cluster={} agent=:{} leader=:{} cores={} HOP_UP",
         cfg.node_id,

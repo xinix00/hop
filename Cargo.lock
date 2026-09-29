@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "abi"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.2#cb41ff4c4e5718c29d836c64b6ba1ce17356fb89"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.3#3fe92527313e2be95b671df20a2786d08e202ff6"
 dependencies = [
  "bounded",
  "dev",
@@ -51,7 +51,7 @@ dependencies = [
 [[package]]
 name = "applib"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.2#cb41ff4c4e5718c29d836c64b6ba1ce17356fb89"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.3#3fe92527313e2be95b671df20a2786d08e202ff6"
 dependencies = [
  "abi",
  "bounded",
@@ -69,7 +69,7 @@ version = "3.0.0"
 [[package]]
 name = "bounded"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.2#cb41ff4c4e5718c29d836c64b6ba1ce17356fb89"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.3#3fe92527313e2be95b671df20a2786d08e202ff6"
 
 [[package]]
 name = "config"
@@ -81,7 +81,7 @@ dependencies = [
 [[package]]
 name = "dev"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.2#cb41ff4c4e5718c29d836c64b6ba1ce17356fb89"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.3#3fe92527313e2be95b671df20a2786d08e202ff6"
 
 [[package]]
 name = "discovery"
@@ -93,7 +93,7 @@ dependencies = [
 [[package]]
 name = "executor"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.2#cb41ff4c4e5718c29d836c64b6ba1ce17356fb89"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.3#3fe92527313e2be95b671df20a2786d08e202ff6"
 dependencies = [
  "dev",
  "sync",
@@ -140,7 +140,7 @@ source = "git+https://github.com/xinix00/lean.git?tag=v3.0.0#a7e089448c903fe199b
 [[package]]
 name = "netdev"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.2#cb41ff4c4e5718c29d836c64b6ba1ce17356fb89"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.3#3fe92527313e2be95b671df20a2786d08e202ff6"
 dependencies = [
  "sync",
 ]
@@ -155,7 +155,7 @@ dependencies = [
 [[package]]
 name = "sync"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.2#cb41ff4c4e5718c29d836c64b6ba1ce17356fb89"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.3#3fe92527313e2be95b671df20a2786d08e202ff6"
 
 [[package]]
 name = "types"
