@@ -100,8 +100,9 @@ impl SlotStatus {
 ///
 /// Op de draad (`START_SLOT`, abi `StartReq`) gaan `mem_limit`,
 /// `image_size`, `cores`, `pool_cores`, `core_class`, `sharegroup`, de env
-/// als `key=val\n`-blob en `job`. `mounts` en `ports` gaan nog niet mee:
-/// dat is de naad van rpc/mounts en de DNAT-publicatie (PORT.md §7).
+/// als `key=val\n`-blob, de poorten (elk nummer één keer; de kern zet ze
+/// van de uplink door naar het slot en trekt ze bij de stop in) en `job`.
+/// `mounts` gaan nog niet mee: dat is de naad van rpc/mounts (PORT.md §7).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartSpec {
     /// De maat van het image in bytes; verplicht: de plaatsing valideert ertegen.

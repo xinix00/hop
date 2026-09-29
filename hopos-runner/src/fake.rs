@@ -37,6 +37,8 @@ pub struct FakeSlot {
     pub job: String,
     /// De env-blob uit de start.
     pub env: Vec<u8>,
+    /// De gepubliceerde poorten uit de start.
+    pub ports: Vec<u16>,
     /// De partitiemaat.
     pub memory_limit: u64,
     /// De aangekondigde image-maat.
@@ -246,6 +248,7 @@ impl FakeKern {
                 let fresh = FakeSlot {
                     job: String::from_utf8_lossy(s.job).into_owned(),
                     env: s.env.to_vec(),
+                    ports: s.ports().collect(),
                     memory_limit: s.memory_limit,
                     size: s.image_size,
                     ..FakeSlot::default()

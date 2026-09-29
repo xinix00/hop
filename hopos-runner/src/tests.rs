@@ -66,6 +66,23 @@ fn start_slot_is_op_0x40_with_the_start_head_of_abi() {
 }
 
 #[test]
+fn start_slot_carries_the_ports_of_the_jobspec() {
+    let (mut s, k) = sys(4);
+    let mut sp = spec(ELF.len() as u64);
+    sp.ports.insert(String::from("http"), 80);
+    sp.ports.insert(String::from("web"), 80);
+    sp.ports.insert(String::from("admin"), 8443);
+    bl(s.start_slot(&sp)).unwrap();
+    // Eén keer per nummer, in de volgorde van de namen (admin, http).
+    assert_eq!(k.0.borrow().slots[&1].ports, [8443, 80]);
+    // Te veel poorten gaan niet de draad op.
+    for p in 1..=17u16 {
+        sp.ports.insert(alloc::format!("p{p}"), 9000 + p);
+    }
+    assert!(bl(s.start_slot(&sp)).is_err());
+}
+
+#[test]
 fn start_payload_bytes_roundtrip_through_abi() {
     // Dezelfde bytes als de adapter verstuurt, los van de nep: de kop van
     // abi eromheen en weer terug.
@@ -79,12 +96,48 @@ fn start_payload_bytes_roundtrip_through_abi() {
         core_class: systemapi::CoreClass::Big,
         group: b"",
         env: &env,
+        ports: b"",
         job: b"web",
     };
     let mut buf = [0u8; 256];
     let n = req.encode(&mut buf, 3).unwrap();
     let back = hopabi::decode_req(&buf[..n]).unwrap();
     assert_eq!(StartReq::decode(&back).unwrap(), req);
+}
+
+#[test]
+fn start_ports_use_the_wire_form_of_abi() {
+    // De poorten gaan in de vorm van abi::systemapi::port_blob de draad op:
+    // het aantal op offset 22 van de StartHead, en per poort een u16
+    // little-endian achter de env. De kern leest ze met StartReq::ports.
+    let sp = spec(99);
+    let env = crate::env_blob(&sp.env);
+    let mut blob = [0u8; systemapi::MAX_START_PORTS * systemapi::PORT_LEN];
+    let n = systemapi::port_blob(&[80, 0x1f90], &mut blob).unwrap();
+    assert_eq!(&blob[..n], &[80, 0, 0x90, 0x1f]);
+    let req = StartReq {
+        memory_limit: sp.mem_limit,
+        image_size: 99,
+        cores: 1,
+        pool_cores: 1,
+        core_class: systemapi::CoreClass::Big,
+        group: b"",
+        env: &env,
+        ports: &blob[..n],
+        job: b"web",
+    };
+    let mut buf = [0u8; 256];
+    let len = req.encode(&mut buf, 3).unwrap();
+    let back = hopabi::decode_req(&buf[..len]).unwrap();
+    let head = hopabi::HDR_LEN + 3;
+    assert_eq!(&buf[head + 22..head + 24], &[2, 0]);
+    let got = StartReq::decode(&back).unwrap();
+    assert_eq!(got, req);
+    assert_eq!(got.ports().collect::<alloc::vec::Vec<u16>>(), [80, 0x1f90]);
+    // Zeventien poorten of een poort 0 komen niet door port_blob.
+    let many: alloc::vec::Vec<u16> = (1..=17).collect();
+    assert!(systemapi::port_blob(&many, &mut blob).is_err());
+    assert!(systemapi::port_blob(&[80, 0], &mut blob).is_err());
 }
 
 #[test]

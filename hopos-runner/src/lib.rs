@@ -164,6 +164,21 @@ pub fn env_blob(env: &BTreeMap<String, String>) -> Vec<u8> {
     out
 }
 
+/// De poorten van een jobspec, elk één keer, in de volgorde van de namen
+/// (twee namen op één nummer zijn één publicatie). De draadvorm is die van
+/// `abi::systemapi::port_blob`: de kern zet elke poort van de uplink door
+/// naar dezelfde poort in het slot (tcp en udp) en trekt ze bij de stop
+/// weer in.
+pub fn unique_ports<'a>(ports: impl IntoIterator<Item = &'a u16>) -> Vec<u16> {
+    let mut out: Vec<u16> = Vec::new();
+    for &p in ports {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
 /// De core-klasse van een jobtag.
 fn core_class(s: &str) -> Result<CoreClass, SysError> {
     match s {
@@ -246,6 +261,14 @@ impl<C: Call> SystemApi for KernSys<C> {
         let env = env_blob(&spec.env);
         let too_big =
             |what: &str| SysError::Refused(alloc::format!("{what} does not fit the start request"));
+        let ports = unique_ports(spec.ports.values());
+        let mut port_bytes = [0u8; systemapi::MAX_START_PORTS * systemapi::PORT_LEN];
+        let port_len = systemapi::port_blob(&ports, &mut port_bytes).map_err(|e| {
+            SysError::Refused(alloc::format!(
+                "ports {ports:?}: {e:?} (at most {} per job, none of them 0)",
+                systemapi::MAX_START_PORTS
+            ))
+        })?;
         let req = StartReq {
             memory_limit: spec.mem_limit,
             image_size: spec.image_size,
@@ -254,25 +277,29 @@ impl<C: Call> SystemApi for KernSys<C> {
             core_class: core_class(&spec.core_class)?,
             group: spec.sharegroup.as_bytes(),
             env: &env,
+            ports: port_bytes.get(..port_len).unwrap_or_default(),
             job: spec.job.as_bytes(),
         };
         // De helper van abi schrijft de hele payload (kop, jobnaam, StartHead,
-        // groep, env); de client schrijft kop en pad zelf, dus hier alleen
-        // het deel erachter. Zo is er één plek die de StartHead-bytes kent.
+        // groep, env, poorten); de client schrijft kop en pad zelf, dus hier
+        // alleen het deel erachter. Zo is er één plek die de StartHead-bytes
+        // kent.
         let skip = hopabi::HDR_LEN + spec.job.len();
-        let mut buf =
-            alloc::vec![0u8; skip + systemapi::START_HEAD_LEN + req.group.len() + env.len()];
+        let mut buf = alloc::vec![
+            0u8;
+            skip + systemapi::START_HEAD_LEN + req.group.len() + env.len() + port_len
+        ];
         let n = req
             .encode(&mut buf, 0)
             .map_err(|e| SysError::Refused(alloc::format!("start request: {e:?}")))?;
-        let data = buf.get(skip..n).unwrap_or_default();
+        let data = buf.get(skip..n).unwrap_or_default().to_vec();
         let call = sys::Req {
             op: PrivOp::StartSlot.op(),
             seq: 0,
             off: 0,
             n: 0,
             path: &spec.job,
-            data,
+            data: &data,
         };
         let (resp, _) = self
             .exchange(call, &mut [])
