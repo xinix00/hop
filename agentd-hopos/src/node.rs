@@ -184,7 +184,8 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             leader: Leader::new(cfg.node_id.clone(), MemStore::new()),
             runner: HopRunner::new(sys, attributes, LogPolicy::default()),
             images,
-            node_api: NodeApi::new(&cfg.api_key, false),
+            // FLIP: Hop op HopOS kan de kern vervangen (crate::flip).
+            node_api: NodeApi::new(&cfg.api_key, true),
             leader_api: LeaderApi::new(&cfg.api_key, &cfg.cluster),
             own_leader,
             next_port: DYNAMIC_PORT_BASE,
@@ -247,6 +248,45 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
         Ok(slots.len())
     }
 
+    /// Zaait de init-jobs uit `specs` (een JSON-array van jobspecs, zoals
+    /// `hopos.init[]`) bij een schone boot; geeft hoeveel jobs de leader
+    /// kreeg.
+    ///
+    /// "Schoon" is aan de aanroeper én hier: de binary roept dit alleen aan
+    /// als [`Node::restore`] niets overnam (en niet faalde: een staat die
+    /// niet te lezen is, is geen lege staat), en hier zaait hij alleen in
+    /// een leader zonder jobs. Zo overschrijft een zaadje nooit wat een
+    /// operator of een vorige bewoner neerzette (Go: `agentloop`,
+    /// `cleanBoot && len(l.GetJobs()) == 0`). Een spec die niet klopt, is
+    /// een fout voor het hele setje: luid bij de start, niet half gezaaid.
+    pub async fn seed_init_jobs(&mut self, specs: &str, now: Nanos) -> Result<usize, String> {
+        if !self.leader.jobs().is_empty() {
+            return Ok(0);
+        }
+        let v = types::json::parse_str(specs).map_err(|e| format!("init jobs: {e}"))?;
+        let list = v
+            .as_array()
+            .ok_or_else(|| String::from("init jobs: not a JSON array"))?;
+        let jobs = leader::decode_init_jobs(list).map_err(|e| format!("{e}"))?;
+        let names: Vec<String> = jobs.iter().map(|j| j.name.clone()).collect();
+        let pool = self.runner.pool_largest();
+        let mut net = Local {
+            agent: &mut self.agent,
+            now,
+            pool_largest: pool,
+        };
+        self.leader
+            .seed_init_jobs(jobs, &mut net)
+            .map_err(|e| format!("init jobs: {e}"))?;
+        self.lines.push(format!(
+            "hop: clean boot, seeded {} init job(s): {} HOP_INIT_SEEDED",
+            names.len(),
+            names.join(",")
+        ));
+        self.drain(now).await;
+        Ok(names.len())
+    }
+
     /// De agent (tests en diagnose).
     pub fn agent(&self) -> &Agent {
         &self.agent
@@ -275,13 +315,39 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
     }
 
     /// Behandelt één verzoek op `port` en voert daarna de acties van de agent uit.
-    pub async fn handle(&mut self, port: Port, req: &Request, now: Nanos) -> Reply {
+    pub async fn handle(&mut self, port: Port, req: &Request, now: Nanos) -> Reply
+    where
+        S: crate::flip::KernFlip,
+    {
         let reply = match port {
             Port::Leader => Reply::Plain(self.leader_handle(req, now)),
             Port::Agent => {
                 let pool = self.runner.pool_largest();
                 let (resp, effect) = self.node_api.handle(&mut self.agent, now, pool, req);
-                self.effect(resp, effect, req, now)
+                // FLIP: de kern-flip wacht op download en kern, dus hier en
+                // niet in het synchrone `effect` (crate::flip).
+                if let Effect::Flip { url, sha256 } = &effect {
+                    self.lines
+                        .push(format!("hop: kernel flip requested from {url} HOP_FLIP"));
+                    let r =
+                        crate::flip::flip(self.runner.system_mut(), &mut self.images, url, sha256)
+                            .await;
+                    match r {
+                        Ok(()) => {
+                            self.lines.push(String::from(
+                                "hop: the kernel took the bundle and flips now HOP_FLIP_ACCEPTED",
+                            ));
+                            Reply::Plain(resp)
+                        }
+                        Err(e) => {
+                            self.lines
+                                .push(format!("hop: kernel flip failed: {e} HOP_FLIP_FAIL"));
+                            Reply::Plain(Response::error(502, &e))
+                        }
+                    }
+                } else {
+                    self.effect(resp, effect, req, now)
+                }
             }
         };
         self.drain(now).await;

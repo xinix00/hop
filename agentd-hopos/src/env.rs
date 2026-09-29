@@ -16,12 +16,22 @@
 //! | `HOPOS_PORT` | de agent-poort; de leader luistert op poort + 1000 | `8080` |
 //! | `HOPOS_CORES` | de app-cores waar Hop tegen plant | `1` |
 //! | `HOPOS_MEMORY` | het app-geheugen in bytes waar Hop tegen plant | 256 MiB |
+//! | `HOPOS_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_KEY`, `_SECRET`, `_PATHSTYLE` | de clusteropslag | geen: standalone |
+//! | `HOPOS_INIT_JOBS` | de init-jobs als één JSON-array (`hopos.init[]`) | [`INIT_JOBS_FILE`] als die er is |
 //!
-//! Nog niet gelezen (een volgende stap, met de clusterstaat op S3):
-//! `HOPOS_S3_ENDPOINT`, `HOPOS_S3_BUCKET`, `HOPOS_S3_REGION`,
-//! `HOPOS_S3_KEY`, `HOPOS_S3_SECRET`, en de init-jobs. Een env-blob is
-//! hoogstens ~3,8 KB (`CTRL_ENV_MAX`), dus init-jobs horen eerder in een
-//! bestand op hopfs dan in de env.
+//! De sleutel wint: met `HOPOS_APIKEY` én `HOPOS_INSECURE=1` authenticeert
+//! de API (zoals de Go-kern), en de bewoner zegt dat de vlag genegeerd is.
+//!
+//! De init-jobs staan in de env zolang ze passen (de kern kiest dat:
+//! `hopos/src/config.rs` in HopOS); past het niet, dan laat de kern ze weg
+//! en leest de bewoner [`INIT_JOBS_FILE`] in zijn volume. Ze worden alleen
+//! bij een schone boot gezaaid ([`crate::Node::seed_init_jobs`]).
+//!
+//! S3 wordt gelezen en gemeld, maar nog niet gebruikt: de clusterstaat op
+//! S3 is een volgende stap (`HOP_S3_SKIPPED`).
+//!
+//! Geheimen (`HOPOS_APIKEY`, `HOPOS_S3_SECRET`) komen nooit op het log: de
+//! `Debug` van [`BootConfig`] en [`S3Config`] toont alleen hun lengte.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -43,19 +53,78 @@ pub const ENV_PORT: &str = "HOPOS_PORT";
 pub const ENV_CORES: &str = "HOPOS_CORES";
 /// Het app-geheugen.
 pub const ENV_MEMORY: &str = "HOPOS_MEMORY";
+/// De init-jobs als JSON-array.
+pub const ENV_INIT_JOBS: &str = "HOPOS_INIT_JOBS";
+/// Het S3-endpoint.
+pub const ENV_S3_ENDPOINT: &str = "HOPOS_S3_ENDPOINT";
+/// De S3-bucket.
+pub const ENV_S3_BUCKET: &str = "HOPOS_S3_BUCKET";
+/// De S3-regio.
+pub const ENV_S3_REGION: &str = "HOPOS_S3_REGION";
+/// Het S3-sleutel-id.
+pub const ENV_S3_KEY: &str = "HOPOS_S3_KEY";
+/// Het S3-geheim.
+pub const ENV_S3_SECRET: &str = "HOPOS_S3_SECRET";
+/// `1`: S3 met path-style adressen.
+pub const ENV_S3_PATHSTYLE: &str = "HOPOS_S3_PATHSTYLE";
+
+/// De init-jobs als bestand, in het volume van Hop, als de env ze niet
+/// droeg.
+pub const INIT_JOBS_FILE: &str = "/hop/init-jobs.json";
 
 /// Het geheugen waar Hop tegen plant als de kern het niet zegt.
 pub const DEFAULT_MEMORY: u64 = 256 << 20;
 
+/// De S3-instellingen van de cluster.
+#[derive(Clone, PartialEq, Eq)]
+pub struct S3Config {
+    /// Het endpoint (`https://...`).
+    pub endpoint: String,
+    /// De bucket.
+    pub bucket: String,
+    /// De regio; leeg mag.
+    pub region: String,
+    /// Het sleutel-id.
+    pub key: String,
+    /// Het geheim; nooit op het log.
+    pub secret: String,
+    /// Path-style adressen.
+    pub path_style: bool,
+}
+
+impl fmt::Debug for S3Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3Config")
+            .field("endpoint", &self.endpoint)
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("key", &self.key)
+            .field("secret", &Redacted(self.secret.len()))
+            .field("path_style", &self.path_style)
+            .finish()
+    }
+}
+
+/// Een geheim in `Debug`: alleen zijn lengte.
+struct Redacted(usize);
+
+impl fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<{} bytes>", self.0)
+    }
+}
+
 /// Wat de bewoner uit de env leest.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct BootConfig {
     /// Het node-id.
     pub node_id: String,
     /// De HMAC-sleutel; leeg alleen met `insecure`.
     pub api_key: Vec<u8>,
-    /// Bewust zonder sleutel.
+    /// Bewust zonder sleutel: `HOPOS_INSECURE=1` en geen sleutel.
     pub insecure: bool,
+    /// `HOPOS_INSECURE=1` stond er, maar de sleutel wint.
+    pub insecure_ignored: bool,
     /// De clusternaam.
     pub cluster: String,
     /// Het LAN-adres in het endpoint.
@@ -68,6 +137,29 @@ pub struct BootConfig {
     pub memory: u64,
     /// Of `HOPOS_MEMORY` ontbrak (de bewoner meldt dat luid).
     pub memory_defaulted: bool,
+    /// De clusteropslag, als endpoint en bucket er allebei zijn.
+    pub s3: Option<S3Config>,
+    /// De init-jobs uit de env (de ruwe JSON-array), als ze er zijn.
+    pub init_jobs: Option<String>,
+}
+
+impl fmt::Debug for BootConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BootConfig")
+            .field("node_id", &self.node_id)
+            .field("api_key", &Redacted(self.api_key.len()))
+            .field("insecure", &self.insecure)
+            .field("insecure_ignored", &self.insecure_ignored)
+            .field("cluster", &self.cluster)
+            .field("node_ip", &self.node_ip)
+            .field("port", &self.port)
+            .field("cores", &self.cores)
+            .field("memory", &self.memory)
+            .field("memory_defaulted", &self.memory_defaulted)
+            .field("s3", &self.s3)
+            .field("init_jobs", &self.init_jobs.as_ref().map(String::len))
+            .finish()
+    }
 }
 
 /// Waarom de bewoner niet start.
@@ -99,6 +191,21 @@ impl fmt::Display for BootError {
     }
 }
 
+/// De S3-instellingen, als endpoint en bucket er allebei zijn (zoals Go:
+/// allebei nodig om S3 te kiezen).
+fn s3(get: &impl Fn(&str) -> Option<String>) -> Option<S3Config> {
+    let endpoint = get(ENV_S3_ENDPOINT).filter(|v| !v.is_empty())?;
+    let bucket = get(ENV_S3_BUCKET).filter(|v| !v.is_empty())?;
+    Some(S3Config {
+        endpoint,
+        bucket,
+        region: get(ENV_S3_REGION).unwrap_or_default(),
+        key: get(ENV_S3_KEY).unwrap_or_default(),
+        secret: get(ENV_S3_SECRET).unwrap_or_default(),
+        path_style: get(ENV_S3_PATHSTYLE).as_deref() == Some("1"),
+    })
+}
+
 /// Een getal uit de env, of `default` als hij ontbreekt.
 fn number<T: core::str::FromStr>(
     get: &impl Fn(&str) -> Option<String>,
@@ -122,8 +229,8 @@ impl BootConfig {
         slot_ip: &str,
     ) -> Result<Self, BootError> {
         let api_key = get(ENV_APIKEY).unwrap_or_default().into_bytes();
-        let insecure = get(ENV_INSECURE).as_deref() == Some("1");
-        if api_key.is_empty() && !insecure {
+        let flag = get(ENV_INSECURE).as_deref() == Some("1");
+        if api_key.is_empty() && !flag {
             return Err(BootError::NoKey);
         }
         let port: u16 = number(&get, ENV_PORT, 8080)?;
@@ -136,14 +243,17 @@ impl BootConfig {
         let memory_raw = get(ENV_MEMORY);
         Ok(Self {
             node_id: get(ENV_NODE).unwrap_or_else(|| alloc::format!("hopos-{slot}")),
+            insecure: flag && api_key.is_empty(),
+            insecure_ignored: flag && !api_key.is_empty(),
             api_key,
-            insecure,
             cluster: get(ENV_CLUSTER).unwrap_or_else(|| String::from("hopos")),
             node_ip: get(ENV_NODE_IP).unwrap_or_else(|| String::from(slot_ip)),
             port,
             cores: number(&get, ENV_CORES, 1)?.max(1),
             memory: number(&get, ENV_MEMORY, DEFAULT_MEMORY)?,
             memory_defaulted: memory_raw.is_none(),
+            s3: s3(&get),
+            init_jobs: get(ENV_INIT_JOBS).filter(|j| !j.trim().is_empty()),
         })
     }
 

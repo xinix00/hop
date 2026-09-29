@@ -33,12 +33,17 @@
 
 extern crate alloc;
 
+pub mod entropy;
 pub mod env;
+pub mod fetch;
+pub mod flip;
 mod hub;
 mod local;
 mod node;
+pub mod sntp;
 
 pub use env::{BootConfig, BootError};
+pub use fetch::{Clock, Connect, HttpImages, Resolve};
 pub use hub::Hub;
 pub use node::{Images, Node, Port, Sink};
 
@@ -47,3 +52,5 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_net;

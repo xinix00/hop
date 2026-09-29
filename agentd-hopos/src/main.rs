@@ -14,16 +14,29 @@
 //! - per poort één verbindingstaak (agent op P, leader op P + 1000): accept,
 //!   leanhttp, en elk verzoek als bericht naar de eigenaar.
 //!
-//! Markers op het log: `HOP_UP`, `HOP_LEADER`, `HOP_JOB_PLACED slot=N`, en
-//! de weigeringen `HOPOS_API_NO_AUTH`, `HOP_NET_FAIL`.
+//! - de klok: SNTP bij de start en elk uur (`pool.ntp.org`), de tijd naar
+//!   de kern met `SET_CLOCK`. Pas daarna vertrouwt de downloader de
+//!   wandklok voor `https` (een keten heeft een datum nodig).
+//!
+//! Artifacts komen over `http://` en `https://` (`agentd_hopos::fetch`):
+//! TLS met de Mozilla-wortels, hostnamen via de resolver. Bij een schone
+//! boot (niets overgenomen uit de bewaarde staat) zaait de node de
+//! init-jobs uit `HOPOS_INIT_JOBS` of `/hop/init-jobs.json`.
+//!
+//! Markers op het log: `HOP_UP`, `HOP_LEADER`, `HOP_JOB_PLACED slot=N`,
+//! `HOP_CLOCK_SYNCED`, `HOP_INIT_SEEDED`, en de weigeringen en degradaties
+//! `HOPOS_API_NO_AUTH`, `HOPOS_API_INSECURE`, `HOP_NET_FAIL`,
+//! `HOP_SNTP_FAIL`, `HOP_CLOCK_FAIL`, `HOP_TLS_ENTROPY_WEAK`,
+//! `HOP_INIT_FAIL`, `HOP_S3_SKIPPED`.
 //!
 //! Canoniek gelinkt (applib/link.ld via build.rs), zoals appspike.
 //!
 //! Op QEMU: `tools/qemu-test-hop.sh` in de HopOS-repo boot de kern met deze
 //! ELF in slot 1 (env, token, wandklok, poorten 8080 en 9080 doorgezet),
 //! stuurt van buiten een jobspec en eist appspike in slot 2 (29-09 groen).
-//! Wat daar nog niet is: hopfs (SaveState faalt met één regel,
-//! `HOP_STATE_SKIPPED`), health probes en S3.
+//! Wat daar nog niet is: health probes en S3. Zonder DNS-server in de env
+//! en zonder internet faalt de SNTP-stap met één regel (`HOP_SNTP_FAIL`) en
+//! draait Hop door; `http://` naar een adres werkt dan gewoon.
 
 #![cfg_attr(target_os = "none", no_std, no_main)]
 
@@ -32,17 +45,24 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::future::{Future, poll_fn};
 use core::pin::pin;
+use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use core::task::Poll;
 use core::time::Duration;
 
-use agentd_hopos::{BootConfig, Hub, Images, Node, Port, Sink};
-use applib::appnet::{self, Net, TcpListener};
+use agentd_hopos::entropy::{HARVEST_ROUNDS, Pool};
+use agentd_hopos::env::INIT_JOBS_FILE;
+use agentd_hopos::fetch::IpOnly;
+use agentd_hopos::sntp::{self, NtpLink, PACKET};
+use agentd_hopos::{BootConfig, Clock, Connect, HttpImages, Hub, Images, Node, Port, Resolve};
+use applib::appnet::{self, Endpoint, Net, NetError, TcpListener};
 use applib::rt::Exec;
 use applib::{App, EXEC, log};
 use hop_http::TcpConn;
 use hopos_runner::KernSys;
+use runner::SystemApi;
 
 applib::main!(resident);
 
@@ -62,69 +82,240 @@ const READ_CAP: Duration = Duration::from_secs(2);
 /// Hoe lang een verbinding naar een artifact-server mag duren.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// De leesbuffer van een download: één hap die de runner in brokken naar de kern stroomt.
-const DOWNLOAD_BUF: usize = 64 << 10;
+/// Hoe lang één SNTP-vraag op antwoord wacht (Go: 3 s).
+const NTP_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Verbindingen naar artifact-servers over de netstack van het slot.
-///
-/// Alleen een IP-adres als host: de bewoner heeft nog geen resolver (de
-/// DNS-server staat wel in de env van het slot, `DNS`). Een hostnaam faalt
-/// luid met [`leanhttp::Error::Connect`], en de URL staat in de log van de
-/// taak.
-struct SlotDial {
+/// Het ritme van SNTP na een gelukte synchronisatie (Go: elk uur).
+const NTP_EVERY: Duration = Duration::from_secs(3600);
+
+/// Na een mislukte synchronisatie eerder opnieuw: een node die boot voor
+/// zijn uplink er is, hoeft geen uur op een klok te wachten.
+const NTP_RETRY: Duration = Duration::from_secs(300);
+
+/// Zoveel mislukkingen op rij krijgen een eigen regel; daarna één per
+/// twaalf (eens per uur bij [`NTP_RETRY`]).
+const NTP_LOUD: u32 = 3;
+
+/// Het grootste init-jobs-bestand dat de bewoner leest.
+const INIT_FILE_MAX: usize = 64 << 10;
+
+/// Of SNTP in deze boot gelukt is: pas dan is de wandklok van de kern
+/// vertrouwd genoeg voor een certificaatdatum. Eén schrijver (de
+/// kloktaak), gelezen door de downloader; een vlag, geen protocol.
+static CLOCK_SYNCED: AtomicBool = AtomicBool::new(false);
+
+/// TCP-verbindingen naar artifact-servers over de netstack van het slot.
+#[derive(Copy, Clone)]
+struct SlotConnect {
     net: &'static Net,
     exec: &'static Exec,
 }
 
-impl leanhttp::Dial for SlotDial {
+impl Connect for SlotConnect {
     type Conn = TcpConn;
 
-    async fn dial(&mut self, target: leanhttp::Target<'_>) -> leanhttp::Result<TcpConn> {
-        let ip = appnet::parse_ip4(target.host).ok_or(leanhttp::Error::Connect)?;
+    async fn connect(&mut self, ip: [u8; 4], port: u16) -> Result<TcpConn, String> {
         let s = self
             .net
-            .tcp_connect_timeout(ip, target.port, DIAL_TIMEOUT)
+            .tcp_connect_timeout(ip, port, DIAL_TIMEOUT)
             .await
-            .map_err(|_| leanhttp::Error::Connect)?;
+            .map_err(|e| format!("{e}"))?;
         Ok(TcpConn::new(s, self.exec))
     }
 }
 
-/// De downloader van artifacts: `http://` met leanhttp, en de bytes via de runner de kooi in.
+/// De resolver van de bewoner.
 ///
-/// De download loopt in de eigenaar-taak: de staat van de node wacht zolang
-/// (de API antwoordt na de plaatsing), maar de core niet. Elke lees van het
-/// net en elke brok naar de kern is een `.await`, dus de netstack en de
-/// verbindingstaken draaien tussendoor. Artifact-headers en S3 gaan nog
-/// niet mee.
-struct HttpImages {
-    dial: SlotDial,
+/// TODO: HopOS v3.0.0-alpha.5 heeft nog geen resolver in applib; die zit
+/// in de volgende tag (`applib::appnet::resolve`, één A-vraag over UDP naar
+/// `DNS` uit de env). Tot de bump is een hostnaam een luide fout met de
+/// naam erin, en werken alleen adressen. De bump is deze ene impl:
+/// `appnet::resolve(host).await.map_err(|e| format!("{e}"))`.
+#[derive(Copy, Clone, Default)]
+struct SlotResolver;
+
+impl Resolve for SlotResolver {
+    async fn resolve(&mut self, host: &str) -> Result<[u8; 4], String> {
+        IpOnly.resolve(host).await
+    }
 }
 
-impl Images for HttpImages {
-    async fn fetch<K: Sink>(&mut self, url: &str, sink: &mut K) -> Result<(), String> {
-        // `get` eist 200 en een Content-Length: een image zonder lengte
-        // kan de kern niet plaatsen.
-        let mut resp = leanhttp::get(&mut self.dial, url)
+/// De klok van de downloader: de wandklok van de kern, maar alleen
+/// vertrouwd na SNTP.
+struct SlotClock {
+    app: &'static App,
+    exec: &'static Exec,
+}
+
+impl Clock for SlotClock {
+    fn trusted_unix_secs(&self) -> Option<u64> {
+        if !CLOCK_SYNCED.load(Relaxed) {
+            return None;
+        }
+        self.app.wall_ns().map(|ns| ns / 1_000_000_000)
+    }
+
+    fn mono_ns(&self) -> u64 {
+        self.exec.now()
+    }
+}
+
+/// SNTP over een UDP-socket van het slot.
+struct UdpLink {
+    net: &'static Net,
+}
+
+impl NtpLink for UdpLink {
+    async fn exchange(
+        &mut self,
+        server: [u8; 4],
+        req: &[u8; PACKET],
+        resp: &mut [u8],
+    ) -> Result<usize, String> {
+        let mut sock = self.net.udp_bind(0).map_err(|e| format!("bind: {e}"))?;
+        sock.set_timeout(Some(NTP_TIMEOUT));
+        let to = Endpoint {
+            ip: server,
+            port: sntp::PORT,
+        };
+        sock.send_to(to, req)
             .await
-            .map_err(|e| format!("download {url}: {e}"))?;
-        let len = resp
-            .length
-            .ok_or_else(|| format!("download {url}: no Content-Length"))?;
-        sink.begin(len).await?;
-        let mut buf = alloc::vec::Vec::new();
-        buf.try_reserve_exact(DOWNLOAD_BUF)
-            .map_err(|_| String::from("download buffer: out of memory"))?;
-        buf.resize(DOWNLOAD_BUF, 0);
+            .map_err(|e| format!("send: {e}"))?;
         loop {
-            let n = resp
-                .read(&mut buf)
-                .await
-                .map_err(|e| format!("download {url}: {e}"))?;
-            if n == 0 {
-                return Ok(());
+            match sock.recv_from(resp).await {
+                Ok((n, from)) if from == to => return Ok(n),
+                // Een datagram van een ander adres is niet het antwoord.
+                Ok(_) => {}
+                Err(NetError::Timeout) => {
+                    return Err(format!("no answer within {} s", NTP_TIMEOUT.as_secs()));
+                }
+                Err(e) => return Err(format!("recv: {e}")),
             }
-            sink.chunk(buf.get(..n).unwrap_or_default()).await?;
+        }
+    }
+}
+
+/// De kloktaak: SNTP bij de start en elk uur, de tijd naar de kern met
+/// `SET_CLOCK`. Luid als het niet lukt; de node draait door, en `https`
+/// wacht op een vertrouwde klok.
+///
+/// Een eigen system-verbinding per synchronisatie, die daarna weer dichtgaat:
+/// de kern laat een slot twee verbindingen toe, en de eigenaar-taak houdt
+/// de eerste; een uur lang een tweede openhouden voor één call is zonde.
+async fn clock_task(net: &'static Net, exec: &'static Exec) {
+    let mut fails: u32 = 0;
+    let mut seq: u64 = 0;
+    loop {
+        let mut link = UdpLink { net };
+        let got = sntp::sync(
+            &mut SlotResolver,
+            &mut link,
+            sntp::SERVER,
+            || exec.now(),
+            || {
+                seq = seq.wrapping_add(1);
+                exec.now() ^ seq.rotate_left(48)
+            },
+        )
+        .await;
+        let wait = match got {
+            Ok(sample) => {
+                let mut sys = KernSys::new(net.system_client(), 1);
+                let unix_ns = sample.unix_at(exec.now());
+                match sys.set_clock(unix_ns).await {
+                    Ok(()) => {
+                        CLOCK_SYNCED.store(true, Relaxed);
+                        fails = 0;
+                        log!(
+                            "hop: clock set from {} (stratum {}, delay {} us) to {} s HOP_CLOCK_SYNCED",
+                            sntp::SERVER,
+                            sample.stratum,
+                            sample.delay_ns / 1000,
+                            unix_ns / 1_000_000_000
+                        );
+                        NTP_EVERY
+                    }
+                    Err(e) => {
+                        log!("hop: SET_CLOCK refused by the kernel: {e} HOP_CLOCK_FAIL");
+                        NTP_RETRY
+                    }
+                }
+            }
+            Err(e) => {
+                fails = fails.saturating_add(1);
+                if fails <= NTP_LOUD || fails.is_multiple_of(12) {
+                    log!(
+                        "hop: SNTP {} failed ({fails}x): {e}; the wall clock is not synced, https downloads wait for it HOP_SNTP_FAIL",
+                        sntp::SERVER
+                    );
+                }
+                NTP_RETRY
+            }
+        };
+        exec.after(wait).await;
+    }
+}
+
+/// De willekeur voor TLS: het slot, de klok, en de jitter van de teller.
+fn entropy(app: &App, exec: &'static Exec) -> Pool {
+    let mut seed = Vec::new();
+    seed.extend_from_slice(&app.slot().to_le_bytes());
+    seed.extend_from_slice(&app.wall_ns().unwrap_or(0).to_le_bytes());
+    seed.extend_from_slice(&exec.now().to_le_bytes());
+    let mut pool = Pool::new(&seed);
+    pool.harvest(applib::clock::now_ns, HARVEST_ROUNDS);
+    log!(
+        "hop: TLS randomness from timer jitter only ({HARVEST_ROUNDS} samples): the slot has no hardware RNG yet HOP_TLS_ENTROPY_WEAK"
+    );
+    pool
+}
+
+/// De init-jobs van deze boot: uit de env, of anders uit
+/// [`INIT_JOBS_FILE`] in het volume. `None` als er geen zijn.
+async fn init_specs(cfg: &BootConfig, net: &'static Net) -> Option<String> {
+    if let Some(j) = &cfg.init_jobs {
+        return Some(j.clone());
+    }
+    let mut c = net.system_client();
+    let size = match c.stat(INIT_JOBS_FILE).await {
+        Ok(s) => usize::try_from(s).unwrap_or(usize::MAX),
+        Err(applib::sys::Error::NotFound { .. }) => return None,
+        Err(e) => {
+            log!("hop: {INIT_JOBS_FILE}: {e}; no init jobs HOP_INIT_FAIL");
+            return None;
+        }
+    };
+    if size > INIT_FILE_MAX {
+        log!(
+            "hop: {INIT_JOBS_FILE} is {size} bytes, limit {INIT_FILE_MAX}; no init jobs HOP_INIT_FAIL"
+        );
+        return None;
+    }
+    let mut buf = alloc::vec![0u8; size];
+    let mut at = 0;
+    while at < size {
+        match c
+            .read_into(
+                INIT_JOBS_FILE,
+                at as u64,
+                buf.get_mut(at..).unwrap_or_default(),
+            )
+            .await
+        {
+            Ok(0) => break,
+            Ok(n) => at += n,
+            Err(e) => {
+                log!("hop: {INIT_JOBS_FILE}: {e}; no init jobs HOP_INIT_FAIL");
+                return None;
+            }
+        }
+    }
+    buf.truncate(at);
+    match String::from_utf8(buf) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            log!("hop: {INIT_JOBS_FILE} is not UTF-8; no init jobs HOP_INIT_FAIL");
+            None
         }
     }
 }
@@ -223,6 +414,17 @@ async fn resident(app: &'static App) {
     if cfg.insecure {
         log!("hop: WARNING API authentication is OFF (HOPOS_INSECURE=1) HOPOS_API_INSECURE");
     }
+    if cfg.insecure_ignored {
+        log!("hop: HOPOS_INSECURE=1 ignored: HOPOS_APIKEY is set, the API authenticates");
+    }
+    if let Some(s3) = &cfg.s3 {
+        // Endpoint en bucket zijn geen geheimen; sleutel en geheim wel.
+        log!(
+            "hop: S3 configured ({} bucket {}) but cluster state on S3 is not wired yet; running standalone HOP_S3_SKIPPED",
+            s3.endpoint,
+            s3.bucket
+        );
+    }
     if cfg.memory_defaulted {
         log!(
             "hop: HOPOS_MEMORY not set; planning against {} bytes HOP_MEMORY_DEFAULT",
@@ -233,17 +435,42 @@ async fn resident(app: &'static App) {
         log!("hop: no wall clock from the kernel; task times count from boot HOP_NO_CLOCK");
     }
 
-    let sys = KernSys::new(net.system_client(), cfg.cores);
-    let images = HttpImages {
-        dial: SlotDial { net, exec },
-    };
-    let mut node = Node::new(&cfg, sys, images, now(app, exec));
-    match node.restore(now(app, exec)).await {
-        Ok(0) => {}
-        Ok(n) => log!("hop: adopted {n} running cage(s) from the saved state HOP_ADOPTED"),
-        Err(e) => log!("hop: saved agent state not restored: {e}"),
+    if let Err(e) = exec.spawn(clock_task(net, exec)) {
+        log!("hop: cannot spawn the clock task: {e}; no SNTP, https refused HOP_SNTP_FAIL");
     }
+
+    let sys = KernSys::new(net.system_client(), cfg.cores);
+    let images = HttpImages::new(
+        SlotConnect { net, exec },
+        SlotResolver,
+        SlotClock { app, exec },
+        entropy(app, exec),
+    );
+    if images.root_count() == 0 {
+        log!("hop: the built-in root certificates did not parse; https refused HOP_TLS_NO_ROOTS");
+    }
+    let mut node = Node::new(&cfg, sys, images, now(app, exec));
+    // Schoon is: niets overgenomen en niets fout gelezen. Een staat die niet
+    // te lezen is, is geen lege staat; dan geen zaad (Go: nooit zaaien op
+    // een opslagfout).
+    let clean = match node.restore(now(app, exec)).await {
+        Ok(0) => true,
+        Ok(n) => {
+            log!("hop: adopted {n} running cage(s) from the saved state HOP_ADOPTED");
+            false
+        }
+        Err(e) => {
+            log!("hop: saved agent state not restored: {e}");
+            false
+        }
+    };
     flush(&mut node);
+    if clean && let Some(specs) = init_specs(&cfg, net).await {
+        if let Err(e) = node.seed_init_jobs(&specs, now(app, exec)).await {
+            log!("hop: init jobs not seeded: {e} HOP_INIT_FAIL");
+        }
+        flush(&mut node);
+    }
 
     // Eén bus voor het leven van de bewoner; de taken krijgen `&'static`.
     let hub: &'static Hub = Box::leak(Box::new(Hub::new(2)));

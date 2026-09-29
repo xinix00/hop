@@ -420,3 +420,84 @@ fn a_long_stream_does_not_block_the_other_tasks() {
             .any(|l| l.contains("HOP_JOB_PLACED slot=1"))
     );
 }
+
+#[test]
+fn a_clean_boot_seeds_the_init_jobs_once() {
+    let (mut n, k) = node();
+    // De headless-vorm: één artifact en geen driver is de hop-driver.
+    let specs =
+        r#"[{"name":"web","artifacts":[{"url":"http://images/web.elf"}],"memory_limit":33554432}]"#;
+    assert_eq!(block_on(n.seed_init_jobs(specs, T0)), Ok(1));
+    let lines = n.take_lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("seeded 1 init job(s): web HOP_INIT_SEEDED")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("HOP_JOB_PLACED slot=1")),
+        "{lines:?}"
+    );
+    assert!(k.0.borrow().slots[&1].placed);
+    // Een leader met jobs is geen schone boot: niets nog eens.
+    assert_eq!(block_on(n.seed_init_jobs(specs, T0)), Ok(0));
+    assert_eq!(k.0.borrow().slots.len(), 1);
+}
+
+#[test]
+fn broken_init_jobs_are_loud_and_seed_nothing() {
+    for bad in [
+        "not json",
+        r#"{"name":"web"}"#,
+        r#"[{"name":"web","bogus_field":1,"artifacts":[{"url":"http://images/web.elf"}]}]"#,
+        r#"[{"artifacts":[{"url":"http://images/web.elf"}]}]"#,
+    ] {
+        let (mut n, k) = node();
+        let r = block_on(n.seed_init_jobs(bad, T0));
+        assert!(r.is_err(), "{bad}: {r:?}");
+        assert!(k.0.borrow().ops.is_empty(), "{bad}");
+    }
+}
+
+#[test]
+fn the_key_wins_over_insecure_and_secrets_stay_out_of_debug() {
+    let mut env = BTreeMap::new();
+    env.insert("HOPOS_APIKEY", "s3cr3t-api-key");
+    env.insert("HOPOS_INSECURE", "1");
+    env.insert("HOPOS_S3_ENDPOINT", "https://s3.example.com");
+    env.insert("HOPOS_S3_BUCKET", "hop-prod");
+    env.insert("HOPOS_S3_KEY", "AKIA1");
+    env.insert("HOPOS_S3_SECRET", "very-secret-value");
+    env.insert("HOPOS_S3_PATHSTYLE", "1");
+    env.insert("HOPOS_INIT_JOBS", r#"[{"name":"a"}]"#);
+    let c =
+        BootConfig::from_env(|k| env.get(k).map(|v| String::from(*v)), 1, "10.100.0.1").unwrap();
+    assert!(!c.insecure && c.insecure_ignored);
+    assert_eq!(c.api_key, b"s3cr3t-api-key");
+    let s3 = c.s3.clone().unwrap();
+    assert_eq!(
+        (
+            s3.endpoint.as_str(),
+            s3.bucket.as_str(),
+            s3.key.as_str(),
+            s3.path_style
+        ),
+        ("https://s3.example.com", "hop-prod", "AKIA1", true)
+    );
+    assert_eq!(c.init_jobs.as_deref(), Some(r#"[{"name":"a"}]"#));
+    let shown = format!("{c:?}");
+    assert!(
+        !shown.contains("s3cr3t") && !shown.contains("very-secret"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("<14 bytes>") && shown.contains("<17 bytes>"),
+        "{shown}"
+    );
+    // Zonder bucket geen S3; zonder jobs geen init-jobs.
+    env.remove("HOPOS_S3_BUCKET");
+    env.insert("HOPOS_INIT_JOBS", " ");
+    let c = BootConfig::from_env(|k| env.get(k).map(|v| String::from(*v)), 1, "x").unwrap();
+    assert!(c.s3.is_none() && c.init_jobs.is_none());
+}
