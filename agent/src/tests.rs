@@ -1228,16 +1228,26 @@ fn handoff_weigert_onzin() {
     assert_eq!(a.restore(br#"{"version":2}"#), Err(Error::Version(2)));
 }
 
+/// Eén poll: de opslag hieronder antwoordt meteen, en een host-test heeft geen executor.
+fn ready<F: core::future::Future>(f: F) -> F::Output {
+    let mut f = core::pin::pin!(f);
+    let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+    match f.as_mut().poll(&mut cx) {
+        core::task::Poll::Ready(v) => v,
+        core::task::Poll::Pending => panic!("de geheugen-opslag wacht nooit"),
+    }
+}
+
 /// Een opslag in het geheugen.
 #[derive(Default)]
 struct MemStore(Option<Vec<u8>>);
 
 impl Store for MemStore {
-    fn save(&mut self, blob: &[u8]) -> core::result::Result<(), StoreError> {
+    async fn save(&mut self, blob: &[u8]) -> core::result::Result<(), StoreError> {
         self.0 = Some(blob.to_vec());
         Ok(())
     }
-    fn load(&mut self) -> core::result::Result<Option<Vec<u8>>, StoreError> {
+    async fn load(&mut self) -> core::result::Result<Option<Vec<u8>>, StoreError> {
         Ok(self.0.clone())
     }
 }
@@ -1248,9 +1258,9 @@ fn state_survives_restart_via_store() {
     run_ok(&mut a, T0, job("keep"));
     assert!(a.tick(T0 + S).contains(&Action::SaveState));
     let mut store = MemStore::default();
-    a.save_to(&mut store).unwrap();
+    ready(a.save_to(&mut store)).unwrap();
     let mut b = agent();
-    b.restore_from(&mut store).unwrap();
+    ready(b.restore_from(&mut store)).unwrap();
     assert_eq!(b.placed_task_counts().get("keep"), Some(&1));
 }
 

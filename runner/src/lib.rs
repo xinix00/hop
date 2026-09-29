@@ -9,7 +9,9 @@
 //!
 //! Sans-I/O: de tijd komt binnen als `now` (milliseconden), het netwerk
 //! (de artifact-download) doet de aanroeper, en de kern zit achter
-//! [`SystemApi`]. Er wordt niets geblokkeerd; elke methode keert meteen terug.
+//! [`SystemApi`]. Wat de kern raakt, is een future: de aanroeper wacht met
+//! `.await` en geeft zo de core terug aan de andere taken; er wordt nooit
+//! geblokkeerd en nooit een geneste executor-ronde gedraaid (handboek §4).
 //!
 //! De proces- en docker-backends van de Go-versie hebben een OS nodig en
 //! staan (nog) niet in deze crate; zie het eindrapport van de port.
@@ -36,6 +38,7 @@ mod system;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use core::fmt;
+use core::future::Future;
 
 pub use env::{attr_env_vars, env_key, port_env_vars};
 pub use hopos::{HOP_STOP_TIMEOUT_MS, HopRunner, MAX_CONCURRENT_DOWNLOADS};
@@ -172,31 +175,49 @@ pub enum Started {
 
 /// Een taak-backend.
 ///
-/// Elke methode keert meteen terug. Een backend met een startfase (HopOS:
-/// het image dat de partitie in stroomt) antwoordt op `start` met
-/// [`Started::AwaitImage`]; de aanroeper doet de download en voert de bytes.
+/// Een backend met een startfase (HopOS: het image dat de partitie in
+/// stroomt) antwoordt op `start` met [`Started::AwaitImage`]; de aanroeper
+/// doet de download en voert de bytes.
+///
+/// Wat een backend bij zijn kern of OS moet vragen (`start`, de image-fase,
+/// `stop`, `status`), is een future, om dezelfde reden als bij
+/// [`SystemApi`]: op HopOS is dat een call over een verbinding op dezelfde
+/// executor, en wachten is de core teruggeven. De vorm is `-> impl Future`
+/// (zie [`SystemApi`] voor waarom niet `async fn`); de trait is daarmee niet
+/// object-safe, en de agent-lijm is generiek over de runner. [`Runner::logs`]
+/// leest alleen de eigen ringen en blijft synchroon.
 pub trait Runner {
     /// Begint een taak.
-    fn start(&mut self, now: u64, req: &StartRequest<'_>) -> Result<Started>;
+    fn start(&mut self, now: u64, req: &StartRequest<'_>) -> impl Future<Output = Result<Started>>;
 
     /// Meldt de lengte van het image; zonder lengte geen start.
-    fn image_begin(&mut self, _now: u64, _task_id: &str, _size: u64) -> Result {
-        Err(Error::Unsupported)
+    fn image_begin(
+        &mut self,
+        _now: u64,
+        _task_id: &str,
+        _size: u64,
+    ) -> impl Future<Output = Result> {
+        async { Err(Error::Unsupported) }
     }
 
     /// Voert de volgende bytes van het image; geeft `Running` na de laatste byte.
-    fn image_chunk(&mut self, _now: u64, _task_id: &str, _chunk: &[u8]) -> Result<Started> {
-        Err(Error::Unsupported)
+    fn image_chunk(
+        &mut self,
+        _now: u64,
+        _task_id: &str,
+        _chunk: &[u8],
+    ) -> impl Future<Output = Result<Started>> {
+        async { Err(Error::Unsupported) }
     }
 
     /// Stopt een taak. Een onbekende taak is niet van ons: `Ok` zonder iets te doen.
     ///
     /// Een fout betekent dat de vrijgave niet bevestigd is; de runner houdt de
     /// hulpbron dan zelf in quarantaine, zodat niemand hem hergebruikt.
-    fn stop(&mut self, now: u64, task: &TaskRef<'_>) -> Result;
+    fn stop(&mut self, now: u64, task: &TaskRef<'_>) -> impl Future<Output = Result>;
 
     /// De toestand van een taak.
-    fn status(&mut self, now: u64, task: &TaskRef<'_>) -> Result<RunState>;
+    fn status(&mut self, now: u64, task: &TaskRef<'_>) -> impl Future<Output = Result<RunState>>;
 
     /// De laatste regels van een taak, ook nog even na zijn einde.
     fn logs(&self, now: u64, task_id: &str, stream: Stream) -> Option<&LogRing>;

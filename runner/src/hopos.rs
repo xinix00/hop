@@ -147,26 +147,27 @@ impl<S: SystemApi> HopRunner<S> {
     /// CPU (procent van de eigen cores) en werkelijk geheugen, zoals de app ze meldt.
     ///
     /// `None` voor een veld dat nog niet gemeten is (de app start nog).
-    pub fn usage(&mut self, task: &TaskRef<'_>) -> (Option<u8>, Option<u64>) {
+    pub async fn usage(&mut self, task: &TaskRef<'_>) -> (Option<u8>, Option<u64>) {
         if task.pid == 0 {
             return (None, None);
         }
         let slot = self.slot_of(task.id).unwrap_or(Slot(task.pid));
-        let s = self.sys.slot_status(slot);
+        let s = self.sys.slot_status(slot).await;
         (s.cpu_pct, (s.mem_sys != 0).then_some(s.mem_sys))
     }
 
     /// Haalt de logregels van alle draaiende apps uit de kern in hun ringen.
     ///
     /// De executor roept dit periodiek; hij is de pomp die in Go een goroutine
-    /// per taak was.
-    pub fn pump_logs(&mut self, now: u64) {
+    /// per taak was. Elke regel is een call naar de kern; tussen de calls
+    /// draaien de andere taken.
+    pub async fn pump_logs(&mut self, now: u64) {
         let mut buf = [0u8; LOG_LINE_MAX];
         for (id, cage) in &self.cages {
             let Phase::Armed(slot) = cage.phase else {
                 continue;
             };
-            while let Some(n) = self.sys.next_log_line(slot, &mut buf) {
+            while let Some(n) = self.sys.next_log_line(slot, &mut buf).await {
                 let line = buf.get(..n).unwrap_or(&[]);
                 let text = core::str::from_utf8(line).unwrap_or("<log line not utf-8>");
                 if let Some(ring) = self.logs.live_mut(id, Stream::Stdout) {
@@ -266,8 +267,8 @@ impl<S: SystemApi> HopRunner<S> {
     }
 
     /// Breekt een stroom af of stopt een app; `Ok` als de kern de vrijgave op zich neemt.
-    fn stop_cage(&mut self, now: u64, task_id: &str, slot: Slot) -> Result {
-        match self.sys.stop_slot(slot, HOP_STOP_TIMEOUT_MS) {
+    async fn stop_cage(&mut self, now: u64, task_id: &str, slot: Slot) -> Result {
+        match self.sys.stop_slot(slot, HOP_STOP_TIMEOUT_MS).await {
             Ok(()) => {
                 self.release(now, task_id);
                 Ok(())
@@ -279,7 +280,7 @@ impl<S: SystemApi> HopRunner<S> {
     }
 
     /// Zet de reden van een einde één keer in de log van de taak.
-    fn log_end_once(&mut self, task_id: &str, slot: Slot) {
+    async fn log_end_once(&mut self, task_id: &str, slot: Slot) {
         let Some(cage) = self.cages.get_mut(task_id) else {
             return;
         };
@@ -287,7 +288,7 @@ impl<S: SystemApi> HopRunner<S> {
             return;
         }
         cage.fault_logged = true;
-        let s = self.sys.slot_status(slot);
+        let s = self.sys.slot_status(slot).await;
         let line = if s.fault_vec != 0 {
             format!(
                 "hop: task failed: stage-2 fault on slot {} (vec {}, ESR {:#x}, FAR {:#x})",
@@ -314,7 +315,7 @@ impl<S: SystemApi> HopRunner<S> {
 }
 
 impl<S: SystemApi> Runner for HopRunner<S> {
-    fn start(&mut self, now: u64, req: &StartRequest<'_>) -> Result<Started> {
+    async fn start(&mut self, now: u64, req: &StartRequest<'_>) -> Result<Started> {
         // De log bestaat vóór de eerste faalbare stap: anders is er geen plek
         // om de fout in te schrijven.
         self.logs.open(req.task_id);
@@ -335,7 +336,7 @@ impl<S: SystemApi> Runner for HopRunner<S> {
         Ok(Started::AwaitImage)
     }
 
-    fn image_begin(&mut self, now: u64, task_id: &str, size: u64) -> Result {
+    async fn image_begin(&mut self, now: u64, task_id: &str, size: u64) -> Result {
         let queued = match self.cages.get(task_id) {
             None => return Err(Error::UnknownTask),
             Some(c) => matches!(c.phase, Phase::Queued(_)),
@@ -359,7 +360,7 @@ impl<S: SystemApi> Runner for HopRunner<S> {
             }
             _ => return Err(Error::UnknownTask),
         };
-        let slot = match self.sys.start_slot(&spec) {
+        let slot = match self.sys.start_slot(&spec).await {
             Ok(slot) => slot,
             Err(e) => {
                 // De kern ruimde zijn eigen reserveringen op; wij de onze.
@@ -379,7 +380,7 @@ impl<S: SystemApi> Runner for HopRunner<S> {
         Ok(())
     }
 
-    fn image_chunk(&mut self, now: u64, task_id: &str, chunk: &[u8]) -> Result<Started> {
+    async fn image_chunk(&mut self, now: u64, task_id: &str, chunk: &[u8]) -> Result<Started> {
         let (slot, done, size) = match self.cages.get(task_id) {
             Some(Cage {
                 phase: Phase::Streaming { slot, done, size },
@@ -392,7 +393,7 @@ impl<S: SystemApi> Runner for HopRunner<S> {
         let total = done.saturating_add(len);
         if total > size {
             // Afbreken; lukt dat niet, dan blijft de kooi in quarantaine.
-            if self.sys.stop_slot(slot, HOP_STOP_TIMEOUT_MS).is_ok() {
+            if self.sys.stop_slot(slot, HOP_STOP_TIMEOUT_MS).await.is_ok() {
                 self.drop_cage(task_id);
             }
             return Err(self.fail(
@@ -401,7 +402,7 @@ impl<S: SystemApi> Runner for HopRunner<S> {
                 Error::Stream("more bytes than Content-Length"),
             ));
         }
-        let streamed = match self.sys.stream_image(slot, chunk) {
+        let streamed = match self.sys.stream_image(slot, chunk).await {
             Ok(s) => s,
             Err(e) => {
                 // Een geweigerde brok: de kern brak de stroom af en ruimde op.
@@ -430,7 +431,7 @@ impl<S: SystemApi> Runner for HopRunner<S> {
                 // Welke kooi kreeg deze taak? De node weet het, en vooraan in
                 // de eigen log komt het heel aan, waar een operator al kijkt
                 // (`hop logs`).
-                let cage = self.sys.slot_status(slot).cage;
+                let cage = self.sys.slot_status(slot).await.cage;
                 if !cage.is_empty() {
                     self.log(task_id, &cage);
                 }
@@ -443,7 +444,7 @@ impl<S: SystemApi> Runner for HopRunner<S> {
             Streamed::More | Streamed::Placed => {
                 // De kern en wij tellen anders: nooit een halve app laten
                 // staan. Lukt de stop niet, dan blijft de kooi van ons.
-                if self.sys.stop_slot(slot, HOP_STOP_TIMEOUT_MS).is_ok() {
+                if self.sys.stop_slot(slot, HOP_STOP_TIMEOUT_MS).await.is_ok() {
                     self.drop_cage(task_id);
                 }
                 Err(self.fail(
@@ -455,7 +456,7 @@ impl<S: SystemApi> Runner for HopRunner<S> {
         }
     }
 
-    fn stop(&mut self, now: u64, task: &TaskRef<'_>) -> Result {
+    async fn stop(&mut self, now: u64, task: &TaskRef<'_>) -> Result {
         // Onbekend = niet van ons, en met opzet: een VEROUDERD taakrecord mag nooit
         // de nieuwe bewoner van dat kooinummer omleggen.
         let Some(cage) = self.cages.get(task.id) else {
@@ -466,23 +467,23 @@ impl<S: SystemApi> Runner for HopRunner<S> {
                 self.release(now, task.id);
                 Ok(())
             }
-            Some(slot) => self.stop_cage(now, task.id, slot),
+            Some(slot) => self.stop_cage(now, task.id, slot).await,
         }
     }
 
-    fn status(&mut self, _now: u64, task: &TaskRef<'_>) -> Result<RunState> {
+    async fn status(&mut self, _now: u64, task: &TaskRef<'_>) -> Result<RunState> {
         // Zonder pid zit de taak nog in zijn startfase; die bevraagt de monitor
         // niet, en komt er toch iemand, dan is "draait" het eerlijke antwoord.
         if task.pid == 0 {
             return Ok(RunState::Running);
         }
         let slot = self.slot_of(task.id).unwrap_or(Slot(task.pid));
-        let s = self.sys.slot_status(slot);
+        let s = self.sys.slot_status(slot).await;
         if s.core_on {
             return Ok(RunState::Running);
         }
         if s.app != SlotApp::Exited || s.exit_code != 0 || s.fault_vec != 0 {
-            self.log_end_once(task.id, slot);
+            self.log_end_once(task.id, slot).await;
         }
         Ok(RunState::Failed)
     }

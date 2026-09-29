@@ -13,15 +13,15 @@
 //! image-stroom en de laatst bekende stand van elk slot. Hij bezit niet de
 //! beslissing wélke kooi wat draait: dat is de runner.
 //!
-//! # De naad tussen synchroon en async
+//! # Asynchroon, zonder geneste rondes
 //!
-//! `SystemApi` is synchroon (de runner keert overal meteen terug); de
-//! verbinding is async (TCP over leannet, met een pomp-taak op dezelfde
-//! executor). [`Block`] is die naad, als parameter: de bewoner wacht door
-//! de executor van zijn core ronden te laten draaien tot het antwoord er is,
-//! een test pollt een nep-verbinding die altijd klaar is. Een kern-call op
-//! het slot-LAN duurt tientallen microseconden (gemeten 04-09 in Go: 20 µs,
-//! 1 ms bij een gemiste bel), dus de eigenaar-taak staat kort stil.
+//! `SystemApi` is asynchroon, net als de verbinding (TCP over leannet, met
+//! een pomp-taak op dezelfde executor): elke op wacht met `.await` op
+//! [`Call::call`], en de eigenaar-taak geeft zo bij elke call de core terug.
+//! Er is geen naad meer die een future synchroon afdwingt: dat was een
+//! geneste executor-ronde binnen de poll van een taak, en de executor roept
+//! zichzelf nooit aan (handboek §4). Een host-test pollt de nep-verbinding,
+//! die altijd klaar is.
 //!
 //! Ook hier: [`KernSys`] is een [`agent::Store`] over hopfs, zodat
 //! `Action::SaveState` de agent-staat in het eigen bestand van Hop zet.
@@ -82,12 +82,6 @@ impl<D: sys::Dial, T: sys::Timer> Call for sys::Client<D, T> {
     }
 }
 
-/// Wacht synchroon op een future: de naad tussen `SystemApi` en de verbinding.
-pub trait Block {
-    /// Drijft `f` tot hij klaar is en geeft zijn uitkomst.
-    fn block_on<F: Future>(&mut self, f: F) -> F::Output;
-}
-
 /// De bevoegde system-API van de kern, over een [`Call`].
 ///
 /// # Invariants
@@ -96,20 +90,18 @@ pub trait Block {
 /// stroom opende en die nog niet geplaatst, mislukt of gestopt zijn; de
 /// waarde is het aantal bytes dat de kern al bevestigde.
 #[derive(Debug)]
-pub struct KernSys<C, B> {
+pub struct KernSys<C> {
     call: C,
-    block: B,
     cores: u32,
     offsets: BTreeMap<Slot, u64>,
     last: BTreeMap<Slot, SlotStatus>,
 }
 
-impl<C: Call, B: Block> KernSys<C, B> {
-    /// Een system-API over `call`, die met `block` wacht; `cores` zijn de app-cores die de kern Hop biedt.
-    pub fn new(call: C, block: B, cores: u32) -> Self {
+impl<C: Call> KernSys<C> {
+    /// Een system-API over `call`; `cores` zijn de app-cores die de kern Hop biedt.
+    pub fn new(call: C, cores: u32) -> Self {
         Self {
             call,
-            block,
             cores,
             offsets: BTreeMap::new(),
             last: BTreeMap::new(),
@@ -126,14 +118,17 @@ impl<C: Call, B: Block> KernSys<C, B> {
         &mut self.call
     }
 
-    /// Eén call, synchroon.
-    fn exchange(&mut self, req: sys::Req<'_>, dst: &mut [u8]) -> sys::Result<(sys::Resp, usize)> {
-        let Self { call, block, .. } = self;
-        block.block_on(call.call(req, dst, sys::RPC_TIMEOUT))
+    /// Eén call; wie wacht, geeft de core terug.
+    async fn exchange(
+        &mut self,
+        req: sys::Req<'_>,
+        dst: &mut [u8],
+    ) -> sys::Result<(sys::Resp, usize)> {
+        self.call.call(req, dst, sys::RPC_TIMEOUT).await
     }
 
     /// Een request met alleen getallen (stop, status, log, klok).
-    fn plain(
+    async fn plain(
         &mut self,
         op: PrivOp,
         slot: u64,
@@ -141,7 +136,7 @@ impl<C: Call, B: Block> KernSys<C, B> {
         dst: &mut [u8],
     ) -> sys::Result<(sys::Resp, usize)> {
         let r = systemapi::plain_req(op, 0, slot, n);
-        self.exchange(to_sys(&r, ""), dst)
+        self.exchange(to_sys(&r, ""), dst).await
     }
 }
 
@@ -242,12 +237,12 @@ pub fn slot_status_of(info: &SlotInfo) -> SlotStatus {
     }
 }
 
-impl<C: Call, B: Block> SystemApi for KernSys<C, B> {
+impl<C: Call> SystemApi for KernSys<C> {
     fn num_cores(&self) -> u32 {
         self.cores
     }
 
-    fn start_slot(&mut self, spec: &StartSpec) -> Result<Slot, SysError> {
+    async fn start_slot(&mut self, spec: &StartSpec) -> Result<Slot, SysError> {
         let env = env_blob(&spec.env);
         let too_big =
             |what: &str| SysError::Refused(alloc::format!("{what} does not fit the start request"));
@@ -279,7 +274,10 @@ impl<C: Call, B: Block> SystemApi for KernSys<C, B> {
             path: &spec.job,
             data,
         };
-        let (resp, _) = self.exchange(call, &mut []).map_err(|e| sys_error(&e))?;
+        let (resp, _) = self
+            .exchange(call, &mut [])
+            .await
+            .map_err(|e| sys_error(&e))?;
         let slot = u32::try_from(resp.size)
             .ok()
             .filter(|&s| s >= 1)
@@ -291,7 +289,7 @@ impl<C: Call, B: Block> SystemApi for KernSys<C, B> {
         Ok(Slot(slot))
     }
 
-    fn stream_image(&mut self, slot: Slot, chunk: &[u8]) -> Result<Streamed, SysError> {
+    async fn stream_image(&mut self, slot: Slot, chunk: &[u8]) -> Result<Streamed, SysError> {
         let Some(&start) = self.offsets.get(&slot) else {
             return Err(SysError::Refused(alloc::format!(
                 "no open stream on slot {}",
@@ -311,7 +309,7 @@ impl<C: Call, B: Block> SystemApi for KernSys<C, B> {
             }
             let mut reason = [0u8; REASON_MAX];
             let r = systemapi::stream_req(0, u64::from(slot.0), off, piece);
-            let (resp, n) = match self.exchange(to_sys(&r, ""), &mut reason) {
+            let (resp, n) = match self.exchange(to_sys(&r, ""), &mut reason).await {
                 Ok(v) => v,
                 Err(e) => {
                     // Een geweigerde brok: de kern brak de stroom af.
@@ -348,9 +346,12 @@ impl<C: Call, B: Block> SystemApi for KernSys<C, B> {
         Ok(last)
     }
 
-    fn stop_slot(&mut self, slot: Slot, timeout_ms: u64) -> Result<(), SysError> {
+    async fn stop_slot(&mut self, slot: Slot, timeout_ms: u64) -> Result<(), SysError> {
         self.offsets.remove(&slot);
-        match self.plain(PrivOp::StopSlot, u64::from(slot.0), timeout_ms, &mut []) {
+        match self
+            .plain(PrivOp::StopSlot, u64::from(slot.0), timeout_ms, &mut [])
+            .await
+        {
             Ok(_) => {
                 self.last.remove(&slot);
                 Ok(())
@@ -359,10 +360,11 @@ impl<C: Call, B: Block> SystemApi for KernSys<C, B> {
         }
     }
 
-    fn slot_status(&mut self, slot: Slot) -> SlotStatus {
+    async fn slot_status(&mut self, slot: Slot) -> SlotStatus {
         let mut info = [0u8; systemapi::SLOT_INFO_LEN];
         let got = self
             .plain(PrivOp::SlotStatus, u64::from(slot.0), 0, &mut info)
+            .await
             .ok()
             .and_then(|(_, n)| SlotInfo::decode(info.get(..n).unwrap_or_default()).ok());
         match got {
@@ -382,23 +384,27 @@ impl<C: Call, B: Block> SystemApi for KernSys<C, B> {
         }
     }
 
-    fn next_log_line(&mut self, slot: Slot, buf: &mut [u8]) -> Option<usize> {
+    async fn next_log_line(&mut self, slot: Slot, buf: &mut [u8]) -> Option<usize> {
         let max = u64::try_from(buf.len()).unwrap_or(u64::MAX);
-        match self.plain(PrivOp::NextLog, u64::from(slot.0), max, buf) {
+        match self
+            .plain(PrivOp::NextLog, u64::from(slot.0), max, buf)
+            .await
+        {
             Ok((resp, n)) if resp.size == 1 => Some(n),
             _ => None,
         }
     }
 
-    fn set_clock(&mut self, unix_ns: u64) -> Result<(), SysError> {
+    async fn set_clock(&mut self, unix_ns: u64) -> Result<(), SysError> {
         self.plain(PrivOp::SetClock, 0, unix_ns, &mut [])
+            .await
             .map(|_| ())
             .map_err(|e| sys_error(&e))
     }
 }
 
-impl<C: Call, B: Block> agent::Store for KernSys<C, B> {
-    fn save(&mut self, blob: &[u8]) -> Result<(), agent::StoreError> {
+impl<C: Call> agent::Store for KernSys<C> {
+    async fn save(&mut self, blob: &[u8]) -> Result<(), agent::StoreError> {
         // Eerst op nul, dan de happen: een halve schrijf is dan een kort
         // bestand, geen mengsel van oud en nieuw (zoals `write_file` van applib).
         let trunc = sys::Req {
@@ -406,6 +412,7 @@ impl<C: Call, B: Block> agent::Store for KernSys<C, B> {
             ..sys::Req::path(hopabi::OP_TRUNCATE, STATE_PATH)
         };
         self.exchange(trunc, &mut [])
+            .await
             .map_err(|_| agent::StoreError::Io)?;
         let mut off = 0u64;
         for piece in blob.chunks(sys::MAX_CHUNK) {
@@ -415,14 +422,18 @@ impl<C: Call, B: Block> agent::Store for KernSys<C, B> {
                 ..sys::Req::path(hopabi::OP_WRITE, STATE_PATH)
             };
             self.exchange(w, &mut [])
+                .await
                 .map_err(|_| agent::StoreError::Io)?;
             off = off.saturating_add(u64::try_from(piece.len()).unwrap_or(u64::MAX));
         }
         Ok(())
     }
 
-    fn load(&mut self) -> Result<Option<Vec<u8>>, agent::StoreError> {
-        let size = match self.exchange(sys::Req::path(hopabi::OP_STAT, STATE_PATH), &mut []) {
+    async fn load(&mut self) -> Result<Option<Vec<u8>>, agent::StoreError> {
+        let size = match self
+            .exchange(sys::Req::path(hopabi::OP_STAT, STATE_PATH), &mut [])
+            .await
+        {
             Ok((r, _)) => r.size,
             Err(sys::Error::NotFound { .. }) => return Ok(None),
             Err(_) => return Err(agent::StoreError::Io),
@@ -441,7 +452,10 @@ impl<C: Call, B: Block> agent::Store for KernSys<C, B> {
                 n: u64::try_from(dst.len()).unwrap_or(u64::MAX),
                 ..sys::Req::path(hopabi::OP_READ, STATE_PATH)
             };
-            let (_, n) = self.exchange(r, dst).map_err(|_| agent::StoreError::Io)?;
+            let (_, n) = self
+                .exchange(r, dst)
+                .await
+                .map_err(|_| agent::StoreError::Io)?;
             if n == 0 {
                 break;
             }

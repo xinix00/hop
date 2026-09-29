@@ -19,15 +19,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::future::Future;
-use core::pin::pin;
-use core::task::{Context, Poll, Waker};
+use core::future::poll_fn;
+use core::task::Poll;
 use core::time::Duration;
 
 use abi::hopabi::{self, Req, Resp};
 use abi::systemapi::{self, HEADER_LEN, Kind, PrivOp, SlotInfo, StartReq, StreamResp, StreamState};
 use applib::sys::{self, ConnError};
-
-use crate::Block;
 
 /// De foutstatus van de kern.
 const STATUS_ERROR: u16 = hopabi::STATUS_ERROR;
@@ -70,6 +68,12 @@ pub struct KernState {
     pub dials: u32,
     /// Elk binnengekomen frame, rauw (kop plus payload).
     pub frames: Vec<Vec<u8>>,
+    /// Elke lees geeft eerst één keer `Pending` (en wekt zichzelf), zoals
+    /// een echte verbinding waar het antwoord nog onderweg is. Zo toetst een
+    /// test dat een wachtende call de core teruggeeft.
+    pub yield_reads: bool,
+    /// Hoe vaak een lees de core teruggaf.
+    pub yields: u64,
 }
 
 /// De nep-kern: deelbaar tussen de test en de verbindingen.
@@ -133,6 +137,20 @@ pub struct FakeConn {
 
 impl sys::Conn for FakeConn {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, ConnError> {
+        let wait = self.kern.0.borrow().yield_reads;
+        if wait {
+            self.kern.0.borrow_mut().yields += 1;
+            let mut once = false;
+            poll_fn(|cx| {
+                if once {
+                    return Poll::Ready(());
+                }
+                once = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            })
+            .await;
+        }
         // Leeg is EOF: in deze nep komt een antwoord altijd tegelijk met de
         // laatste byte van de call, dus wachten zou een test laten hangen.
         let n = buf.len().min(self.rx.len());
@@ -341,26 +359,6 @@ impl FakeKern {
                 },
                 _ => err("unknown op"),
             },
-        }
-    }
-}
-
-/// Wacht door te pollen: voor verbindingen die altijd meteen klaar zijn.
-///
-/// Zonder grens: een future die nooit klaar komt, laat de test hangen in
-/// plaats van hem met een paniek te beëindigen (bibliotheekcode panikeert
-/// niet). De nep-kern hierboven antwoordt altijd binnen één poll.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Spin;
-
-impl Block for Spin {
-    fn block_on<F: Future>(&mut self, f: F) -> F::Output {
-        let mut f = pin!(f);
-        let mut cx = Context::from_waker(Waker::noop());
-        loop {
-            if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
-                return v;
-            }
         }
     }
 }

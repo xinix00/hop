@@ -5,6 +5,18 @@
 //! wil (starten, stoppen, pollen, wegschrijven) voert de node meteen uit,
 //! in de volgorde waarin de agent het vroeg.
 //!
+//! Die ingangen zijn `async`: een actie die de kern raakt (een slot, een
+//! brok image, een status, de staat op hopfs) wacht met `.await` op de
+//! verbinding, en de eigenaar-taak geeft dan de core terug. De netstack,
+//! de verbindingstaken en de rest draaien intussen door; alleen de staat van
+//! de node wacht, want die heeft één eigenaar (handboek §1 en §4).
+//!
+//! De traits [`Images`] en [`Sink`] zijn daardoor niet object-safe (een
+//! methode die een future geeft, kan niet in een vtable); de downloader
+//! krijgt de sink daarom als generieke parameter in plaats van als
+//! `&mut dyn Sink`. Er is per node één downloader en één soort sink, dus dat
+//! kost niets.
+//!
 //! De markers voor de console verzamelt hij als regels ([`Node::take_lines`]);
 //! de binary zet ze met `applib::log!` op het log, een test leest ze.
 
@@ -12,6 +24,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::future::Future;
 
 use agent::{Action, Agent, Event, Settings, StartError, StartOk, Status};
 use api::{Effect, LeaderApi, LeaderCluster, NodeApi, Request, Response};
@@ -51,17 +64,28 @@ pub enum Port {
 }
 
 /// Waar de bytes van een image heen gaan tijdens een download.
+///
+/// Elke methode wacht op de kern (de runner stroomt de bytes de kooi in),
+/// dus een future; `-> impl Future` en niet `async fn`, omdat de executor
+/// geen `Send` eist en de lint `async_fn_in_trait` dat niet kan weten.
 pub trait Sink {
     /// De lengte van het image; zonder lengte geen start.
-    fn begin(&mut self, size: u64) -> Result<(), String>;
+    fn begin(&mut self, size: u64) -> impl Future<Output = Result<(), String>>;
     /// De volgende bytes.
-    fn chunk(&mut self, bytes: &[u8]) -> Result<(), String>;
+    fn chunk(&mut self, bytes: &[u8]) -> impl Future<Output = Result<(), String>>;
 }
 
 /// De downloader van artifacts: haalt `url` op en voert de bytes aan `sink`.
+///
+/// Generiek over de sink (zie de moduledoc): een future-methode is niet
+/// object-safe.
 pub trait Images {
     /// Haalt het artifact op; een fout is een tekst voor de log van de taak.
-    fn fetch(&mut self, url: &str, sink: &mut dyn Sink) -> Result<(), String>;
+    fn fetch<K: Sink>(
+        &mut self,
+        url: &str,
+        sink: &mut K,
+    ) -> impl Future<Output = Result<(), String>>;
 }
 
 /// De runner als [`Sink`] voor één taak.
@@ -74,9 +98,10 @@ struct Feed<'a, S> {
 }
 
 impl<S: SystemApi> Sink for Feed<'_, S> {
-    fn begin(&mut self, size: u64) -> Result<(), String> {
+    async fn begin(&mut self, size: u64) -> Result<(), String> {
         self.runner
             .image_begin(self.ms, self.task, size)
+            .await
             .map_err(|e| {
                 let text = format!("{e}");
                 self.failure = Some(e);
@@ -84,8 +109,8 @@ impl<S: SystemApi> Sink for Feed<'_, S> {
             })
     }
 
-    fn chunk(&mut self, bytes: &[u8]) -> Result<(), String> {
-        match self.runner.image_chunk(self.ms, self.task, bytes) {
+    async fn chunk(&mut self, bytes: &[u8]) -> Result<(), String> {
+        match self.runner.image_chunk(self.ms, self.task, bytes).await {
             Ok(Started::Running { pid }) => {
                 self.placed = Some(pid);
                 Ok(())
@@ -130,6 +155,10 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
     /// De leader draait hier (standalone) en kent de eigen agent vanaf het
     /// begin; zijn settle-periode staat uit, want er is niemand anders om op
     /// te wachten.
+    ///
+    /// Synchroon: hier wordt niets bij de kern gevraagd. Wat de agent na de
+    /// registratie nog wil, blijft in zijn rij staan tot de eerste
+    /// [`Node::restore`], [`Node::handle`] of [`Node::tick`] het uitvoert.
     pub fn new(cfg: &BootConfig, sys: S, images: I, now: Nanos) -> Self {
         let endpoint = format!("http://{}:{}", cfg.node_ip, cfg.port);
         let own_leader = format!("{}:{}", cfg.node_ip, cfg.leader_port());
@@ -197,8 +226,6 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
                 "hop: leader refused own agent: {e} HOP_LEADER_FAIL"
             )),
         }
-        let actions = self.agent.take_actions();
-        self.run_actions(now, actions);
     }
 
     /// Herstelt de agent-staat uit hopfs en neemt de kooien van zijn lopende taken over.
@@ -206,8 +233,8 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
     /// Na een herstart van Hop (of een kern-flip) draaien de apps door, maar
     /// een lege agent kent ze niet meer en zou op hun kooien stuiten. Geeft
     /// het aantal overgenomen kooien; niets opgeslagen is 0.
-    pub fn restore(&mut self) -> Result<usize, agent::Error> {
-        let running = self.agent.restore_from(self.runner.system_mut())?;
+    pub async fn restore(&mut self, now: Nanos) -> Result<usize, agent::Error> {
+        let running = self.agent.restore_from(self.runner.system_mut()).await?;
         let slots: Vec<(String, runner::Slot)> = running
             .into_iter()
             .filter_map(|(id, pid)| {
@@ -216,6 +243,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             })
             .collect();
         self.runner.adopt_running(&slots);
+        self.drain(now).await;
         Ok(slots.len())
     }
 
@@ -247,7 +275,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
     }
 
     /// Behandelt één verzoek op `port` en voert daarna de acties van de agent uit.
-    pub fn handle(&mut self, port: Port, req: &Request, now: Nanos) -> Reply {
+    pub async fn handle(&mut self, port: Port, req: &Request, now: Nanos) -> Reply {
         let reply = match port {
             Port::Leader => Reply::Plain(self.leader_handle(req, now)),
             Port::Agent => {
@@ -256,7 +284,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
                 self.effect(resp, effect, req, now)
             }
         };
-        self.settle(now);
+        self.drain(now).await;
         reply
     }
 
@@ -302,7 +330,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
     }
 
     /// Laat de tijd verstrijken: heartbeat en tik van de leader, tik van de agent, de logpomp.
-    pub fn tick(&mut self, now: Nanos) {
+    pub async fn tick(&mut self, now: Nanos) {
         // De eigen agent is altijd levend zolang deze taak draait; zonder
         // heartbeat zou de eigen leader hem na 30 s dood verklaren.
         self.leader
@@ -320,36 +348,37 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             }
         }
         let actions = self.agent.tick(now);
-        self.run_actions(now, actions);
-        self.settle(now);
-        self.runner.pump_logs(now / MILLISECOND);
+        self.run_actions(now, actions).await;
+        self.drain(now).await;
+        self.runner.pump_logs(now / MILLISECOND).await;
     }
 
     /// Voert acties uit tot de agent niets meer vraagt (begrensd).
-    fn settle(&mut self, now: Nanos) {
+    async fn drain(&mut self, now: Nanos) {
         for _ in 0..ACTION_ROUNDS {
             let actions = self.agent.take_actions();
             if actions.is_empty() {
                 return;
             }
-            self.run_actions(now, actions);
+            self.run_actions(now, actions).await;
         }
     }
 
-    fn run_actions(&mut self, now: Nanos, actions: Vec<Action>) {
+    /// Voert de acties uit, in volgorde; elke kern-call is een `.await`.
+    async fn run_actions(&mut self, now: Nanos, actions: Vec<Action>) {
         let ms = now / MILLISECOND;
         for a in actions {
             match a {
-                Action::Start { task_id, job } => self.start(now, &task_id, &job),
+                Action::Start { task_id, job } => self.start(now, &task_id, &job).await,
                 Action::Stop { task_id, pid, .. } => {
                     let pid = u32::try_from(pid).unwrap_or(0);
-                    if let Err(e) = self.runner.stop(ms, &TaskRef { id: &task_id, pid }) {
+                    if let Err(e) = self.runner.stop(ms, &TaskRef { id: &task_id, pid }).await {
                         self.lines.push(format!("hop: stop {task_id}: {e} HOP_STOP_FAILED"));
                     }
                 }
                 Action::Poll { task_id, pid, .. } => {
                     let pid = u32::try_from(pid).unwrap_or(0);
-                    let st = match self.runner.status(ms, &TaskRef { id: &task_id, pid }) {
+                    let st = match self.runner.status(ms, &TaskRef { id: &task_id, pid }).await {
                         Ok(RunState::Running) => Status::Running,
                         Ok(RunState::Failed) | Err(_) => Status::Failed,
                     };
@@ -363,7 +392,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
                 ),
                 Action::Notify { job, event } => self.notify(now, &job, event),
                 Action::SaveState => {
-                    if let Err(e) = self.agent.save_to(self.runner.system_mut()) {
+                    if let Err(e) = self.agent.save_to(self.runner.system_mut()).await {
                         self.once(
                             "save",
                             format!("hop: agent state not saved to hopfs: {e} HOP_STATE_SKIPPED"),
@@ -406,7 +435,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
     }
 
     /// Een [`Action::Start`]: de runner, het image, en de uitkomst terug naar de agent.
-    fn start(&mut self, now: Nanos, task_id: &str, job: &Job) {
+    async fn start(&mut self, now: Nanos, task_id: &str, job: &Job) {
         let ms = now / MILLISECOND;
         let env = to_btree(&job.env);
         let tags = to_btree(&job.tags);
@@ -426,12 +455,12 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             volumes: &volumes,
             ports: &ports,
         };
-        let outcome = match self.runner.start(ms, &req) {
+        let outcome = match self.runner.start(ms, &req).await {
             Ok(Started::Running { pid }) => Ok(pid),
             Ok(Started::Aborted) => Err((StartError::Failed, String::from("aborted"))),
             Ok(Started::AwaitImage) => {
                 let url = artifact.map_or("", |a| a.url.as_str());
-                self.stream(ms, task_id, url)
+                self.stream(ms, task_id, url).await
             }
             Err(e) => Err((start_error(&e), format!("{e}"))),
         };
@@ -462,7 +491,15 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
     }
 
     /// Haalt het image op en stroomt het de kooi in; de kooi als het lukte.
-    fn stream(&mut self, ms: u64, task_id: &str, url: &str) -> Result<u32, (StartError, String)> {
+    ///
+    /// De download en elke brok naar de kern zijn `.await`s: een image van
+    /// megabytes houdt de staat van de node zo lang vast, maar niet de core.
+    async fn stream(
+        &mut self,
+        ms: u64,
+        task_id: &str,
+        url: &str,
+    ) -> Result<u32, (StartError, String)> {
         let mut feed = Feed {
             runner: &mut self.runner,
             ms,
@@ -470,19 +507,22 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             placed: None,
             failure: None,
         };
-        let fetched = self.images.fetch(url, &mut feed);
+        let fetched = self.images.fetch(url, &mut feed).await;
         let (placed, failure) = (feed.placed, feed.failure.take());
         match (fetched, placed) {
             (Ok(()), Some(pid)) => Ok(pid),
             (Ok(()), None) => {
                 // Het image was korter dan zijn lengte: de kooi terug.
-                let _ = self.runner.stop(
-                    ms,
-                    &TaskRef {
-                        id: task_id,
-                        pid: 0,
-                    },
-                );
+                let _ = self
+                    .runner
+                    .stop(
+                        ms,
+                        &TaskRef {
+                            id: task_id,
+                            pid: 0,
+                        },
+                    )
+                    .await;
                 Err((
                     StartError::Failed,
                     String::from("image ended before its length"),
@@ -490,13 +530,16 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             }
             (Err(why), _) => {
                 // Een download die faalde, laat de gereserveerde kooi niet staan.
-                let _ = self.runner.stop(
-                    ms,
-                    &TaskRef {
-                        id: task_id,
-                        pid: 0,
-                    },
-                );
+                let _ = self
+                    .runner
+                    .stop(
+                        ms,
+                        &TaskRef {
+                            id: task_id,
+                            pid: 0,
+                        },
+                    )
+                    .await;
                 let kind = failure.as_ref().map_or(StartError::Failed, start_error);
                 Err((kind, why))
             }

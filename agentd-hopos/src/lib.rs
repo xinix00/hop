@@ -9,8 +9,10 @@
 //! - [`Node`]: de ene eigenaar van alle staat van de node: de
 //!   [`agent::Agent`], de [`leader::Leader`] van de standalone-cluster (zoals
 //!   de Go-kern in fase 1), de [`runner::HopRunner`] over de system-API, en
-//!   de twee API's. Verzoeken en de tik komen binnen als methode-aanroepen;
-//!   de acties van de agent voert hij meteen uit, in volgorde.
+//!   de twee API's. Verzoeken en de tik komen binnen als `async`
+//!   methode-aanroepen; de acties van de agent voert hij meteen uit, in
+//!   volgorde, en wat de kern raakt wacht met `.await` (geen geneste
+//!   executor-rondes, handboek §4).
 //! - [`Hub`]: de brievenbus tussen de verbindingstaken en de eigenaar-taak
 //!   (handboek §1: wie iets wil met de staat, stuurt een bericht).
 //!

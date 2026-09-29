@@ -10,14 +10,25 @@ use runner::{
     SysError, SystemApi, TaskRef,
 };
 
-use crate::fake::{FakeDial, FakeKern, NeverTimer, Spin};
+use crate::fake::{FakeDial, FakeKern, NeverTimer};
 use crate::{KernSys, STATE_PATH};
 
-type Sys = KernSys<applib::sys::Client<FakeDial, NeverTimer>, Spin>;
+type Sys = KernSys<applib::sys::Client<FakeDial, NeverTimer>>;
+
+/// Drijft een future tot hij klaar is. Geen geneste ronde: een host-test
+/// heeft geen executor, en de nep-kern antwoordt bij de eerste poll.
+fn bl<F: core::future::Future>(f: F) -> F::Output {
+    let mut f = core::pin::pin!(f);
+    let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+    match f.as_mut().poll(&mut cx) {
+        core::task::Poll::Ready(v) => v,
+        core::task::Poll::Pending => panic!("de nep-kern wacht nooit"),
+    }
+}
 
 fn sys(max_slots: usize) -> (Sys, FakeKern) {
     let k = FakeKern::new(max_slots);
-    (KernSys::new(k.client(), Spin, 4), k)
+    (KernSys::new(k.client(), 4), k)
 }
 
 fn spec(size: u64) -> StartSpec {
@@ -43,7 +54,7 @@ const ELF: &[u8] = b"\x7fELF-an-app-image";
 fn start_slot_is_op_0x40_with_the_start_head_of_abi() {
     // Toets de payload zoals de kern hem leest: StartReq::decode van abi.
     let (mut s, k) = sys(4);
-    let slot = s.start_slot(&spec(ELF.len() as u64)).unwrap();
+    let slot = bl(s.start_slot(&spec(ELF.len() as u64))).unwrap();
     assert_eq!(slot.0, 1, "de kern kiest het slot");
     let st = k.0.borrow();
     assert_eq!(st.ops, [PrivOp::StartSlot.op()]);
@@ -79,9 +90,12 @@ fn start_payload_bytes_roundtrip_through_abi() {
 #[test]
 fn stream_more_then_placed_with_offsets() {
     let (mut s, k) = sys(4);
-    let slot = s.start_slot(&spec(ELF.len() as u64)).unwrap();
-    assert_eq!(s.stream_image(slot, &ELF[..5]).unwrap(), Streamed::More);
-    assert_eq!(s.stream_image(slot, &ELF[5..]).unwrap(), Streamed::Placed);
+    let slot = bl(s.start_slot(&spec(ELF.len() as u64))).unwrap();
+    assert_eq!(bl(s.stream_image(slot, &ELF[..5])).unwrap(), Streamed::More);
+    assert_eq!(
+        bl(s.stream_image(slot, &ELF[5..])).unwrap(),
+        Streamed::Placed
+    );
     let st = k.0.borrow();
     assert_eq!(st.slots[&1].image, ELF);
     assert!(st.slots[&1].placed);
@@ -98,20 +112,20 @@ fn stream_more_then_placed_with_offsets() {
 #[test]
 fn a_failed_placement_carries_the_kernels_reason() {
     let (mut s, _k) = sys(4);
-    let slot = s.start_slot(&spec(4)).unwrap();
+    let slot = bl(s.start_slot(&spec(4))).unwrap();
     assert_eq!(
-        s.stream_image(slot, b"junk").unwrap(),
+        bl(s.stream_image(slot, b"junk")).unwrap(),
         Streamed::Failed(SysError::Refused(String::from("not an ELF image")))
     );
     // De stroom is dicht: een volgende brok is een weigering, geen call.
-    assert!(s.stream_image(slot, b"x").is_err());
+    assert!(bl(s.stream_image(slot, b"x")).is_err());
 }
 
 #[test]
 fn a_full_kernel_is_no_capacity_not_a_crash() {
     let (mut s, _k) = sys(1);
-    s.start_slot(&spec(4)).unwrap();
-    match s.start_slot(&spec(4)) {
+    bl(s.start_slot(&spec(4))).unwrap();
+    match bl(s.start_slot(&spec(4))) {
         Err(SysError::NoCapacity(why)) => assert!(why.contains("no free run")),
         other => panic!("verwacht NoCapacity, kreeg {other:?}"),
     }
@@ -120,8 +134,8 @@ fn a_full_kernel_is_no_capacity_not_a_crash() {
 #[test]
 fn a_refused_chunk_is_an_error_and_closes_the_stream() {
     let (mut s, _k) = sys(4);
-    let slot = s.start_slot(&spec(3)).unwrap();
-    match s.stream_image(slot, b"toolong") {
+    let slot = bl(s.start_slot(&spec(3))).unwrap();
+    match bl(s.stream_image(slot, b"toolong")) {
         Err(SysError::Refused(why)) => assert!(why.contains("more bytes"), "{why}"),
         other => panic!("{other:?}"),
     }
@@ -130,18 +144,18 @@ fn a_refused_chunk_is_an_error_and_closes_the_stream() {
 #[test]
 fn status_decodes_slot_info() {
     let (mut s, k) = sys(4);
-    let slot = s.start_slot(&spec(ELF.len() as u64)).unwrap();
-    let st = s.slot_status(slot);
+    let slot = bl(s.start_slot(&spec(ELF.len() as u64))).unwrap();
+    let st = bl(s.slot_status(slot));
     assert_eq!((st.state, st.core_on), (SlotState::Streaming, false));
-    s.stream_image(slot, ELF).unwrap();
-    let st = s.slot_status(slot);
+    bl(s.stream_image(slot, ELF)).unwrap();
+    let st = bl(s.slot_status(slot));
     assert_eq!(
         (st.state, st.core_on, st.app),
         (SlotState::Running, true, SlotApp::Ready)
     );
     assert_eq!(st.heartbeat, 7);
     k.0.borrow_mut().slots.get_mut(&1).unwrap().crashed = true;
-    let st = s.slot_status(slot);
+    let st = bl(s.slot_status(slot));
     assert_eq!(
         (st.core_on, st.app, st.exit_code),
         (false, SlotApp::Exited, 1)
@@ -151,16 +165,16 @@ fn status_decodes_slot_info() {
 #[test]
 fn stop_frees_and_an_unknown_stop_is_not_confirmed() {
     let (mut s, k) = sys(4);
-    let slot = s.start_slot(&spec(4)).unwrap();
-    assert_eq!(s.stop_slot(slot, 3000), Ok(()));
+    let slot = bl(s.start_slot(&spec(4))).unwrap();
+    assert_eq!(bl(s.stop_slot(slot, 3000)), Ok(()));
     assert!(k.0.borrow().slots.is_empty());
-    assert_eq!(s.stop_slot(slot, 3000), Err(SysError::NotConfirmed));
+    assert_eq!(bl(s.stop_slot(slot, 3000)), Err(SysError::NotConfirmed));
 }
 
 #[test]
 fn next_log_and_set_clock() {
     let (mut s, k) = sys(4);
-    let slot = s.start_slot(&spec(ELF.len() as u64)).unwrap();
+    let slot = bl(s.start_slot(&spec(ELF.len() as u64))).unwrap();
     k.0.borrow_mut()
         .slots
         .get_mut(&1)
@@ -168,10 +182,10 @@ fn next_log_and_set_clock() {
         .logs
         .push_back(b"hello from web".to_vec());
     let mut buf = [0u8; 64];
-    assert_eq!(s.next_log_line(slot, &mut buf), Some(14));
+    assert_eq!(bl(s.next_log_line(slot, &mut buf)), Some(14));
     assert_eq!(&buf[..14], b"hello from web");
-    assert_eq!(s.next_log_line(slot, &mut buf), None);
-    s.set_clock(1_759_000_000_000_000_000).unwrap();
+    assert_eq!(bl(s.next_log_line(slot, &mut buf)), None);
+    bl(s.set_clock(1_759_000_000_000_000_000)).unwrap();
     assert_eq!(k.0.borrow().clock, 1_759_000_000_000_000_000);
 }
 
@@ -179,11 +193,11 @@ fn next_log_and_set_clock() {
 fn state_store_roundtrips_over_hopfs() {
     use agent::Store;
     let (mut s, k) = sys(4);
-    assert_eq!(s.load(), Ok(None));
-    s.save(b"{\"version\":1}").unwrap();
-    s.save(b"{}").unwrap();
+    assert_eq!(bl(s.load()), Ok(None));
+    bl(s.save(b"{\"version\":1}")).unwrap();
+    bl(s.save(b"{}")).unwrap();
     assert_eq!(k.0.borrow().files[STATE_PATH], b"{}");
-    assert_eq!(s.load(), Ok(Some(b"{}".to_vec())));
+    assert_eq!(bl(s.load()), Ok(Some(b"{}".to_vec())));
 }
 
 #[test]
@@ -192,8 +206,8 @@ fn a_chunk_bigger_than_one_io_bite_goes_in_bites() {
     let mut image = alloc::vec![0u8; big];
     image[..4].copy_from_slice(b"\x7fELF");
     let (mut s, k) = sys(4);
-    let slot = s.start_slot(&spec(big as u64)).unwrap();
-    assert_eq!(s.stream_image(slot, &image).unwrap(), Streamed::Placed);
+    let slot = bl(s.start_slot(&spec(big as u64))).unwrap();
+    assert_eq!(bl(s.stream_image(slot, &image)).unwrap(), Streamed::Placed);
     let streams =
         k.0.borrow()
             .ops
@@ -223,19 +237,19 @@ fn hop_runner_places_a_task_through_the_frames() {
         volumes: &empty,
         ports: &ports,
     };
-    assert_eq!(r.start(0, &req).unwrap(), Started::AwaitImage);
-    r.image_begin(0, "t1", ELF.len() as u64).unwrap();
+    assert_eq!(bl(r.start(0, &req)).unwrap(), Started::AwaitImage);
+    bl(r.image_begin(0, "t1", ELF.len() as u64)).unwrap();
     assert_eq!(
-        r.image_chunk(0, "t1", &ELF[..3]).unwrap(),
+        bl(r.image_chunk(0, "t1", &ELF[..3])).unwrap(),
         Started::AwaitImage
     );
     assert_eq!(
-        r.image_chunk(0, "t1", &ELF[3..]).unwrap(),
+        bl(r.image_chunk(0, "t1", &ELF[3..])).unwrap(),
         Started::Running { pid: 1 }
     );
     let task = TaskRef { id: "t1", pid: 1 };
-    assert_eq!(r.status(0, &task).unwrap(), runner::RunState::Running);
-    r.stop(0, &task).unwrap();
+    assert_eq!(bl(r.status(0, &task)).unwrap(), runner::RunState::Running);
+    bl(r.stop(0, &task)).unwrap();
     assert!(k.0.borrow().slots.is_empty());
 }
 
@@ -244,8 +258,8 @@ fn stop_frame_bytes_on_the_wire() {
     // De rauwe bytes: framekop "HOPS" v1 Call, dan de requestkop van 24
     // bytes met op 0x42, off = slot en n = de termijn in ms.
     let (mut s, k) = sys(4);
-    let slot = s.start_slot(&spec(4)).unwrap();
-    s.stop_slot(slot, 3000).unwrap();
+    let slot = bl(s.start_slot(&spec(4))).unwrap();
+    bl(s.stop_slot(slot, 3000)).unwrap();
     let st = k.0.borrow();
     let f = &st.frames[1];
     assert_eq!(&f[0..4], b"HOPS");

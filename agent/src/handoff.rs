@@ -13,6 +13,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+use core::future::Future;
 
 use types::de::ObjectBuilder;
 use types::json::{self, Value};
@@ -38,11 +39,17 @@ impl fmt::Display for StoreError {
 }
 
 /// Waar de agent zijn staat laat: een bestand op een host, een geheugenblok dat een kern-flip overleeft.
+///
+/// Asynchroon: op HopOS is het een bestand op hopfs achter de system-API, en
+/// elke hap is een call over de verbinding met de kern. Wachten is daar de
+/// core teruggeven aan de andere taken, niet de executor zelf rondes laten
+/// draaien (handboek §4). De vorm is `-> impl Future` (geen `Send` nodig:
+/// taken verhuizen niet); een implementatie mag `async fn` schrijven.
 pub trait Store {
     /// Overschrijft het blob.
-    fn save(&mut self, blob: &[u8]) -> Result<(), StoreError>;
+    fn save(&mut self, blob: &[u8]) -> impl Future<Output = Result<(), StoreError>>;
     /// Leest het blob; `None` als er niets staat.
-    fn load(&mut self) -> Result<Option<Vec<u8>>, StoreError>;
+    fn load(&mut self) -> impl Future<Output = Result<Option<Vec<u8>>, StoreError>>;
 }
 
 impl Agent {
@@ -106,14 +113,14 @@ impl Agent {
     }
 
     /// Schrijft de staat weg (na een [`crate::Action::SaveState`]).
-    pub fn save_to<S: Store>(&self, store: &mut S) -> Result {
+    pub async fn save_to<S: Store>(&self, store: &mut S) -> Result {
         let blob = self.snapshot()?;
-        store.save(blob.as_bytes()).map_err(Error::Store)
+        store.save(blob.as_bytes()).await.map_err(Error::Store)
     }
 
     /// Leest de staat terug bij het opstarten; geeft de kooien voor de runner.
-    pub fn restore_from<S: Store>(&mut self, store: &mut S) -> Result<Vec<(String, i64)>> {
-        match store.load().map_err(Error::Store)? {
+    pub async fn restore_from<S: Store>(&mut self, store: &mut S) -> Result<Vec<(String, i64)>> {
+        match store.load().await.map_err(Error::Store)? {
             Some(blob) => self.restore(&blob),
             None => Ok(Vec::new()),
         }

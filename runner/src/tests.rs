@@ -7,6 +7,19 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 use std::collections::VecDeque;
 
+/// Drijft een future van de runner tot hij klaar is.
+///
+/// Geen geneste executor-ronde: in een host-test is er geen executor, en
+/// de nep-kern hieronder antwoordt altijd bij de eerste poll.
+fn bl<F: core::future::Future>(f: F) -> F::Output {
+    let mut f = core::pin::pin!(f);
+    let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+    match f.as_mut().poll(&mut cx) {
+        core::task::Poll::Ready(v) => v,
+        core::task::Poll::Pending => panic!("de nep-kern wacht nooit"),
+    }
+}
+
 /// Eén slot van de nep-kern.
 #[derive(Default, Clone)]
 struct FakeSlot {
@@ -64,7 +77,7 @@ impl SystemApi for FakeSys {
     fn num_cores(&self) -> u32 {
         self.num
     }
-    fn start_slot(&mut self, spec: &StartSpec) -> Result<Slot, SysError> {
+    async fn start_slot(&mut self, spec: &StartSpec) -> Result<Slot, SysError> {
         if spec.cores.max(spec.pool_cores) > self.num {
             return Err(SysError::NoCapacity("insufficient physical cores".into()));
         }
@@ -95,7 +108,7 @@ impl SystemApi for FakeSys {
         );
         Ok(Slot(slot))
     }
-    fn stream_image(&mut self, slot: Slot, chunk: &[u8]) -> Result<Streamed, SysError> {
+    async fn stream_image(&mut self, slot: Slot, chunk: &[u8]) -> Result<Streamed, SysError> {
         let place_err = self.place_err;
         let s = self
             .slots
@@ -116,7 +129,7 @@ impl SystemApi for FakeSys {
         s.logs.push_back("app leeft".into());
         Ok(Streamed::Placed)
     }
-    fn stop_slot(&mut self, slot: Slot, _timeout_ms: u64) -> Result<(), SysError> {
+    async fn stop_slot(&mut self, slot: Slot, _timeout_ms: u64) -> Result<(), SysError> {
         self.stops.push(slot.0);
         if self.stop_err {
             if let Some(s) = self.slots.get_mut(&slot.0) {
@@ -131,7 +144,7 @@ impl SystemApi for FakeSys {
         }
         Ok(())
     }
-    fn slot_status(&mut self, slot: Slot) -> SlotStatus {
+    async fn slot_status(&mut self, slot: Slot) -> SlotStatus {
         let mut st = SlotStatus::empty();
         if let Some(s) = self.slots.get(&slot.0) {
             st.core_on = s.core_on;
@@ -156,13 +169,13 @@ impl SystemApi for FakeSys {
         }
         st
     }
-    fn next_log_line(&mut self, slot: Slot, buf: &mut [u8]) -> Option<usize> {
+    async fn next_log_line(&mut self, slot: Slot, buf: &mut [u8]) -> Option<usize> {
         let line = self.slots.get_mut(&slot.0)?.logs.pop_front()?;
         let n = line.len().min(buf.len());
         buf[..n].copy_from_slice(&line.as_bytes()[..n]);
         Some(n)
     }
-    fn set_clock(&mut self, unix_ns: u64) -> Result<(), SysError> {
+    async fn set_clock(&mut self, unix_ns: u64) -> Result<(), SysError> {
         self.clock = unix_ns;
         Ok(())
     }
@@ -223,9 +236,9 @@ const IMG: &[u8] = b"ELF-achtige bytes";
 
 /// De hele start: kooi, image-lengte, bytes. Geeft de kooi.
 fn run(r: &mut HopRunner<FakeSys>, id: &str, j: &Job) -> Result<u32> {
-    r.start(0, &req(id, j))?;
-    r.image_begin(0, id, IMG.len() as u64)?;
-    match r.image_chunk(0, id, IMG)? {
+    bl(r.start(0, &req(id, j)))?;
+    bl(r.image_begin(0, id, IMG.len() as u64))?;
+    match bl(r.image_chunk(0, id, IMG))? {
         Started::Running { pid } => Ok(pid),
         other => panic!("unexpected {other:?}"),
     }
@@ -252,11 +265,11 @@ fn hop_runner_lifecycle() {
     assert_eq!(spec.env["ER_ATTR_NODE_OS"], "hopos");
     assert_eq!(spec.mounts["/data"], "/data");
     let t = TaskRef { id: "t1", pid };
-    assert_eq!(r.status(0, &t).unwrap(), RunState::Running);
-    r.pump_logs(0);
+    assert_eq!(bl(r.status(0, &t)).unwrap(), RunState::Running);
+    bl(r.pump_logs(0));
     assert_eq!(tail(&r, 0, "t1"), ["app leeft"]);
-    r.stop(0, &t).unwrap();
-    assert_eq!(r.status(0, &t).unwrap(), RunState::Failed);
+    bl(r.stop(0, &t)).unwrap();
+    assert_eq!(bl(r.status(0, &t)).unwrap(), RunState::Failed);
 }
 
 #[test]
@@ -265,7 +278,7 @@ fn hop_runner_cage_line_reaches_task_log() {
     r.system_mut().cage =
         "hart of slot 1: misa 0x800000000094112d (rv64 acdfimsux, S-mode present)".into();
     run(&mut r, "t-cage", &hop_job()).unwrap();
-    r.pump_logs(0);
+    bl(r.pump_logs(0));
     let t = tail(&r, 0, "t-cage");
     assert_eq!(t[0], r.system().cage);
 }
@@ -274,7 +287,7 @@ fn hop_runner_cage_line_reaches_task_log() {
 fn hop_runner_no_cage_line_when_empty() {
     let mut r = runner(11, &[("node.os", "hopos")]);
     run(&mut r, "t-nocage", &hop_job()).unwrap();
-    r.pump_logs(0);
+    bl(r.pump_logs(0));
     assert_eq!(tail(&r, 0, "t-nocage")[0], "app leeft");
 }
 
@@ -293,18 +306,24 @@ fn hop_runner_ports() {
 fn hop_runner_deleted_during_staging() {
     let mut r = runner(11, &[]);
     let j = hop_job();
-    assert_eq!(r.start(0, &req("t-del", &j)).unwrap(), Started::AwaitImage);
-    r.stop(
+    assert_eq!(
+        bl(r.start(0, &req("t-del", &j))).unwrap(),
+        Started::AwaitImage
+    );
+    bl(r.stop(
         0,
         &TaskRef {
             id: "t-del",
             pid: 0,
         },
-    )
+    ))
     .unwrap();
     // Het image komt nog binnen: niets publiceren, niets aan de kooi koppelen.
-    assert!(r.image_begin(0, "t-del", 3).is_err());
-    assert_eq!(r.image_chunk(0, "t-del", b"img").unwrap(), Started::Aborted);
+    assert!(bl(r.image_begin(0, "t-del", 3)).is_err());
+    assert_eq!(
+        bl(r.image_chunk(0, "t-del", b"img")).unwrap(),
+        Started::Aborted
+    );
     assert_eq!(r.cages_in_use(), 0);
     assert!(r.slot_of("t-del").is_none());
     assert!(tail(&r, 0, "t-del").is_empty());
@@ -330,10 +349,10 @@ fn hop_runner_smp_cores() {
     assert_eq!(r.cages_in_use(), 1);
     let n = run(&mut r, "neighbor", &hop_job()).unwrap();
     assert_eq!(n, 2);
-    r.stop(0, &TaskRef { id: "t-smp", pid }).unwrap();
+    bl(r.stop(0, &TaskRef { id: "t-smp", pid })).unwrap();
     assert_eq!(r.cages_in_use(), 1);
     assert_eq!(r.slot_of("neighbor"), Some(Slot(2)));
-    assert!(r.system_mut().slot_status(Slot(2)).core_on);
+    assert!(bl(r.system_mut().slot_status(Slot(2))).core_on);
 }
 
 #[test]
@@ -363,7 +382,7 @@ fn hop_runner_rejections() {
         ("no artifact", &none),
         ("extract", &extract),
     ] {
-        assert!(r.start(0, &req(name, j)).is_err(), "{name}");
+        assert!(bl(r.start(0, &req(name, j))).is_err(), "{name}");
     }
     // Kooien zijn niet aan het aantal cores gebonden: de node weigert, niet de runner.
     for id in ["a", "b", "c"] {
@@ -378,16 +397,16 @@ fn hop_runner_rejections() {
 fn hop_runner_logs_blijven_na_het_einde() {
     let mut r = runner(11, &[("node.os", "hopos")]);
     let pid = run(&mut r, "t-retire", &hop_job()).unwrap();
-    r.pump_logs(0);
+    bl(r.pump_logs(0));
     let before = tail(&r, 0, "t-retire");
     assert!(!before.is_empty());
-    r.stop(
+    bl(r.stop(
         10,
         &TaskRef {
             id: "t-retire",
             pid,
         },
-    )
+    ))
     .unwrap();
     let after = r.logs(20, "t-retire", Stream::Stdout).unwrap();
     assert_eq!(after.len(), before.len());
@@ -399,13 +418,13 @@ fn hop_runner_logs_blijven_na_het_einde() {
 fn hop_runner_logs_verlopen_na_de_termijn() {
     let mut r = runner(11, &[("node.os", "hopos")]);
     let pid = run(&mut r, "t-expire", &hop_job()).unwrap();
-    r.stop(
+    bl(r.stop(
         0,
         &TaskRef {
             id: "t-expire",
             pid,
         },
-    )
+    ))
     .unwrap();
     assert!(
         r.logs(LogPolicy::DEFAULT.keep_ms + 1, "t-expire", Stream::Stdout)
@@ -475,10 +494,10 @@ fn hop_runner_adoption_and_reuse_keep_neighbor() {
     r.system_mut().live(2);
     r.adopt_running(&[("smp".into(), Slot(1)), ("shared".into(), Slot(2))]);
     assert_eq!(run(&mut r, "new", &hop_job()).unwrap(), 3);
-    r.stop(0, &TaskRef { id: "smp", pid: 1 }).unwrap();
+    bl(r.stop(0, &TaskRef { id: "smp", pid: 1 })).unwrap();
     assert_eq!(run(&mut r, "again", &hop_job()).unwrap(), 1);
     assert_eq!(r.slot_of("shared"), Some(Slot(2)));
-    assert!(r.system_mut().slot_status(Slot(2)).core_on);
+    assert!(bl(r.system_mut().slot_status(Slot(2))).core_on);
 }
 
 #[test]
@@ -498,14 +517,14 @@ fn hop_runner_capacity_failure_releases_cage() {
 fn stream_path_downloads_into_the_slot() {
     let mut r = runner(11, &[]);
     let j = hop_job();
-    r.start(0, &req("s1", &j)).unwrap();
-    r.image_begin(0, "s1", IMG.len() as u64).unwrap();
+    bl(r.start(0, &req("s1", &j))).unwrap();
+    bl(r.image_begin(0, "s1", IMG.len() as u64)).unwrap();
     assert_eq!(
-        r.image_chunk(0, "s1", &IMG[..4]).unwrap(),
+        bl(r.image_chunk(0, "s1", &IMG[..4])).unwrap(),
         Started::AwaitImage
     );
     assert_eq!(
-        r.image_chunk(0, "s1", &IMG[4..]).unwrap(),
+        bl(r.image_chunk(0, "s1", &IMG[4..])).unwrap(),
         Started::Running { pid: 1 }
     );
     assert_eq!(r.system().slot(1).image, IMG);
@@ -515,8 +534,11 @@ fn stream_path_downloads_into_the_slot() {
 fn stream_path_rejects_missing_content_length() {
     let mut r = runner(11, &[]);
     let j = hop_job();
-    r.start(0, &req("s1", &j)).unwrap();
-    assert!(matches!(r.image_begin(0, "s1", 0), Err(Error::Stream(_))));
+    bl(r.start(0, &req("s1", &j))).unwrap();
+    assert!(matches!(
+        bl(r.image_begin(0, "s1", 0)),
+        Err(Error::Stream(_))
+    ));
     assert_eq!(r.cages_in_use(), 0);
 }
 
@@ -526,36 +548,39 @@ fn stop_aborts_a_queued_download() {
     let j = hop_job();
     for i in 0..MAX_CONCURRENT_DOWNLOADS {
         let id = alloc::format!("d{i}");
-        r.start(0, &req(&id, &j)).unwrap();
-        r.image_begin(0, &id, 100).unwrap();
+        bl(r.start(0, &req(&id, &j))).unwrap();
+        bl(r.image_begin(0, &id, 100)).unwrap();
     }
-    r.start(0, &req("queued", &j)).unwrap();
+    bl(r.start(0, &req("queued", &j))).unwrap();
     // De vijfde wacht op zijn beurt en blijft "queued".
-    assert_eq!(r.image_begin(0, "queued", 100), Err(Error::Busy));
-    r.stop(
+    assert_eq!(bl(r.image_begin(0, "queued", 100)), Err(Error::Busy));
+    bl(r.stop(
         0,
         &TaskRef {
             id: "queued",
             pid: 0,
         },
-    )
+    ))
     .unwrap();
     assert!(r.slot_of("queued").is_none());
     // Een afgebroken stroom geeft zijn beurt vrij.
-    r.stop(0, &TaskRef { id: "d0", pid: 0 }).unwrap();
-    r.start(0, &req("next", &j)).unwrap();
-    r.image_begin(0, "next", 100).unwrap();
+    bl(r.stop(0, &TaskRef { id: "d0", pid: 0 })).unwrap();
+    bl(r.start(0, &req("next", &j))).unwrap();
+    bl(r.image_begin(0, "next", 100)).unwrap();
 }
 
 #[test]
 fn stop_during_successful_start_does_not_publish_ghost() {
     let mut r = runner(11, &[]);
     let j = hop_job();
-    r.start(0, &req("g", &j)).unwrap();
-    r.image_begin(0, "g", IMG.len() as u64).unwrap();
-    r.image_chunk(0, "g", &IMG[..3]).unwrap();
-    r.stop(0, &TaskRef { id: "g", pid: 0 }).unwrap();
-    assert_eq!(r.image_chunk(0, "g", &IMG[3..]).unwrap(), Started::Aborted);
+    bl(r.start(0, &req("g", &j))).unwrap();
+    bl(r.image_begin(0, "g", IMG.len() as u64)).unwrap();
+    bl(r.image_chunk(0, "g", &IMG[..3])).unwrap();
+    bl(r.stop(0, &TaskRef { id: "g", pid: 0 })).unwrap();
+    assert_eq!(
+        bl(r.image_chunk(0, "g", &IMG[3..])).unwrap(),
+        Started::Aborted
+    );
     assert_eq!(r.cages_in_use(), 0);
     assert_eq!(r.system().stops, [1]);
 }
@@ -566,7 +591,7 @@ fn hop_stop_failure_keeps_slot_quarantined() {
     let pid = run(&mut r, "q", &hop_job()).unwrap();
     r.system_mut().stop_err = true;
     assert_eq!(
-        r.stop(0, &TaskRef { id: "q", pid }),
+        bl(r.stop(0, &TaskRef { id: "q", pid })),
         Err(Error::Quarantined(Slot(pid)))
     );
     assert_eq!(r.slot_of("q"), Some(Slot(pid)));
@@ -579,26 +604,26 @@ fn hop_stop_failure_keeps_slot_quarantined() {
 fn repeated_hop_stop_cannot_kill_reused_slot() {
     let mut r = runner(11, &[]);
     let old = run(&mut r, "old", &hop_job()).unwrap();
-    r.stop(
+    bl(r.stop(
         0,
         &TaskRef {
             id: "old",
             pid: old,
         },
-    )
+    ))
     .unwrap();
     let new = run(&mut r, "new", &hop_job()).unwrap();
     assert_eq!(old, new);
     // Een tweede stop op het verouderde record raakt de nieuwe bewoner niet.
-    r.stop(
+    bl(r.stop(
         0,
         &TaskRef {
             id: "old",
             pid: old,
         },
-    )
+    ))
     .unwrap();
-    assert!(r.system_mut().slot_status(Slot(new)).core_on);
+    assert!(bl(r.system_mut().slot_status(Slot(new))).core_on);
     assert_eq!(r.slot_of("new"), Some(Slot(new)));
 }
 
@@ -607,9 +632,9 @@ fn stream_placement_failure_releases_the_slot() {
     let mut r = runner(1, &[]);
     let mut j = hop_job();
     j.cpu_shares = 4096;
-    r.start(0, &req("wide", &j)).unwrap();
+    bl(r.start(0, &req("wide", &j))).unwrap();
     assert!(matches!(
-        r.image_begin(0, "wide", 3),
+        bl(r.image_begin(0, "wide", 3)),
         Err(Error::NoCapacity(_))
     ));
     assert_eq!(r.cages_in_use(), 0);
@@ -635,15 +660,15 @@ fn stream_failure_at_the_last_byte_releases_and_logs() {
 fn kern_picks_the_slot_at_image_begin() {
     let mut r = runner(11, &[]);
     let j = hop_job();
-    r.start(0, &req("k", &j)).unwrap();
+    bl(r.start(0, &req("k", &j))).unwrap();
     assert_eq!(r.slot_of("k"), None, "no slot before the kern gave one");
-    r.image_begin(0, "k", IMG.len() as u64).unwrap();
+    bl(r.image_begin(0, "k", IMG.len() as u64)).unwrap();
     assert_eq!(r.slot_of("k"), Some(Slot(1)));
     assert_eq!(
-        r.system_mut().slot_status(Slot(1)).state,
+        bl(r.system_mut().slot_status(Slot(1))).state,
         SlotState::Streaming
     );
-    r.system_mut().set_clock(1_759_000_000).unwrap();
+    bl(r.system_mut().set_clock(1_759_000_000)).unwrap();
     assert_eq!(r.system().clock, 1_759_000_000);
 }
 
@@ -658,7 +683,7 @@ fn adopt_running_restores_logs() {
         .logs
         .push_back("na de flip".into());
     r.adopt_running(&[("kept".into(), Slot(2))]);
-    r.pump_logs(0);
+    bl(r.pump_logs(0));
     assert_eq!(tail(&r, 0, "kept"), ["na de flip"]);
 }
 

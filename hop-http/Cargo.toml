@@ -9,7 +9,7 @@ description = "De HTTP-adapter van Hop: leanhttp over een applib-TcpStream, api:
 
 [dependencies]
 api = { path = "../api" }
-applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.0-alpha.3" }
+applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.0-alpha.4" }
 leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.0.0" }
 
 [lints]

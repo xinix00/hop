@@ -9,7 +9,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::future::Future;
+use core::future::{Future, poll_fn};
 use core::pin::pin;
 use core::task::{Context, Poll, Waker};
 use std::cell::RefCell;
@@ -19,7 +19,7 @@ use abi::systemapi::PrivOp;
 use api::{Method, Request};
 use hop_http::Reply;
 use hopos_runner::KernSys;
-use hopos_runner::fake::{FakeKern, Spin};
+use hopos_runner::fake::FakeKern;
 use leanhttp::{AsyncRead, AsyncWrite, Close, IoError};
 use types::json::Value;
 
@@ -31,25 +31,29 @@ const T0: u64 = 1_788_220_800 * types::time::SECOND;
 const ELF: &[u8] = b"\x7fELF-the-web-app-image-bytes";
 const JOB: &str = r#"{"name":"web","artifacts":[{"url":"http://images/web.elf"}],"cpu_shares":1024,"memory_limit":33554432}"#;
 
-/// Artifacts uit het geheugen, in brokken van 8 bytes.
-struct MemImages(BTreeMap<String, Vec<u8>>);
+/// Artifacts uit het geheugen, in brokken van `.1` bytes.
+struct MemImages(BTreeMap<String, Vec<u8>>, usize);
+
+impl MemImages {
+    /// Brokken van 8 bytes: veel brokken voor een klein image.
+    fn new(files: BTreeMap<String, Vec<u8>>) -> Self {
+        Self(files, 8)
+    }
+}
 
 impl Images for MemImages {
-    fn fetch(&mut self, url: &str, sink: &mut dyn Sink) -> Result<(), String> {
+    async fn fetch<K: Sink>(&mut self, url: &str, sink: &mut K) -> Result<(), String> {
         let bytes = self.0.get(url).ok_or_else(|| format!("404 {url}"))?;
-        sink.begin(bytes.len() as u64)?;
-        for c in bytes.chunks(8) {
-            sink.chunk(c)?;
+        sink.begin(bytes.len() as u64).await?;
+        for c in bytes.chunks(self.1) {
+            sink.chunk(c).await?;
         }
         Ok(())
     }
 }
 
 type TestNode = Node<
-    KernSys<
-        applib::sys::Client<hopos_runner::fake::FakeDial, hopos_runner::fake::NeverTimer>,
-        Spin,
-    >,
+    KernSys<applib::sys::Client<hopos_runner::fake::FakeDial, hopos_runner::fake::NeverTimer>>,
     MemImages,
 >;
 
@@ -65,10 +69,10 @@ fn cfg() -> BootConfig {
 
 fn node() -> (TestNode, FakeKern) {
     let k = FakeKern::new(4);
-    let sys = KernSys::new(k.client(), Spin, 4);
+    let sys = KernSys::new(k.client(), 4);
     let mut images = BTreeMap::new();
     images.insert(String::from("http://images/web.elf"), ELF.to_vec());
-    (Node::new(&cfg(), sys, MemImages(images), T0), k)
+    (Node::new(&cfg(), sys, MemImages::new(images), T0), k)
 }
 
 struct Mem {
@@ -131,7 +135,7 @@ fn http(node: &mut TestNode, port: Port, raw: Vec<u8>) -> (u16, String) {
         out: out.clone(),
     };
     block_on(hop_http::serve(conn, async |req: Request| {
-        node.handle(port, &req, T0)
+        node.handle(port, &req, T0).await
     }))
     .unwrap();
     let text = String::from_utf8(out.borrow().clone()).unwrap();
@@ -195,7 +199,7 @@ fn post_a_job_and_the_kernel_places_it() {
     assert!(body.contains("\"web\":1"), "{body}");
 
     // Een tik pollt de kooi bij de kern (SLOT_STATUS) en laat hem draaien.
-    n.tick(T0 + 6 * types::time::SECOND);
+    block_on(n.tick(T0 + 6 * types::time::SECOND));
     assert!(k.0.borrow().ops.contains(&PrivOp::SlotStatus.op()));
     assert_eq!(
         n.agent().tasks().next().unwrap().state,
@@ -226,10 +230,10 @@ fn an_unsigned_job_never_reaches_the_kernel() {
 #[test]
 fn a_full_kernel_gives_the_task_back() {
     let k = FakeKern::new(0);
-    let sys = KernSys::new(k.client(), Spin, 4);
+    let sys = KernSys::new(k.client(), 4);
     let mut images = BTreeMap::new();
     images.insert(String::from("http://images/web.elf"), ELF.to_vec());
-    let mut n = Node::new(&cfg(), sys, MemImages(images), T0);
+    let mut n = Node::new(&cfg(), sys, MemImages::new(images), T0);
     let (status, body) = http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
     assert!(status < 500, "{status} {body}");
     let lines = n.take_lines();
@@ -245,8 +249,8 @@ fn a_full_kernel_gives_the_task_back() {
 #[test]
 fn a_missing_artifact_frees_the_reservation() {
     let k = FakeKern::new(4);
-    let sys = KernSys::new(k.client(), Spin, 4);
-    let mut n = Node::new(&cfg(), sys, MemImages(BTreeMap::new()), T0);
+    let sys = KernSys::new(k.client(), 4);
+    let mut n = Node::new(&cfg(), sys, MemImages::new(BTreeMap::new()), T0);
     http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
     let lines = n.take_lines();
     assert!(
@@ -317,11 +321,102 @@ fn block_on_ready<F: Future>(f: F) -> bool {
 fn a_new_resident_adopts_the_cages_of_the_old_one() {
     let (mut n, k) = node();
     http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
-    n.tick(T0 + types::time::SECOND);
+    block_on(n.tick(T0 + types::time::SECOND));
     // Een nieuwe bewoner over dezelfde kern: de staat komt uit hopfs.
-    let sys = KernSys::new(k.client(), Spin, 4);
-    let mut again = Node::new(&cfg(), sys, MemImages(BTreeMap::new()), T0);
-    assert_eq!(again.restore().unwrap(), 1);
+    let sys = KernSys::new(k.client(), 4);
+    let mut again = Node::new(&cfg(), sys, MemImages::new(BTreeMap::new()), T0);
+    assert_eq!(block_on(again.restore(T0)).unwrap(), 1);
     assert_eq!(again.runner().cages_in_use(), 1);
     assert_eq!(again.agent().tasks().next().unwrap().job_name, "web");
+}
+
+/// Twee taken om de beurt, zoals de executor van de app-core ze pollt.
+///
+/// Geen executor in een host-test, en ook geen geneste ronde: deze lus is de
+/// enige die pollt. `a` is klaar als hij klaar is; `b` loopt eeuwig.
+fn run_two<A: Future, B: Future<Output = ()>>(a: A, b: B) -> A::Output {
+    let mut a = pin!(a);
+    let mut b = pin!(b);
+    let mut cx = Context::from_waker(Waker::noop());
+    for _ in 0..10_000_000 {
+        if let Poll::Ready(v) = a.as_mut().poll(&mut cx) {
+            return v;
+        }
+        let _ = b.as_mut().poll(&mut cx);
+    }
+    panic!("de eigenaar kwam nooit klaar");
+}
+
+#[test]
+fn a_long_stream_does_not_block_the_other_tasks() {
+    // 8 MiB in brokken van 64 KiB, over een verbinding die bij elke lees
+    // eerst de core teruggeeft (zoals TCP waar het antwoord nog onderweg
+    // is). De eigenaar-taak stroomt; een tweede taak moet intussen gewoon
+    // aan de beurt komen, tussen de brokken door.
+    const SIZE: usize = 8 << 20;
+    const CHUNK: usize = 64 << 10;
+    let mut image = alloc::vec![0u8; SIZE];
+    image[..4].copy_from_slice(b"\x7fELF");
+    let k = FakeKern::new(4);
+    k.0.borrow_mut().yield_reads = true;
+    let sys = KernSys::new(k.client(), 4);
+    let mut files = BTreeMap::new();
+    files.insert(String::from("http://images/web.elf"), image);
+    let mut n = Node::new(&cfg(), sys, MemImages(files, CHUNK), T0);
+
+    let out = Rc::new(RefCell::new(Vec::new()));
+    let conn = Mem {
+        input: wire("POST", "/v1/jobs", JOB),
+        at: 0,
+        out: out.clone(),
+    };
+    let owner = hop_http::serve(conn, async |req: Request| {
+        n.handle(Port::Leader, &req, T0).await
+    });
+
+    // De tweede taak telt zijn beurten terwijl slot 1 half gestroomd is.
+    let during = Rc::new(RefCell::new(0u64));
+    let other = {
+        let (k, during) = (k.clone(), during.clone());
+        poll_fn(move |_| {
+            let streaming =
+                k.0.borrow()
+                    .slots
+                    .get(&1)
+                    .is_some_and(|s| !s.placed && !s.image.is_empty());
+            if streaming {
+                *during.borrow_mut() += 1;
+            }
+            Poll::<()>::Pending
+        })
+    };
+    run_two(owner, other).unwrap();
+
+    let st = k.0.borrow();
+    let slot = &st.slots[&1];
+    assert!(slot.placed);
+    assert_eq!(slot.image.len(), SIZE);
+    let streams = st
+        .ops
+        .iter()
+        .filter(|&&o| o == PrivOp::StreamImage.op())
+        .count();
+    assert_eq!(streams, SIZE / CHUNK);
+    // Elke brok wachtte op de kern, en in elk van die wachten kwam de andere
+    // taak aan de beurt: tussen de eerste en de laatste brok minstens één
+    // beurt per brok.
+    assert!(st.yields >= streams as u64, "{} {streams}", st.yields);
+    assert!(
+        *during.borrow() >= (streams - 1) as u64,
+        "de tweede taak kwam {} keer aan de beurt tijdens {streams} brokken",
+        during.borrow()
+    );
+    drop(st);
+    let text = String::from_utf8(out.borrow().clone()).unwrap();
+    assert!(text.starts_with("HTTP/1.1 2"), "{text}");
+    assert!(
+        n.take_lines()
+            .iter()
+            .any(|l| l.contains("HOP_JOB_PLACED slot=1"))
+    );
 }

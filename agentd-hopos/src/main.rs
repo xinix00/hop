@@ -6,7 +6,11 @@
 //! HopOS-runner. Daarna drie soorten taken op de executor van de app-core:
 //!
 //! - de eigenaar: bezit de [`Node`], handelt de verzoeken uit de [`Hub`]
-//!   af en tikt elke seconde;
+//!   af en tikt elke seconde. Wat de node bij de kern vraagt (een slot, het
+//!   image, een status, de staat op hopfs) en de download van een artifact
+//!   zijn `.await`s: de eigenaar geeft dan de core terug, en de netstack en
+//!   de verbindingstaken draaien door. Er wordt nergens een executor-ronde
+//!   binnen een taak gedraaid (handboek §4);
 //! - per poort één verbindingstaak (agent op P, leader op P + 1000): accept,
 //!   leanhttp, en elk verzoek als bericht naar de eigenaar.
 //!
@@ -30,7 +34,7 @@ use alloc::format;
 use alloc::string::String;
 use core::future::{Future, poll_fn};
 use core::pin::pin;
-use core::task::{Context, Poll, Waker};
+use core::task::Poll;
 use core::time::Duration;
 
 use agentd_hopos::{BootConfig, Hub, Images, Node, Port, Sink};
@@ -38,7 +42,7 @@ use applib::appnet::{self, Net, TcpListener};
 use applib::rt::Exec;
 use applib::{App, EXEC, log};
 use hop_http::TcpConn;
-use hopos_runner::{Block, KernSys};
+use hopos_runner::KernSys;
 
 applib::main!(resident);
 
@@ -54,55 +58,6 @@ const TICK: Duration = Duration::from_secs(1);
 /// De langste stilte op een verbinding: elke poort bedient één verbinding
 /// tegelijk, dus een keep-alive-client mag de volgende niet lang ophouden.
 const READ_CAP: Duration = Duration::from_secs(2);
-
-/// Wacht op een kern-call door de executor van deze core ronden te laten draaien.
-///
-/// De system-client wacht op zijn TCP-verbinding, en die schuift alleen op
-/// als de pomp-taak van de netstack draait; dus pollt deze wachter zijn
-/// future en laat daartussen de andere taken één ronde (`Exec::step`). De
-/// taak die wacht, zit tijdens zijn eigen poll niet in de takentabel en
-/// wordt dus niet opnieuw gepolld. Een wek voor die taak die in de ronde
-/// valt, gaat verloren; de eigenaar-lus kijkt daarom altijd eerst zelf in
-/// de bus (level-triggered) voordat hij wacht. Er wordt gespind, niet
-/// geslapen: een call op het slot-LAN duurt tientallen microseconden, en de
-/// termijn van de client (10 s) begrenst het ergste geval.
-struct Nested(&'static Exec);
-
-impl Block for Nested {
-    fn block_on<F: Future>(&mut self, f: F) -> F::Output {
-        let mut f = pin!(f);
-        let mut cx = Context::from_waker(Waker::noop());
-        loop {
-            if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
-                return v;
-            }
-            self.0.step();
-        }
-    }
-}
-
-/// Geeft de core één ronde terug, zodat de executor wat er gespawnd is een eigen slot geeft.
-///
-/// Nodig vóór de eerste [`Nested`]-wacht na elke spawn. De executor van
-/// applib v3.0.0-alpha.3 zet een verse spawn in het eerste lege slot, en
-/// tijdens zijn eigen poll is het slot van de eigenaar-taak leeg: de ronde
-/// binnen `Nested` zette de RX-pomp van appnet daar neer, en zodra de
-/// eigenaar Pending gaf, overschreef de buitenste ronde hem. Gemeten 29-09
-/// op QEMU virt: de pomp stond na 14 timer-wekken stil, een SYN op :8080
-/// kreeg nooit antwoord. De executor in HopOS weigert dat slot sindsdien
-/// (`Slot::polling`); tot Hop een tag met die fix volgt, is dit de wacht.
-async fn settle() {
-    let mut yielded = false;
-    poll_fn(|cx| {
-        if yielded {
-            return Poll::Ready(());
-        }
-        yielded = true;
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    })
-    .await;
-}
 
 /// Hoe lang een verbinding naar een artifact-server mag duren.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -137,43 +92,40 @@ impl leanhttp::Dial for SlotDial {
 
 /// De downloader van artifacts: `http://` met leanhttp, en de bytes via de runner de kooi in.
 ///
-/// De download loopt binnen de eigenaar-taak (via [`Nested`]): de API van
-/// de node wacht zolang, wat voor één image op het LAN seconden zijn. Een
-/// eigen downloadtaak met de bytes als berichten is de volgende stap.
-/// Artifact-headers en S3 gaan nog niet mee.
+/// De download loopt in de eigenaar-taak: de staat van de node wacht zolang
+/// (de API antwoordt na de plaatsing), maar de core niet. Elke lees van het
+/// net en elke brok naar de kern is een `.await`, dus de netstack en de
+/// verbindingstaken draaien tussendoor. Artifact-headers en S3 gaan nog
+/// niet mee.
 struct HttpImages {
     dial: SlotDial,
-    exec: &'static Exec,
 }
 
 impl Images for HttpImages {
-    fn fetch(&mut self, url: &str, sink: &mut dyn Sink) -> Result<(), String> {
-        let Self { dial, exec } = self;
-        Nested(exec).block_on(async {
-            // `get` eist 200 en een Content-Length: een image zonder lengte
-            // kan de kern niet plaatsen.
-            let mut resp = leanhttp::get(dial, url)
+    async fn fetch<K: Sink>(&mut self, url: &str, sink: &mut K) -> Result<(), String> {
+        // `get` eist 200 en een Content-Length: een image zonder lengte
+        // kan de kern niet plaatsen.
+        let mut resp = leanhttp::get(&mut self.dial, url)
+            .await
+            .map_err(|e| format!("download {url}: {e}"))?;
+        let len = resp
+            .length
+            .ok_or_else(|| format!("download {url}: no Content-Length"))?;
+        sink.begin(len).await?;
+        let mut buf = alloc::vec::Vec::new();
+        buf.try_reserve_exact(DOWNLOAD_BUF)
+            .map_err(|_| String::from("download buffer: out of memory"))?;
+        buf.resize(DOWNLOAD_BUF, 0);
+        loop {
+            let n = resp
+                .read(&mut buf)
                 .await
                 .map_err(|e| format!("download {url}: {e}"))?;
-            let len = resp
-                .length
-                .ok_or_else(|| format!("download {url}: no Content-Length"))?;
-            sink.begin(len)?;
-            let mut buf = alloc::vec::Vec::new();
-            buf.try_reserve_exact(DOWNLOAD_BUF)
-                .map_err(|_| String::from("download buffer: out of memory"))?;
-            buf.resize(DOWNLOAD_BUF, 0);
-            loop {
-                let n = resp
-                    .read(&mut buf)
-                    .await
-                    .map_err(|e| format!("download {url}: {e}"))?;
-                if n == 0 {
-                    return Ok(());
-                }
-                sink.chunk(buf.get(..n).unwrap_or_default())?;
+            if n == 0 {
+                return Ok(());
             }
-        })
+            sink.chunk(buf.get(..n).unwrap_or_default()).await?;
+        }
     }
 }
 
@@ -208,21 +160,17 @@ async fn either(a: impl Future<Output = ()>, b: impl Future<Output = ()>) {
 }
 
 /// Eén poort: accepteren, leanhttp, elk verzoek als bericht naar de eigenaar.
+///
+/// De listener is al gebonden vóór de spawn: zodra `HOP_UP` op het log
+/// staat, neemt de stack een SYN aan, ook als deze taak nog geen ronde had.
 async fn listen(
-    net: &'static Net,
+    listener: TcpListener,
     exec: &'static Exec,
     hub: &'static Hub,
     slot: usize,
     port: Port,
     number: u16,
 ) {
-    let listener: TcpListener = match net.tcp_listen(number) {
-        Ok(l) => l,
-        Err(e) => {
-            log!("hop: cannot listen on :{number}: {e} HOP_LISTEN_FAIL");
-            return;
-        }
-    };
     loop {
         let stream = match listener.accept().await {
             Ok(s) => s,
@@ -239,6 +187,17 @@ async fn listen(
     }
 }
 
+/// Bindt een poort, of zegt luid waarom niet.
+fn bind(net: &'static Net, number: u16) -> Option<TcpListener> {
+    match net.tcp_listen(number) {
+        Ok(l) => Some(l),
+        Err(e) => {
+            log!("hop: cannot listen on :{number}: {e} HOP_LISTEN_FAIL");
+            None
+        }
+    }
+}
+
 async fn resident(app: &'static App) {
     let exec: &'static Exec = EXEC.get();
     log!("hop: resident starting in slot {} HOP_BOOT", app.slot());
@@ -249,8 +208,6 @@ async fn resident(app: &'static App) {
             return;
         }
     };
-    // De RX-pomp is net gespawnd: eerst een slot voor hem (zie `settle`).
-    settle().await;
     let [a, b, c, d] = net.ip();
     let slot_ip = format!("{a}.{b}.{c}.{d}");
     let cfg = match BootConfig::from_env(|k| app.env(k).map(String::from), app.slot(), &slot_ip) {
@@ -276,13 +233,12 @@ async fn resident(app: &'static App) {
         log!("hop: no wall clock from the kernel; task times count from boot HOP_NO_CLOCK");
     }
 
-    let sys = KernSys::new(net.system_client(), Nested(exec), cfg.cores);
+    let sys = KernSys::new(net.system_client(), cfg.cores);
     let images = HttpImages {
         dial: SlotDial { net, exec },
-        exec,
     };
     let mut node = Node::new(&cfg, sys, images, now(app, exec));
-    match node.restore() {
+    match node.restore(now(app, exec)).await {
         Ok(0) => {}
         Ok(n) => log!("hop: adopted {n} running cage(s) from the saved state HOP_ADOPTED"),
         Err(e) => log!("hop: saved agent state not restored: {e}"),
@@ -291,14 +247,22 @@ async fn resident(app: &'static App) {
 
     // Eén bus voor het leven van de bewoner; de taken krijgen `&'static`.
     let hub: &'static Hub = Box::leak(Box::new(Hub::new(2)));
-    let spawned = exec
-        .spawn(listen(net, exec, hub, 0, Port::Agent, cfg.port))
-        .and_then(|()| exec.spawn(listen(net, exec, hub, 1, Port::Leader, cfg.leader_port())));
-    if let Err(e) = spawned {
-        log!("hop: cannot spawn the listeners: {e} HOP_SPAWN_FAIL");
-        return;
+    // De listeners binden hier, vóór de spawn: een spawn krijgt zijn slot pas
+    // in de volgende ronde van de executor, en zo hoeft niemand daarop te
+    // wachten. Een poort die niet bindt, is luid en kost alleen die poort.
+    let ports = [
+        (0, Port::Agent, cfg.port),
+        (1, Port::Leader, cfg.leader_port()),
+    ];
+    for (slot, port, number) in ports {
+        let Some(l) = bind(net, number) else {
+            continue;
+        };
+        if let Err(e) = exec.spawn(listen(l, exec, hub, slot, port, number)) {
+            log!("hop: cannot spawn the listeners: {e} HOP_SPAWN_FAIL");
+            return;
+        }
     }
-    settle().await;
     log!(
         "hop: agent up node={} cluster={} agent=:{} leader=:{} cores={} HOP_UP",
         cfg.node_id,
@@ -311,16 +275,16 @@ async fn resident(app: &'static App) {
     let tick_ns = u64::try_from(TICK.as_nanos()).unwrap_or(u64::MAX);
     let mut next_tick = now(app, exec);
     loop {
-        // Eerst de bus leeg: een wek die tijdens een kern-call verloren ging
-        // (zie `Nested`), wordt hier alsnog gezien.
+        // Eerst de bus leeg (level-triggered): wat binnenkwam terwijl de
+        // eigenaar op de kern wachtte, ligt er nog en wordt nu afgehandeld.
         while let Some((slot, port, req)) = hub.next() {
-            let reply = node.handle(port, &req, now(app, exec));
+            let reply = node.handle(port, &req, now(app, exec)).await;
             hub.answer(slot, reply);
             flush(&mut node);
         }
         let t = now(app, exec);
         if t >= next_tick {
-            node.tick(t);
+            node.tick(t).await;
             next_tick = t.saturating_add(tick_ns);
             flush(&mut node);
         }

@@ -9,6 +9,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use core::fmt;
+use core::future::Future;
 
 /// Een kooi op de node (een slot-index, 1 of hoger); geen core-nummer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -164,7 +165,7 @@ pub enum Streamed {
 ///
 /// Eén-op-één de ops van `abi::systemapi::PrivOp` (0x40 tot en met 0x45;
 /// `FLIP`, 0x46, komt hier met de kern-flip); een adapter bouwt en leest de
-/// frames. Geen methode blokkeert. Een start
+/// frames. Een start
 /// is één fase: [`SystemApi::start_slot`] reserveert partitie en cores voor
 /// een image van bekende maat en de KERN kiest het slot; daarna stroomt het
 /// image met [`SystemApi::stream_image`] RECHTSTREEKS de partitie in (elke
@@ -172,13 +173,37 @@ pub enum Streamed {
 /// plaatst de kern het en start hij de app. Faalt een start, dan ruimt de
 /// kern zijn eigen reserveringen op; de aanroeper ruimt alleen zijn
 /// boekhouding op.
+///
+/// # Asynchroon
+///
+/// Elke op die de kern raakt, geeft een future. Op HopOS is een op een frame
+/// over een TCP-verbinding naar de kern, en die verbinding schuift alleen op
+/// als de pomp-taak van de netstack draait, op dezelfde executor. Een
+/// synchrone trait dwong de aanroeper om binnen zijn eigen poll rondes van
+/// de executor te draaien, en de executor roept zichzelf nooit aan
+/// (handboek §4; het kostte een verloren RX-pomp, gemeten 29-09 op QEMU).
+/// Nu geeft de eigenaar-taak bij elke wachtende call gewoon de core terug.
+///
+/// De vorm is `-> impl Future` en niet `async fn`: dezelfde betekenis, maar
+/// zonder de lint `async_fn_in_trait`, die waarschuwt dat de aanroeper geen
+/// `Send` kan eisen. Dat hoeft hier ook niet: taken verhuizen nooit van core
+/// (handboek §4), dus de executor eist geen `Send`. Een implementatie mag
+/// gewoon `async fn` schrijven.
+///
+/// De trait is daarmee niet object-safe (`dyn SystemApi` bestaat niet); de
+/// runner is generiek over hem ([`crate::HopRunner<S>`]), en dat was hij al:
+/// één kern per node, dus één monomorfe runner en geen vtable.
+///
+/// [`SystemApi::num_cores`] en [`SystemApi::pool_largest`] blijven
+/// synchroon: ze gaan niet over de draad (de cores komen uit de env van het
+/// slot) en worden gelezen in synchrone paden (de plaatsing van de leader).
 pub trait SystemApi {
     /// Het aantal bruikbare app-cores: de enige capaciteit waar Hop tegen plant.
     fn num_cores(&self) -> u32;
 
     /// `START_SLOT`: reserveert een slot voor een image van
     /// `spec.image_size` bytes; de kern kiest het slot en geeft het terug.
-    fn start_slot(&mut self, spec: &StartSpec) -> Result<Slot, SysError>;
+    fn start_slot(&mut self, spec: &StartSpec) -> impl Future<Output = Result<Slot, SysError>>;
 
     /// `STREAM_IMAGE`: schrijft de volgende bytes van het image.
     ///
@@ -186,7 +211,11 @@ pub trait SystemApi {
     /// [`Streamed::Failed`]. Een `Err` is een geweigerde brok (te veel bytes,
     /// een onbekend slot); ook dan is de stroom afgebroken en ruimde de kern
     /// op.
-    fn stream_image(&mut self, slot: Slot, chunk: &[u8]) -> Result<Streamed, SysError>;
+    fn stream_image(
+        &mut self,
+        slot: Slot,
+        chunk: &[u8],
+    ) -> impl Future<Output = Result<Streamed, SysError>>;
 
     /// `STOP_SLOT`: stopt het slot (killvlag, na `timeout_ms` de
     /// stage-2-intrekking) en geeft het vrij.
@@ -195,13 +224,17 @@ pub trait SystemApi {
     /// betekent dat de kern de vrijgave op zich neemt; tot de core uit is meldt
     /// [`SystemApi::slot_status`] hem nog als aan, en wordt hij niet
     /// hergebruikt. Een fout betekent: niet bevestigd (quarantaine).
-    fn stop_slot(&mut self, slot: Slot, timeout_ms: u64) -> Result<(), SysError>;
+    fn stop_slot(
+        &mut self,
+        slot: Slot,
+        timeout_ms: u64,
+    ) -> impl Future<Output = Result<(), SysError>>;
 
     /// `SLOT_STATUS`: de toestand van een slot.
     ///
     /// `&mut self`: op HopOS is dit een call over de verbinding met de kern
     /// (applib's system-client), en die verbinding is van één eigenaar.
-    fn slot_status(&mut self, slot: Slot) -> SlotStatus;
+    fn slot_status(&mut self, slot: Slot) -> impl Future<Output = SlotStatus>;
 
     /// `NEXT_LOG`: haalt de volgende logregel van de app in `buf`, zonder
     /// regeleinde.
@@ -209,10 +242,10 @@ pub trait SystemApi {
     /// Geeft de lengte, of `None` als er niets klaarstaat. Een regel langer dan
     /// `buf` wordt afgekapt. De kern bewaart per slot een korte ring; wie te
     /// laat komt, mist de oudste regels.
-    fn next_log_line(&mut self, slot: Slot, buf: &mut [u8]) -> Option<usize>;
+    fn next_log_line(&mut self, slot: Slot, buf: &mut [u8]) -> impl Future<Output = Option<usize>>;
 
     /// `SET_CLOCK`: zet de klok van de node (Unix-nanoseconden).
-    fn set_clock(&mut self, unix_ns: u64) -> Result<(), SysError>;
+    fn set_clock(&mut self, unix_ns: u64) -> impl Future<Output = Result<(), SysError>>;
 
     /// De grootste partitie die de node nu nog in één stuk kan plaatsen; `None` als hij het niet weet.
     ///
