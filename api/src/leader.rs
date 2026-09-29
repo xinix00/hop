@@ -3,6 +3,13 @@
 //! Bezit de routes en de JSON-vorm; de clusterstaat is van de leader, die
 //! [`Cluster`] implementeert. De trait is het deel van de leader dat de API
 //! nodig heeft, zodat de handlers zonder de hele leader te testen zijn.
+//!
+//! Drie routes gaan verder dan de staat van de leader, en krijgen daarom
+//! een [`LeaderEffect`] dat de adapter uitvoert (de handler heeft geen
+//! sockets): `/v1/tasks` (de taken van elke agent, Go's `GetClusterStatus`),
+//! `/v1/agents/{id}/logs/...` en `/v1/agents/{id}/capacity` (een doorgifte
+//! naar die agent, zodat `hop logs` en `hop agents <id>` alleen de leader
+//! hoeven te bereiken), en `/v1/events` (de SSE-stroom).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -74,6 +81,68 @@ pub trait Cluster {
     fn notify(&mut self, topic: &str);
 }
 
+/// Wat de adapter na een antwoord van de leader-API nog moet doen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LeaderEffect {
+    /// Niets: het antwoord is compleet.
+    None,
+    /// `GET /v1/tasks`: vraag elke agent zijn taken (`GET /tasks`,
+    /// ondertekend, met één totale termijn) en antwoord met [`tasks_reply`].
+    /// Een agent die niet antwoordt, ontbreekt, zoals in Go.
+    Tasks {
+        /// `(id, endpoint)` van elke geregistreerde agent.
+        agents: Vec<(String, String)>,
+    },
+    /// Geef het verzoek door aan één agent: `GET {endpoint}{path}`,
+    /// ondertekend met de clustersleutel, en zijn antwoord terug.
+    Agent {
+        /// Het endpoint van de agent (`http://ip:poort`).
+        endpoint: String,
+        /// Het pad op de agent, met de query van de aanroeper.
+        path: String,
+        /// Of het antwoord een stroom is (per brok doorspoelen).
+        stream: bool,
+    },
+    /// `GET /v1/events`: open een SSE-stroom met [`crate::PING`] en daarna
+    /// de meldingen uit de [`crate::EventLog`] van de node.
+    Events,
+}
+
+/// Het antwoord op `/v1/tasks` uit de taken per agent: `{"tasks_by_agent":
+/// {id: [taak, ...]}}`, en de agents die niet antwoordden onder
+/// `"unreachable"` (een uitbreiding op Go, die ze stil wegliet: zo kan de
+/// CLI zeggen wélke agent ontbreekt).
+pub fn tasks_reply(results: &[(String, Option<Vec<types::Task>>)]) -> Response {
+    let mut by_agent = types::de::ObjectBuilder::new();
+    let mut unreachable = Vec::new();
+    for (id, tasks) in results {
+        let Some(tasks) = tasks else {
+            if unreachable.try_reserve(1).is_err() {
+                return Response::empty(500);
+            }
+            unreachable.push(s(id));
+            continue;
+        };
+        let mut list = Vec::new();
+        for t in tasks {
+            match t.to_value() {
+                Ok(v) if list.try_reserve(1).is_ok() => list.push(v),
+                _ => return Response::empty(500),
+            }
+        }
+        if by_agent.field(id, Value::Array(list)).is_err() {
+            return Response::empty(500);
+        }
+    }
+    reply(
+        200,
+        [
+            ("tasks_by_agent", by_agent.build()),
+            ("unreachable", Value::Array(unreachable)),
+        ],
+    )
+}
+
 /// De leader-API.
 #[derive(Clone, Debug, Default)]
 pub struct LeaderApi {
@@ -90,15 +159,40 @@ impl LeaderApi {
         }
     }
 
-    /// Behandelt één verzoek.
-    pub fn handle<C: Cluster>(&self, cluster: &mut C, now: Nanos, req: &Request) -> Response {
+    /// Behandelt één verzoek; het [`LeaderEffect`] zegt wat de adapter daarna nog doet.
+    pub fn handle<C: Cluster>(
+        &self,
+        cluster: &mut C,
+        now: Nanos,
+        req: &Request,
+    ) -> (Response, LeaderEffect) {
         let path = req.path.as_str();
         if path == "/health" {
-            return reply(200, [("status", s("ok"))]);
+            return (reply(200, [("status", s("ok"))]), LeaderEffect::None);
         }
         if let Some(reject) = check_auth(&self.key, req) {
-            return reject;
+            return (reject, LeaderEffect::None);
         }
+        match (req.method, path) {
+            (Method::Get, "/v1/tasks") => return tasks(cluster),
+            (Method::Get, "/v1/events") => {
+                let mut r = Response::empty(200);
+                r.set_header("Content-Type", "text/event-stream");
+                return (r, LeaderEffect::Events);
+            }
+            (Method::Get, p) if p.starts_with("/v1/agents/") => {
+                if let Some(out) = agent_route(cluster, req, p) {
+                    return out;
+                }
+            }
+            _ => {}
+        }
+        (self.state(cluster, now, req), LeaderEffect::None)
+    }
+
+    /// De routes over de staat van de leader zelf.
+    fn state<C: Cluster>(&self, cluster: &mut C, now: Nanos, req: &Request) -> Response {
+        let path = req.path.as_str();
         match (req.method, path) {
             (Method::Get, "/v1/agents") => agents(cluster),
             (Method::Post, "/v1/agents") => register(cluster, now, req),
@@ -160,6 +254,66 @@ impl LeaderApi {
             ],
         )
     }
+}
+
+/// `GET /v1/tasks`: de agents om te vragen.
+fn tasks<C: Cluster>(cluster: &C) -> (Response, LeaderEffect) {
+    let mut agents = Vec::new();
+    for a in cluster.agents() {
+        if agents.try_reserve(1).is_err() {
+            return (Response::empty(500), LeaderEffect::None);
+        }
+        agents.push((a.id, a.endpoint));
+    }
+    (Response::empty(200), LeaderEffect::Tasks { agents })
+}
+
+/// `GET /v1/agents/{id}/capacity` en `GET /v1/agents/{id}/logs/{taak}/{stroom}`:
+/// een doorgifte naar die agent. `None` voor elk ander pad onder `/v1/agents/`.
+fn agent_route<C: Cluster>(
+    cluster: &C,
+    req: &Request,
+    path: &str,
+) -> Option<(Response, LeaderEffect)> {
+    let rest = path.strip_prefix("/v1/agents/")?;
+    let (id, sub) = rest.split_once('/')?;
+    let (target, stream) = if sub == "capacity" {
+        (String::from("/capacity"), false)
+    } else {
+        let logs = sub.strip_prefix("logs/")?;
+        let mut parts = logs.split('/');
+        let (Some(task), Some(which), None) = (parts.next(), parts.next(), parts.next()) else {
+            return Some(bad_request());
+        };
+        if id.is_empty() || task.is_empty() || !matches!(which, "stdout" | "stderr") {
+            return Some(bad_request());
+        }
+        let mut t = alloc::format!("/logs/{task}/{which}");
+        if !req.query.is_empty() {
+            t.push('?');
+            t.push_str(&req.query);
+        }
+        (t, true)
+    };
+    let Some(agent) = cluster.agents().into_iter().find(|a| a.id == id) else {
+        return Some((Response::error(404, "agent not found"), LeaderEffect::None));
+    };
+    Some((
+        Response::empty(200),
+        LeaderEffect::Agent {
+            endpoint: agent.endpoint,
+            path: target,
+            stream,
+        },
+    ))
+}
+
+/// Go's antwoord op een kapot log-pad onder `/v1/agents/`.
+fn bad_request() -> (Response, LeaderEffect) {
+    (
+        Response::error(400, "invalid request parameters"),
+        LeaderEffect::None,
+    )
 }
 
 fn uint(n: usize) -> Value {

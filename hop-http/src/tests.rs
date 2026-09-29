@@ -15,7 +15,7 @@ use std::rc::Rc;
 use api::{Effect, LogStream, Method, Request, Response};
 use leanhttp::{AsyncRead, AsyncWrite, Close, IoError};
 
-use crate::{Reply, refuse, serve};
+use crate::{Ask, Chunk, Reply, Streams, refuse, serve};
 
 pub(crate) struct Mem {
     input: Vec<u8>,
@@ -57,15 +57,58 @@ pub(crate) fn block_on<F: Future>(f: F) -> F::Output {
     panic!("future bleef hangen");
 }
 
+/// De naden van een stroom in de test: een vaste rij antwoorden van de
+/// "eigenaar", een klok die per vraag een seconde verspringt, en een telling
+/// van de vragen en de afmeldingen.
+#[derive(Default)]
+struct Fake {
+    chunks: Vec<Chunk>,
+    asked: Vec<Ask>,
+    done: u32,
+    clock: u64,
+}
+
+impl Streams for Fake {
+    async fn poll(&mut self, ask: Ask) -> Chunk {
+        self.asked.push(ask);
+        self.clock += 1_000_000_000;
+        if self.chunks.is_empty() {
+            return Chunk {
+                done: true,
+                ..Chunk::default()
+            };
+        }
+        self.chunks.remove(0)
+    }
+
+    async fn nap(&mut self, _d: core::time::Duration) {}
+
+    fn now(&self) -> u64 {
+        self.clock
+    }
+
+    fn done(&mut self) {
+        self.done += 1;
+    }
+}
+
 /// Stuurt `raw` naar een server met `handler` en geeft wat hij terugschreef.
 fn exchange(raw: &[u8], handler: impl AsyncFnMut(Request) -> Reply) -> String {
+    exchange_with(raw, handler, &mut Fake::default())
+}
+
+fn exchange_with(
+    raw: &[u8],
+    handler: impl AsyncFnMut(Request) -> Reply,
+    streams: &mut Fake,
+) -> String {
     let out = Rc::new(RefCell::new(Vec::new()));
     let conn = Mem {
         input: raw.to_vec(),
         at: 0,
         out: out.clone(),
     };
-    block_on(serve(conn, handler)).unwrap();
+    block_on(serve(conn, handler, streams)).unwrap();
     String::from_utf8(out.borrow().clone()).unwrap()
 }
 
@@ -143,6 +186,7 @@ fn unwired_effects_are_refused_loudly() {
     let f = refuse(&Effect::Flip {
         url: String::new(),
         sha256: String::new(),
+        cold: false,
     })
     .unwrap();
     assert_eq!(f.status, 501);
@@ -152,4 +196,106 @@ fn unwired_effects_are_refused_loudly() {
     })
     .unwrap();
     assert_eq!(l.status, 404);
+}
+
+#[test]
+fn a_stream_asks_the_owner_until_it_is_done() {
+    let raw = b"GET /logs/t1/stdout?follow=1 HTTP/1.1\r\nHost: n\r\n\r\n";
+    let mut f = Fake {
+        chunks: vec![
+            Chunk {
+                text: "data: one\n\n".into(),
+                seq: 1,
+                done: false,
+            },
+            // Niets nieuws: de volgende vraag houdt hetzelfde nummer.
+            Chunk {
+                text: String::new(),
+                seq: 1,
+                done: false,
+            },
+            Chunk {
+                text: String::new(),
+                seq: 1,
+                done: false,
+            },
+            Chunk {
+                text: "data: two\n\n".into(),
+                seq: 2,
+                done: true,
+            },
+        ],
+        ..Fake::default()
+    };
+    let first = Ask::Logs {
+        task_id: "t1".into(),
+        stream: LogStream::Stdout,
+        seq: 0,
+    };
+    let text = exchange_with(
+        raw,
+        async |_req: Request| Reply::Stream {
+            head: Response::empty(200),
+            first: String::new(),
+            ask: first.clone(),
+        },
+        &mut f,
+    );
+    assert!(text.contains("Content-Type: text/event-stream"), "{text}");
+    assert!(text.contains("data: one\n\n"), "{text}");
+    assert!(text.contains("data: two\n\n"), "{text}");
+    let one = text.find("data: one").unwrap();
+    assert!(text[one..].contains("data: two"));
+    let seqs: Vec<u64> = f
+        .asked
+        .iter()
+        .map(|a| match a {
+            Ask::Logs { seq, .. } | Ask::Events { seq } => *seq,
+        })
+        .collect();
+    assert_eq!(seqs, [0, 1, 1, 1]);
+    // Afgemeld, precies één keer.
+    assert_eq!(f.done, 1);
+}
+
+#[test]
+fn a_silent_stream_writes_a_keepalive_and_the_events_stream_starts_with_ping() {
+    let raw = b"GET /v1/events HTTP/1.1\r\nHost: n\r\n\r\n";
+    // Twintig lege antwoorden: de klok springt een seconde per vraag, dus
+    // na vijftien seconden stilte komt er een keepalive.
+    let mut f = Fake {
+        chunks: (0..20)
+            .map(|_| Chunk {
+                text: String::new(),
+                seq: 7,
+                done: false,
+            })
+            .collect(),
+        ..Fake::default()
+    };
+    let text = exchange_with(
+        raw,
+        async |_req: Request| Reply::Stream {
+            head: Response::empty(200),
+            first: String::from(api::PING),
+            ask: Ask::Events { seq: 7 },
+        },
+        &mut f,
+    );
+    assert!(text.contains("event: ping\ndata: {}\n\n"), "{text}");
+    assert_eq!(text.matches(": keepalive").count(), 1, "{text}");
+    assert_eq!(f.done, 1);
+}
+
+#[test]
+fn a_plain_reply_is_not_a_stream() {
+    let raw = b"GET /health HTTP/1.1\r\nHost: n\r\n\r\n";
+    let mut f = Fake::default();
+    exchange_with(
+        raw,
+        async |_req: Request| Reply::Plain(Response::empty(200)),
+        &mut f,
+    );
+    assert!(f.asked.is_empty());
+    assert_eq!(f.done, 0);
 }

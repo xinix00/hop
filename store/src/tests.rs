@@ -641,3 +641,58 @@ fn backends_are_send() {
     is_send::<Box<dyn StateStore + Send>>();
     is_send::<Error>();
 }
+
+/// Een server die zijn antwoord byte voor byte druppelt: elke byte valt
+/// ruim binnen de fasetermijn, het geheel niet binnen het budget.
+fn dripping_server() -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let Ok((s, _)) = l.accept() else { return };
+        let mut r = BufReader::new(s.try_clone().unwrap());
+        loop {
+            let mut line = String::new();
+            if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                break;
+            }
+        }
+        let mut s = s;
+        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nETag: \"e1\"\r\nContent-Length: 40\r\n\r\n");
+        for _ in 0..40 {
+            std::thread::sleep(Duration::from_millis(100));
+            if s.write_all(b" ").is_err() {
+                return;
+            }
+        }
+    });
+    url
+}
+
+// Geen Go-naam: Go gaf elke backend-aanroep een context met een totale
+// termijn (`context.WithTimeout` rond de hele aanroep); dit is die termijn.
+#[test]
+fn a_dripping_hoplockserver_is_cut_off_at_the_call_budget() {
+    let url = dripping_server();
+    let mut b = HoplockLease::new(&url, "", "leases/c", Duration::from_millis(400));
+    let t0 = std::time::Instant::now();
+    assert_eq!(b.read(), Err(LeaseError::Unreachable));
+    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+    let why = b.last_error().unwrap().to_string();
+    assert!(why.contains("timed out"), "{why}");
+}
+
+// Idem voor S3: één budget voor de hele GET.
+#[test]
+fn a_dripping_s3_is_cut_off_at_the_call_budget() {
+    let url = dripping_server();
+    let mut b = S3Lease::new(
+        &s3_config(&url, "bkt"),
+        "lock.json",
+        Duration::from_millis(400),
+        0,
+    );
+    let t0 = std::time::Instant::now();
+    assert_eq!(b.read(), Err(LeaseError::Unreachable));
+    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+}

@@ -11,8 +11,12 @@
 //!   zijn `.await`s: de eigenaar geeft dan de core terug, en de netstack en
 //!   de verbindingstaken draaien door. Er wordt nergens een executor-ronde
 //!   binnen een taak gedraaid (handboek §4);
-//! - per poort één verbindingstaak (agent op P, leader op P + 1000): accept,
-//!   leanhttp, en elk verzoek als bericht naar de eigenaar.
+//! - per poort één acceptor en een vaste pool van [`WORKERS`] werkers
+//!   (agent op P, leader op P + 1000): de acceptor geeft elke verbinding als
+//!   waarde aan een vrije werker ([`Handoff`]); de werker draait leanhttp
+//!   en stuurt elk verzoek als bericht naar de eigenaar. Een open stroom
+//!   (`/v1/events`, een log-tail) houdt zijn werker vast en vraagt de
+//!   eigenaar elke halve seconde wat er bij kwam.
 //!
 //! - de klok: SNTP bij de start en elk uur (`pool.ntp.org`), de tijd naar
 //!   de kern met `SET_CLOCK`. Pas daarna vertrouwt de downloader de
@@ -55,11 +59,14 @@ use core::time::Duration;
 use agentd_hopos::entropy::{HARVEST_ROUNDS, Pool};
 use agentd_hopos::env::INIT_JOBS_FILE;
 use agentd_hopos::sntp::{self, NtpLink, PACKET};
-use agentd_hopos::{BootConfig, Clock, Connect, HttpImages, Hub, Images, Node, Port, Resolve};
-use applib::appnet::{self, Endpoint, Net, NetError, TcpListener};
+use agentd_hopos::{
+    Answer, BootConfig, Clock, Connect, Handoff, HttpImages, Hub, Images, Node, Port, Question,
+    Resolve,
+};
+use applib::appnet::{self, Endpoint, Net, NetError, TcpListener, TcpStream};
 use applib::rt::Exec;
 use applib::{App, EXEC, log};
-use hop_http::TcpConn;
+use hop_http::{Ask, Chunk, Streams, TcpConn};
 use hopos_runner::KernSys;
 use runner::SystemApi;
 
@@ -74,9 +81,19 @@ fn main() {}
 /// Het ritme van de eigenaar-taak: de tik van agent en leader.
 const TICK: Duration = Duration::from_secs(1);
 
-/// De langste stilte op een verbinding: elke poort bedient één verbinding
-/// tegelijk, dus een keep-alive-client mag de volgende niet lang ophouden.
+/// De langste stilte op een verbinding: een pool van [`WORKERS`] per poort,
+/// dus een keep-alive-client mag een werker niet lang ophouden.
 const READ_CAP: Duration = Duration::from_secs(2);
+
+/// Werkers per poort. Een open stroom houdt er een vast; met hoogstens twee
+/// stromen per node (`MAX_STREAMS` in de node) houdt elke poort er minstens
+/// één vrij voor de CLI en de GUI.
+const WORKERS: usize = 3;
+
+/// Hoe vaak de acceptor kijkt of er een werker vrij is als ze alle bezig
+/// zijn. Een koud pad (een vierde gelijktijdige verbinding), dus pollen is
+/// eenvoudiger dan een bel.
+const BUSY_POLL: Duration = Duration::from_millis(5);
 
 /// Hoe lang een verbinding naar een artifact-server mag duren.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -353,20 +370,18 @@ async fn either(a: impl Future<Output = ()>, b: impl Future<Output = ()>) {
     .await;
 }
 
-/// Eén poort: accepteren, leanhttp, elk verzoek als bericht naar de eigenaar.
+/// De acceptor van één poort: elke verbinding als waarde naar een vrije werker.
 ///
 /// De listener is al gebonden vóór de spawn: zodra `HOP_UP` op het log
 /// staat, neemt de stack een SYN aan, ook als deze taak nog geen ronde had.
-async fn listen(
+async fn accept(
     listener: TcpListener,
     exec: &'static Exec,
-    hub: &'static Hub,
-    slot: usize,
-    port: Port,
+    pool: &'static Handoff<TcpStream>,
     number: u16,
 ) {
     loop {
-        let stream = match listener.accept().await {
+        let mut stream = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
                 log!("hop: accept on :{number}: {e}");
@@ -374,10 +389,63 @@ async fn listen(
                 continue;
             }
         };
+        // Alle werkers bezig: kort wachten tot er een vrijkomt.
+        while let Err(back) = pool.give(stream) {
+            stream = back;
+            exec.after(BUSY_POLL).await;
+        }
+    }
+}
+
+/// De naden van een open stroom voor één werker: de bus naar de eigenaar
+/// en het timerwiel van de app-core.
+struct HubStreams {
+    hub: &'static Hub,
+    exec: &'static Exec,
+    slot: usize,
+}
+
+impl Streams for HubStreams {
+    async fn poll(&mut self, ask: Ask) -> Chunk {
+        self.hub.poll(self.slot, ask).await
+    }
+
+    async fn nap(&mut self, d: Duration) {
+        self.exec.after(d).await;
+    }
+
+    fn now(&self) -> u64 {
+        self.exec.now()
+    }
+
+    fn done(&mut self) {
+        self.hub.stream_done(self.slot);
+    }
+}
+
+/// Eén werker: wacht op een verbinding, leanhttp, elk verzoek als bericht
+/// naar de eigenaar met vak `slot` in de bus.
+async fn work(
+    pool: &'static Handoff<TcpStream>,
+    i: usize,
+    exec: &'static Exec,
+    hub: &'static Hub,
+    slot: usize,
+    port: Port,
+) {
+    let mut streams = HubStreams { hub, exec, slot };
+    loop {
+        let stream = pool.take(i).await;
         let conn = TcpConn::new(stream, exec).with_read_cap(READ_CAP);
         // Een verbinding die eindigt met een termijn of een reset is gewoon
         // een client die wegging; dat is geen logregel waard.
-        let _ = hop_http::serve(conn, async |req| hub.ask(slot, port, req).await).await;
+        let _ = hop_http::serve(
+            conn,
+            async |req| hub.ask(slot, port, req).await,
+            &mut streams,
+        )
+        .await;
+        pool.free(i);
     }
 }
 
@@ -475,20 +543,29 @@ async fn resident(app: &'static App) {
         flush(&mut node);
     }
 
-    // Eén bus voor het leven van de bewoner; de taken krijgen `&'static`.
-    let hub: &'static Hub = Box::leak(Box::new(Hub::new(2)));
+    // Eén bus voor het leven van de bewoner, met een vak per werker; de
+    // taken krijgen `&'static`.
+    let hub: &'static Hub = Box::leak(Box::new(Hub::new(2 * WORKERS)));
     // De listeners binden hier, vóór de spawn: een spawn krijgt zijn slot pas
     // in de volgende ronde van de executor, en zo hoeft niemand daarop te
     // wachten. Een poort die niet bindt, is luid en kost alleen die poort.
     let ports = [
         (0, Port::Agent, cfg.port),
-        (1, Port::Leader, cfg.leader_port()),
+        (WORKERS, Port::Leader, cfg.leader_port()),
     ];
-    for (slot, port, number) in ports {
+    for (first_slot, port, number) in ports {
         let Some(l) = bind(net, number) else {
             continue;
         };
-        if let Err(e) = exec.spawn(listen(l, exec, hub, slot, port, number)) {
+        let pool: &'static Handoff<TcpStream> = Box::leak(Box::new(Handoff::new(WORKERS)));
+        let mut spawned = exec.spawn(accept(l, exec, pool, number));
+        for i in 0..WORKERS {
+            if spawned.is_err() {
+                break;
+            }
+            spawned = exec.spawn(work(pool, i, exec, hub, first_slot + i, port));
+        }
+        if let Err(e) = spawned {
             log!("hop: cannot spawn the listeners: {e} HOP_SPAWN_FAIL");
             return;
         }
@@ -507,9 +584,18 @@ async fn resident(app: &'static App) {
     loop {
         // Eerst de bus leeg (level-triggered): wat binnenkwam terwijl de
         // eigenaar op de kern wachtte, ligt er nog en wordt nu afgehandeld.
-        while let Some((slot, port, req)) = hub.next() {
-            let reply = node.handle(port, &req, now(app, exec)).await;
-            hub.answer(slot, reply);
+        while let Some((slot, q)) = hub.next() {
+            match q {
+                Question::Http(port, req) => {
+                    let reply = node.handle(port, &req, now(app, exec)).await;
+                    hub.answer(slot, Answer::Reply(reply));
+                }
+                Question::Poll(ask) => {
+                    let chunk = node.poll(&ask, now(app, exec));
+                    hub.answer(slot, Answer::Chunk(chunk));
+                }
+                Question::StreamDone => node.stream_done(),
+            }
             flush(&mut node);
         }
         let t = now(app, exec);

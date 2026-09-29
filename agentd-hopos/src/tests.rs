@@ -17,14 +17,14 @@ use std::rc::Rc;
 
 use abi::systemapi::PrivOp;
 use api::{Method, Request};
-use hop_http::Reply;
+use hop_http::{Ask, Chunk, Reply, Streams};
 use hopos_runner::KernSys;
 use hopos_runner::fake::FakeKern;
 use leanhttp::{AsyncRead, AsyncWrite, Close, IoError};
 use types::json::Value;
 
 use crate::env::{BootConfig, BootError};
-use crate::{Hub, Images, Node, Port, Sink};
+use crate::{Answer, Handoff, Hub, Images, Node, Port, Question, Sink};
 
 const KEY: &[u8] = b"test-key";
 const T0: u64 = 1_788_220_800 * types::time::SECOND;
@@ -126,6 +126,23 @@ fn wire(method: &str, path: &str, body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+/// Geen stromen in deze tests: wie er toch een opent, krijgt meteen het einde.
+struct NoStreams;
+
+impl Streams for NoStreams {
+    async fn poll(&mut self, _ask: Ask) -> Chunk {
+        Chunk {
+            done: true,
+            ..Chunk::default()
+        }
+    }
+    async fn nap(&mut self, _d: core::time::Duration) {}
+    fn now(&self) -> u64 {
+        0
+    }
+    fn done(&mut self) {}
+}
+
 /// Stuurt `raw` door leanhttp en hop-http naar `port` van de node; het antwoord als (status, body).
 fn http(node: &mut TestNode, port: Port, raw: Vec<u8>) -> (u16, String) {
     let out = Rc::new(RefCell::new(Vec::new()));
@@ -134,9 +151,11 @@ fn http(node: &mut TestNode, port: Port, raw: Vec<u8>) -> (u16, String) {
         at: 0,
         out: out.clone(),
     };
-    block_on(hop_http::serve(conn, async |req: Request| {
-        node.handle(port, &req, T0).await
-    }))
+    block_on(hop_http::serve(
+        conn,
+        async |req: Request| node.handle(port, &req, T0).await,
+        &mut NoStreams,
+    ))
     .unwrap();
     let text = String::from_utf8(out.borrow().clone()).unwrap();
     let status = text[9..12].parse().unwrap();
@@ -299,9 +318,9 @@ fn the_hub_carries_a_request_and_its_answer() {
     let mut cx = Context::from_waker(Waker::noop());
     assert!(ask.as_mut().poll(&mut cx).is_pending());
     assert!(block_on_ready(hub.wait()));
-    let (slot, port, got) = hub.next().unwrap();
-    assert_eq!((slot, port, got), (1, Port::Agent, req));
-    hub.answer(1, Reply::Plain(api::Response::empty(204)));
+    let (slot, got) = hub.next().unwrap();
+    assert_eq!((slot, got), (1, Question::Http(Port::Agent, req)));
+    hub.answer(1, Answer::Reply(Reply::Plain(api::Response::empty(204))));
     match ask.as_mut().poll(&mut cx) {
         Poll::Ready(Reply::Plain(r)) => assert_eq!(r.status, 204),
         other => panic!("{other:?}"),
@@ -370,9 +389,12 @@ fn a_long_stream_does_not_block_the_other_tasks() {
         at: 0,
         out: out.clone(),
     };
-    let owner = hop_http::serve(conn, async |req: Request| {
-        n.handle(Port::Leader, &req, T0).await
-    });
+    let mut none = NoStreams;
+    let owner = hop_http::serve(
+        conn,
+        async |req: Request| n.handle(Port::Leader, &req, T0).await,
+        &mut none,
+    );
 
     // De tweede taak telt zijn beurten terwijl slot 1 half gestroomd is.
     let during = Rc::new(RefCell::new(0u64));
@@ -500,4 +522,167 @@ fn the_key_wins_over_insecure_and_secrets_stay_out_of_debug() {
     env.insert("HOPOS_INIT_JOBS", " ");
     let c = BootConfig::from_env(|k| env.get(k).map(|v| String::from(*v)), 1, "x").unwrap();
     assert!(c.s3.is_none() && c.init_jobs.is_none());
+}
+
+#[test]
+fn the_hub_carries_a_poll_and_a_stream_done() {
+    let hub = Hub::new(2);
+    let ask = Ask::Events { seq: 3 };
+    let mut poll = pin!(hub.poll(0, ask.clone()));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(poll.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(hub.next(), Some((0, Question::Poll(ask))));
+    let c = Chunk {
+        text: "event: status\ndata: {}\n\n".into(),
+        seq: 4,
+        done: false,
+    };
+    hub.answer(0, Answer::Chunk(c.clone()));
+    assert_eq!(poll.as_mut().poll(&mut cx), Poll::Ready(c));
+    // Afmelden wacht nergens op.
+    hub.stream_done(1);
+    assert_eq!(hub.next(), Some((1, Question::StreamDone)));
+}
+
+#[test]
+fn the_handoff_gives_each_connection_to_a_free_worker() {
+    let pool: Handoff<u32> = Handoff::new(2);
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut w0 = pin!(pool.take(0));
+    assert!(w0.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(pool.give(10), Ok(0));
+    assert_eq!(pool.give(11), Ok(1));
+    // Beide bezig: de derde komt terug bij de acceptor.
+    assert_eq!(pool.give(12), Err(12));
+    assert_eq!(w0.as_mut().poll(&mut cx), Poll::Ready(10));
+    assert_eq!(block_on(pool.take(1)), 11);
+    pool.free(1);
+    assert_eq!(pool.give(12), Ok(1));
+}
+
+/// Een ondertekend verzoek zonder de draad (de query telt niet mee in de HMAC).
+fn signed(method: Method, target: &str) -> Request {
+    let path = target.split('?').next().unwrap();
+    let sig = auth::sign(KEY, method.as_str(), path, b"");
+    let mut r = Request::new(method, target, b"");
+    r.headers.push((
+        auth::AUTH_HEADER.into(),
+        String::from_utf8(sig.to_vec()).unwrap(),
+    ));
+    r
+}
+
+/// Zet een logregel klaar in slot 1 van de nep-kern.
+fn app_says(k: &FakeKern, line: &str) {
+    k.0.borrow_mut()
+        .slots
+        .get_mut(&1)
+        .unwrap()
+        .logs
+        .push_back(line.as_bytes().to_vec());
+}
+
+#[test]
+fn a_log_is_followed_live_through_the_leader() {
+    let (mut n, k) = node();
+    http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
+    let task = n.agent().tasks().next().unwrap().id.clone();
+    app_says(&k, "one");
+    block_on(n.tick(T0 + types::time::SECOND));
+
+    // hop logs --follow: via de leader naar de eigen agent, in-proces.
+    let req = signed(
+        Method::Get,
+        &format!("/v1/agents/n1/logs/{task}/stdout?follow=1"),
+    );
+    let Reply::Stream { ask, first, .. } = block_on(n.handle(Port::Leader, &req, T0)) else {
+        panic!("no stream");
+    };
+    assert!(first.is_empty());
+    let c = n.poll(&ask, T0);
+    assert_eq!(
+        (c.text.as_str(), c.seq, c.done),
+        ("data: one\n\n", 1, false)
+    );
+    // Niets nieuws: niets, hetzelfde nummer.
+    let again = Ask::Logs {
+        task_id: task.clone(),
+        stream: api::LogStream::Stdout,
+        seq: c.seq,
+    };
+    assert_eq!(n.poll(&again, T0).text, "");
+    // Een nieuwe regel van de app komt er als enige bij.
+    app_says(&k, "two");
+    block_on(n.tick(T0 + 2 * types::time::SECOND));
+    let c2 = n.poll(&again, T0);
+    assert_eq!((c2.text.as_str(), c2.seq), ("data: two\n\n", 2));
+    // Zonder follow: de momentopname, zoals altijd.
+    let snap = signed(Method::Get, &format!("/v1/agents/n1/logs/{task}/stdout"));
+    let Reply::Events { lines, .. } = block_on(n.handle(Port::Leader, &snap, T0)) else {
+        panic!("no snapshot");
+    };
+    assert_eq!(lines, ["one", "two"]);
+    // Een onbekende agent: 404; een onbekende taak: geen stroom.
+    let Reply::Plain(r) = block_on(n.handle(
+        Port::Leader,
+        &signed(Method::Get, "/v1/agents/zz/logs/t/stdout"),
+        T0,
+    )) else {
+        panic!("no plain reply");
+    };
+    assert_eq!(r.status, 404);
+    n.stream_done();
+}
+
+#[test]
+fn events_and_tasks_through_the_leader() {
+    let (mut n, _k) = node();
+    // hop events: de stroom begint met een ping en het huidige nummer.
+    let Reply::Stream { ask, first, .. } =
+        block_on(n.handle(Port::Leader, &signed(Method::Get, "/v1/events"), T0))
+    else {
+        panic!("no stream");
+    };
+    assert_eq!(first, api::PING);
+    // Een job plaatsen geeft meldingen: de job, en de taak met zijn event.
+    http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
+    let c = n.poll(&ask, T0);
+    assert!(
+        c.text.contains(r#""name":"web""#) || c.text.contains(r#""job":"web""#),
+        "{}",
+        c.text
+    );
+    assert!(!c.done);
+
+    // hop jobs: /v1/tasks met de taken van de eigen agent.
+    let Reply::Plain(r) = block_on(n.handle(Port::Leader, &signed(Method::Get, "/v1/tasks"), T0))
+    else {
+        panic!("no plain reply");
+    };
+    assert_eq!(r.status, 200);
+    let body = String::from_utf8(r.body).unwrap();
+    assert!(body.contains(r#""tasks_by_agent":{"n1":[{"#), "{body}");
+    assert!(body.contains(r#""job_name":"web""#), "{body}");
+    // En de capaciteit via de leader.
+    let Reply::Plain(r) = block_on(n.handle(
+        Port::Leader,
+        &signed(Method::Get, "/v1/agents/n1/capacity"),
+        T0,
+    )) else {
+        panic!("no plain reply");
+    };
+    assert_eq!(r.status, 200);
+
+    // Het plafond: nog één stroom mag, de derde niet.
+    let second = block_on(n.handle(Port::Leader, &signed(Method::Get, "/v1/events"), T0));
+    assert!(matches!(second, Reply::Stream { .. }));
+    let Reply::Plain(r) = block_on(n.handle(Port::Leader, &signed(Method::Get, "/v1/events"), T0))
+    else {
+        panic!("third stream admitted");
+    };
+    assert_eq!(r.status, 503);
+    // Na een afmelding weer wel.
+    n.stream_done();
+    let again = block_on(n.handle(Port::Leader, &signed(Method::Get, "/v1/events"), T0));
+    assert!(matches!(again, Reply::Stream { .. }));
 }

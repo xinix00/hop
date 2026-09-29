@@ -8,25 +8,53 @@
 use std::future::Future;
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use leanhttp::Target;
 use leans3::IoError;
 use leantls::Trust;
 
-use crate::client::{Dialer, HostConn, Http};
+use crate::client::{Dialer, HostConn, Http, OUT_OF_TIME};
 
 /// `leans3::Transport` over de host-client.
 #[derive(Clone, Copy, Debug)]
 pub struct S3Transport<'h> {
     http: &'h Http,
     timeout: Duration,
+    /// De totale grens van elk verzoek over dit transport.
+    until: Option<Instant>,
 }
 
 impl<'h> S3Transport<'h> {
     /// Een transport over `http` met termijn `timeout` per fase.
     pub fn new(http: &'h Http, timeout: Duration) -> Self {
-        Self { http, timeout }
+        Self {
+            http,
+            timeout,
+            until: None,
+        }
+    }
+
+    /// Zet een totale grens: elk verzoek over dit transport (verbinden,
+    /// TLS, kop en body) is klaar vóór `at`, of faalt met een termijnfout.
+    ///
+    /// Eén transport per backend-aanroep, dus één grens per aanroep: een
+    /// lease-schrijf die na een 412 nog een HEAD en een tweede PUT doet,
+    /// deelt één budget in plaats van er drie te krijgen.
+    #[must_use]
+    pub fn until(mut self, at: Instant) -> Self {
+        self.until = Some(at);
+        self
+    }
+
+    /// De kop-termijn: de fasetermijn, maar niet voorbij de grens.
+    fn header_timeout(&self) -> Duration {
+        match self.until {
+            Some(at) => self
+                .timeout
+                .min(at.saturating_duration_since(Instant::now())),
+            None => self.timeout,
+        }
     }
 }
 
@@ -90,7 +118,7 @@ impl leans3::Transport for S3Transport<'_> {
         let (host, port) = split_host(req.host, req.https);
         let verifier = self.http.verifier();
         let trust = verifier.as_ref().map(|v| Trust::Chain(v));
-        let mut dial = Dialer::new(trust, self.timeout);
+        let mut dial = Dialer::new(trust, self.timeout).with_limit(self.until);
         let conn = dial
             .hop(Target {
                 https: req.https,
@@ -98,13 +126,19 @@ impl leans3::Transport for S3Transport<'_> {
                 port,
             })
             .await
-            .map_err(|_| IoError::Other("dial failed"))?;
+            .map_err(|why| {
+                if why.ends_with(OUT_OF_TIME) {
+                    IoError::TimedOut
+                } else {
+                    IoError::Other("dial failed")
+                }
+            })?;
         let call = leanhttp::Call {
             method: req.method,
             url: &url,
             header,
             body,
-            header_timeout: Some(self.timeout),
+            header_timeout: Some(self.header_timeout()),
             no_follow: true,
             ..leanhttp::Call::default()
         };

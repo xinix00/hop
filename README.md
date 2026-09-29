@@ -31,7 +31,7 @@ agentd-hopos/  Hop as the HopOS resident: agent + leader in a slot (lib + no_std
 hostnet/    the host side of the net (std): std sockets for leanhttp, block_on, HTTP(S) client, S3 transport
 store/      the lease and the committed cluster state on the host: S3, hoplockserver, a file
 agentd/     the daemon binary (Linux, macOS): agent, election, leader, both APIs, processes and docker
-cli/        the `hop` command: apply, jobs, status, agents, logs, delete, flip
+cli/        the `hop` command: apply, jobs, status, agents, logs, events, delete, flip
 ```
 
 ## On a host
@@ -41,9 +41,28 @@ cargo build --release -p agentd -p cli
 target/release/agentd --cluster demo            # standalone: in-memory lock, state in ./data
 target/release/hop apply job.json               # {"name": "sleeper", "command": "sleep 30"}
 target/release/hop jobs
+target/release/hop logs sleeper                 # the latest lines; -f follows live until the task stops
+target/release/hop events                       # the cluster events as they happen (SSE /v1/events)
 target/release/hop delete sleeper
 ```
 
-`sh tools/e2e-host.sh` runs exactly that and checks the process comes and goes.
+Every command talks to the leader only (`--leader`, or `HOP_LEADER`): the
+tasks come from `GET /v1/tasks`, and logs and an agent's capacity go through
+the leader to that agent (`/v1/agents/{id}/logs/...`, `/capacity`). An agent
+may sit on an address the CLI cannot reach (a HopOS slot LAN, a private
+network behind the leader); the leader reaches them all. Only `flip` goes to
+an agent itself (`--agent`).
+
+Streams (`hop events`, `hop logs -f`) hold a connection thread on the node
+while they run, so a node allows only a few at once (4 on a host, 2 on
+HopOS) and says so with a 503. Calls to the lease and state backends (S3,
+hoplockserver) have one total deadline per call, not one per phase.
+
+SIGTERM is not handled yet: std has no signal API. A killed daemon lets its
+lease expire (TTL) instead of releasing it.
+
+`sh tools/e2e-host.sh` runs apply, jobs, status, agents and delete and checks
+the process comes and goes; `cargo test -p agentd --test streams` does the
+same for events, `/v1/tasks` and a live log through the leader.
 Cross-build for Linux: `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld
 cargo build --release -p agentd -p cli --target aarch64-unknown-linux-musl`.

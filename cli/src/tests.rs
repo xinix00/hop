@@ -2,8 +2,11 @@
 //! vlaggen, de tabel en de body van `apply`.
 
 use crate::jobspec::{ApplyFlags, build_job, parse_kv, parse_memory, parse_pairs};
+use crate::sse::{Event, Reader};
 use crate::table::Table;
-use crate::{apply_body, fmt_temp, globals, parse_apply};
+use crate::{
+    LogsFlags, apply_body, fmt_temp, globals, parse_apply, parse_logs, parse_tasks_by_agent,
+};
 
 fn s(v: &[&str]) -> Vec<String> {
     v.iter().map(|x| x.to_string()).collect()
@@ -176,4 +179,71 @@ fn table_aligns_columns() {
 fn temp_is_a_dash_without_sensor() {
     assert_eq!(fmt_temp(0), "-");
     assert_eq!(fmt_temp(41_500), "41.5\u{b0}C");
+}
+
+// Go: `hop logs --stream stderr <taak>` kiest de stroom; `--follow` is nieuw
+// (Go volgde altijd) en maakt er een levende tail van.
+#[test]
+fn logs_flags_stream_and_follow() {
+    assert_eq!(
+        parse_logs(&s(&["web"])).unwrap(),
+        LogsFlags {
+            stream: "stdout".into(),
+            follow: false,
+            target: "web".into()
+        }
+    );
+    let f = parse_logs(&s(&["--stream", "stderr", "-f", "t1"])).unwrap();
+    assert_eq!(
+        (f.stream.as_str(), f.follow, f.target.as_str()),
+        ("stderr", true, "t1")
+    );
+    let f = parse_logs(&s(&["--follow", "--stream=stdout", "t1"])).unwrap();
+    assert!(f.follow);
+    assert!(parse_logs(&s(&["--stream", "stdin", "t1"])).is_err());
+    assert!(parse_logs(&s(&["--tail", "t1"])).is_err());
+    assert!(parse_logs(&s(&["a", "b"])).is_err());
+    assert!(parse_logs(&s(&["-f"])).is_err());
+}
+
+#[test]
+fn sse_reader_joins_split_events_and_skips_keepalives() {
+    let mut r = Reader::default();
+    assert!(r.feed(b"event: ping\ndata: {}\n").is_empty());
+    let got = r.feed(b"\n: keepalive\n\ndata: line one\n\ndata: a\ndata: b\r\n\r\nevent: task\nda");
+    assert_eq!(
+        got,
+        [
+            Event {
+                kind: "ping".into(),
+                data: "{}".into()
+            },
+            Event {
+                kind: String::new(),
+                data: "line one".into()
+            },
+            Event {
+                kind: String::new(),
+                data: "a\nb".into()
+            },
+        ]
+    );
+    let got = r.feed(b"ta: {\"job\":\"x\"}\n\n");
+    assert_eq!(got[0].kind, "task");
+    assert_eq!(got[0].data, "{\"job\":\"x\"}");
+}
+
+#[test]
+fn tasks_by_agent_and_the_silent_ones() {
+    let body = br#"{"tasks_by_agent":{"a1":[{"id":"t1","job_name":"web","state":"running"}]},"unreachable":["a2"]}"#;
+    let got = parse_tasks_by_agent(body).unwrap();
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0].0, "a1");
+    let t = got[0].1.as_ref().unwrap();
+    assert_eq!((t[0].id.as_str(), t[0].job_name.as_str()), ("t1", "web"));
+    assert_eq!(got[1].0, "a2");
+    assert!(got[1].1.is_err());
+    // Een leader van Go gaf geen `unreachable`: dan is er ook niemand stil.
+    let go = parse_tasks_by_agent(br#"{"tasks_by_agent":{}}"#).unwrap();
+    assert!(go.is_empty());
 }

@@ -110,3 +110,101 @@ fn dial_failure_says_where() {
 fn roots_parse() {
     assert!(Http::new().root_count() > 100);
 }
+
+/// Een server die de kop meteen stuurt en de body van `len` bytes daarna
+/// byte voor byte druppelt, één per `every`.
+fn dripping(len: usize, every: Duration) -> String {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    thread::spawn(move || {
+        let (s, _) = l.accept().unwrap();
+        let mut r = BufReader::new(s.try_clone().unwrap());
+        loop {
+            let mut line = String::new();
+            if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                break;
+            }
+        }
+        let mut s = s;
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {len}\r\n\r\n");
+        if s.write_all(head.as_bytes()).is_err() {
+            return;
+        }
+        for _ in 0..len {
+            thread::sleep(every);
+            if s.write_all(b"x").is_err() {
+                return;
+            }
+        }
+    });
+    addr
+}
+
+#[test]
+fn a_dripping_server_is_cut_off_at_the_total_deadline() {
+    // Elke byte komt ruim binnen de fasetermijn (5 s), dus zonder grens
+    // duurt deze aanroep 30 x 100 ms; met een grens van 300 ms niet.
+    let addr = dripping(30, Duration::from_millis(100));
+    let url = format!("http://{addr}/slow");
+    let t0 = std::time::Instant::now();
+    let until = t0 + Duration::from_millis(300);
+    let err = Http::new()
+        .request_until(&Call::get(&url, T), 1024, until)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        Error::Http(leanhttp::Error::Io(leanhttp::IoError::TimedOut)),
+        "{err}"
+    );
+    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+}
+
+#[test]
+fn a_total_deadline_that_is_ample_changes_nothing() {
+    let (addr, _h) = one_shot("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+    let url = format!("http://{addr}/");
+    let until = std::time::Instant::now() + T;
+    let r = Http::new()
+        .request_until(&Call::get(&url, T), 1024, until)
+        .unwrap();
+    assert_eq!((r.status, r.body.as_slice()), (200, &b"ok"[..]));
+}
+
+#[test]
+fn open_gives_the_head_before_the_body_is_done() {
+    // Een chunked stroom: de eerste gebeurtenis, dan wacht de server op de
+    // test. Leest de client de eerste vóór de tweede er is, dan stroomt hij.
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let h = thread::spawn(move || {
+        let (s, _) = l.accept().unwrap();
+        let mut r = BufReader::new(s.try_clone().unwrap());
+        loop {
+            let mut line = String::new();
+            r.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let mut s = s;
+        s.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+        )
+        .unwrap();
+        s.write_all(b"b\r\ndata: one\n\n\r\n").unwrap();
+        wait.recv().unwrap();
+        s.write_all(b"b\r\ndata: two\n\n\r\n0\r\n\r\n").unwrap();
+    });
+    let url = format!("http://{addr}/v1/events");
+    let mut o = Http::new().open(&Call::get(&url, T)).unwrap();
+    assert_eq!(o.status(), 200);
+    assert_eq!(o.header("content-type"), Some("text/event-stream"));
+    let mut buf = [0u8; 64];
+    let n = o.read(&mut buf).unwrap();
+    assert_eq!(&buf[..n], b"data: one\n\n");
+    go.send(()).unwrap();
+    let rest = o.read_to_end(1024).unwrap();
+    assert_eq!(rest, b"data: two\n\n");
+    h.join().unwrap();
+}

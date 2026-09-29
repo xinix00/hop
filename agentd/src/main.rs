@@ -212,8 +212,9 @@ fn run(args: &[String]) -> Result<(), String> {
     let prep = Prep::spawn(&|| host_config(&cfg), &tx).map_err(|e| format!("prep threads: {e}"))?;
     let agent_l = bind(cfg.node.port)?;
     let leader_l = bind(leader_port)?;
-    http::spawn_pool(&agent_l, Port::Agent, &tx).map_err(|e| format!("http threads: {e}"))?;
-    http::spawn_pool(&leader_l, Port::Leader, &tx).map_err(|e| format!("http threads: {e}"))?;
+    http::spawn_pool(&agent_l, Port::Agent, &tx, &key).map_err(|e| format!("http threads: {e}"))?;
+    http::spawn_pool(&leader_l, Port::Leader, &tx, &key)
+        .map_err(|e| format!("http threads: {e}"))?;
 
     let parts = Parts {
         agent,

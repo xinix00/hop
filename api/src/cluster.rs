@@ -17,18 +17,37 @@ use alloc::vec::Vec;
 use leader::{JobStore, Leader, Transport};
 use types::{Agent, Job, Map, Nanos, Time, TryClone, try_string};
 
-use crate::{Cluster, ClusterError};
+use crate::{Cluster, ClusterError, EventLog};
 
 /// Een leider plus zijn verbinding met de agents, als [`Cluster`] voor [`crate::LeaderApi`].
 pub struct LeaderCluster<'a, S, T> {
     leader: &'a mut Leader<S>,
     net: &'a mut T,
+    events: Option<&'a mut EventLog>,
 }
 
 impl<'a, S: JobStore, T: Transport> LeaderCluster<'a, S, T> {
     /// Leent `leader` en `net` voor één verzoek.
     pub fn new(leader: &'a mut Leader<S>, net: &'a mut T) -> Self {
-        Self { leader, net }
+        Self {
+            leader,
+            net,
+            events: None,
+        }
+    }
+
+    /// Stuurt de meldingen van `POST /v1/notify` naar `log` in plaats van
+    /// naar de rij van de leider.
+    ///
+    /// Waarom: de leider bewaart van `job:<naam>:<event>` alleen de naam
+    /// (een [`leader::Event`] zegt wát er veranderde), maar `/v1/events`
+    /// geeft zoals in Go een `task`-gebeurtenis met het event erbij. De
+    /// eigen meldingen van de leider (registraties, plaatsingen) komen via
+    /// [`Leader::drain_events`] in dezelfde rij.
+    #[must_use]
+    pub fn with_events(mut self, log: &'a mut EventLog) -> Self {
+        self.events = Some(log);
+        self
     }
 }
 
@@ -178,7 +197,10 @@ impl<S: JobStore, T: Transport> Cluster for LeaderCluster<'_, S, T> {
     }
 
     fn notify(&mut self, topic: &str) {
-        self.leader.notify(topic);
+        match self.events.as_deref_mut() {
+            Some(log) => log.push_topic(topic),
+            None => self.leader.notify(topic),
+        }
     }
 }
 
@@ -240,11 +262,9 @@ mod tests {
         body: &str,
     ) -> Response {
         let mut c = LeaderCluster::new(l, net);
-        LeaderApi::new(b"", "test-cluster").handle(
-            &mut c,
-            T0,
-            &Request::new(method, target, body.as_bytes()),
-        )
+        LeaderApi::new(b"", "test-cluster")
+            .handle(&mut c, T0, &Request::new(method, target, body.as_bytes()))
+            .0
     }
 
     fn get<'a>(v: &'a Value, k: &str) -> &'a Value {

@@ -16,7 +16,7 @@ use std::time::Duration;
 use agent::{
     Action, Agent, Election, Event, LinkError, Request as LinkRequest, StartError, StartOk, Status,
 };
-use api::{Effect, LeaderApi, LeaderCluster, NodeApi, Request, Response};
+use api::{Effect, EventLog, LeaderApi, LeaderCluster, LeaderEffect, NodeApi, Request, Response};
 use hostnet::Http;
 use leader::{Leader, MemStore};
 use runner::host::{HostRunner, TaskSpec};
@@ -27,7 +27,7 @@ use types::{Driver, Job, Map, Nanos, Time};
 
 use crate::elector::{Elector, now_ms};
 use crate::link::{LinkJob, ProbeJob};
-use crate::msg::{Msg, Port, Reply};
+use crate::msg::{Chunk, Msg, Poll, Port, Reply};
 use crate::net::Net;
 use crate::persist::{self, PersistOp};
 use crate::prep::{Prep, PrepJob};
@@ -48,6 +48,13 @@ const ACTION_ROUNDS: usize = 16;
 
 /// Hoeveel rondes vervolg-aanroepen de verkiezing na één antwoord krijgt.
 const LINK_ROUNDS: usize = 4;
+
+/// Hoeveel stromen (SSE, een log-tail, een doorgegeven stroom) tegelijk
+/// open mogen staan. Een stroom houdt een verbindingsthread vast zolang hij
+/// loopt, en de pools zijn vast ([`crate::http::WORKERS`] per poort): met
+/// vier stromen houdt elke poort minstens de helft van zijn threads vrij
+/// voor heartbeats, registraties en de CLI.
+pub(crate) const MAX_STREAMS: usize = crate::http::WORKERS / 2;
 
 /// Wat de node bij de start meekrijgt.
 pub(crate) struct Parts {
@@ -88,6 +95,12 @@ pub(crate) struct Node {
     prep: Prep,
     /// De poorten van een taak in voorbereiding, tot zijn start.
     ports: BTreeMap<String, BTreeMap<String, u16>>,
+    /// De meldingen voor `/v1/events`: die van de leader
+    /// (`drain_events`) en die van `POST /v1/notify`, met hun event.
+    events: EventLog,
+    /// Open stromen; aangemeld bij het antwoord, afgemeld met
+    /// [`Msg::StreamDone`].
+    streams: usize,
     next_election: Nanos,
     next_leader: Nanos,
     snapshot_failures: u32,
@@ -135,6 +148,8 @@ impl Node {
             persist: p.persist,
             prep: p.prep,
             ports: BTreeMap::new(),
+            events: EventLog::new(),
+            streams: 0,
             next_election: now,
             next_leader: now.saturating_add(LEADER_TICK),
             snapshot_failures: 0,
@@ -154,9 +169,18 @@ impl Node {
         match msg {
             Msg::Http { port, req, reply } => {
                 let r = self.handle(port, &req, now);
-                // Een verbinding die niet meer wacht, is weg; niets te doen.
-                let _ = reply.send(r);
+                // Een verbinding die niet meer wacht, is weg. Was het een
+                // stroom, dan meldt niemand hem af: dat doen we hier.
+                if let Err(e) = reply.send(r)
+                    && e.0.is_stream()
+                {
+                    self.streams = self.streams.saturating_sub(1);
+                }
             }
+            Msg::Poll { poll, reply } => {
+                let _ = reply.send(self.poll(now, poll));
+            }
+            Msg::StreamDone => self.streams = self.streams.saturating_sub(1),
             Msg::Prepared {
                 worker,
                 task_id,
@@ -198,6 +222,7 @@ impl Node {
             }
         }
         self.drain(now);
+        self.collect_events();
     }
 
     /// Laat de tijd verstrijken: agent, runner, verkiezing, leader, de snapshot.
@@ -221,6 +246,7 @@ impl Node {
         }
         self.persist_snapshot(now);
         self.drain(now);
+        self.collect_events();
     }
 
     /// Sluit af: elke taak één stoppoging, de runner ruimt op, de lease los.
@@ -244,7 +270,7 @@ impl Node {
 
     fn handle(&mut self, port: Port, req: &Request, now: Nanos) -> Reply {
         match port {
-            Port::Leader => Reply::Plain(self.leader_handle(req, now)),
+            Port::Leader => self.leader_reply(req, now),
             Port::Agent => {
                 let (resp, effect) = self.node_api.handle(&mut self.agent, now, None, req);
                 self.effect(resp, effect, req, now)
@@ -252,11 +278,49 @@ impl Node {
         }
     }
 
+    /// Een verzoek aan de leader-API van deze node, met zijn [`LeaderEffect`] als antwoord.
+    fn leader_reply(&mut self, req: &Request, now: Nanos) -> Reply {
+        let (resp, effect) = self.leader_handle(req, now);
+        match effect {
+            LeaderEffect::None => Reply::Plain(resp),
+            LeaderEffect::Tasks { agents } => Reply::Tasks { agents },
+            LeaderEffect::Agent {
+                endpoint,
+                path,
+                stream,
+            } => self.admit(Reply::Agent {
+                endpoint,
+                path,
+                stream,
+            }),
+            LeaderEffect::Events => self.admit(Reply::Subscribe {
+                head: resp,
+                seq: self.events.seq(),
+            }),
+        }
+    }
+
+    /// Laat een stroom toe als er plaats is ([`MAX_STREAMS`]); anders 503.
+    /// Een antwoord dat geen stroom is, gaat ongeteld door.
+    fn admit(&mut self, r: Reply) -> Reply {
+        if !r.is_stream() {
+            return r;
+        }
+        if self.streams >= MAX_STREAMS {
+            return Reply::Plain(Response::error(
+                503,
+                &format!("too many open streams ({MAX_STREAMS}); try again later"),
+            ));
+        }
+        self.streams += 1;
+        r
+    }
+
     /// Een verzoek aan de leader-API van deze node.
-    fn leader_handle(&mut self, req: &Request, now: Nanos) -> Response {
+    fn leader_handle(&mut self, req: &Request, now: Nanos) -> (Response, LeaderEffect) {
         let Some(leader) = self.leader.as_mut() else {
             if req.path == "/health" {
-                return Response::error(503, "not the leader");
+                return (Response::error(503, "not the leader"), LeaderEffect::None);
             }
             let who = self.agent.leader_addr();
             let msg = if who.is_empty() {
@@ -264,7 +328,7 @@ impl Node {
             } else {
                 format!("this node is not the leader; the leader is {who}")
             };
-            return Response::error(503, &msg);
+            return (Response::error(503, &msg), LeaderEffect::None);
         };
         let mut net = Net {
             agent: &mut self.agent,
@@ -272,8 +336,52 @@ impl Node {
             http: &self.http,
             key: &self.key,
         };
-        let mut cluster = LeaderCluster::new(leader, &mut net);
+        let mut cluster = LeaderCluster::new(leader, &mut net).with_events(&mut self.events);
         self.leader_api.handle(&mut cluster, now, req)
+    }
+
+    /// Haalt de meldingen van de leader in de rij van `/v1/events`.
+    fn collect_events(&mut self) {
+        let Some(l) = self.leader.as_mut() else {
+            return;
+        };
+        for e in l.drain_events() {
+            self.events.push(&e);
+        }
+    }
+
+    /// Wat een open stroom sinds zijn volgnummer mist.
+    fn poll(&mut self, now: Nanos, poll: Poll) -> Chunk {
+        let mut c = Chunk::default();
+        match poll {
+            Poll::Logs {
+                task_id,
+                stream,
+                seq,
+            } => match self.runner.logs(now / MILLISECOND, &task_id, stream) {
+                Some(ring) => {
+                    for line in ring.since(seq) {
+                        api::data_frame(line, &mut c.text);
+                    }
+                    c.seq = ring.seq();
+                    // Dicht is dicht: wat er nog stond, zit in deze hap.
+                    c.done = ring.is_closed();
+                }
+                // Verlopen of nooit gekend: de stroom is af.
+                None => c.done = true,
+            },
+            Poll::Events { seq } => {
+                self.collect_events();
+                if self.leader.is_none() {
+                    // Een ex-leider houdt geen abonnees vast (Go: de
+                    // lifecycle-context); de lezer verbindt met de nieuwe.
+                    c.done = true;
+                    return c;
+                }
+                c.seq = self.events.since(seq, &mut c.text);
+            }
+        }
+        c
     }
 
     /// Voert een [`Effect`] van de agent-API uit.
@@ -284,14 +392,31 @@ impl Node {
             Effect::Proxy { ref leader, .. }
                 if self.leader.is_some() && *leader == self.election.own_leader() =>
             {
-                Reply::Plain(self.leader_handle(req, now))
+                self.leader_reply(req, now)
             }
-            Effect::Proxy { leader, .. } => Reply::Proxy { leader },
+            Effect::Proxy { leader, stream } => self.admit(Reply::Proxy { leader, stream }),
             Effect::Logs { task_id, stream } => {
                 let stream = match stream {
                     api::LogStream::Stdout => Stream::Stdout,
                     api::LogStream::Stderr => Stream::Stderr,
                 };
+                if api::is_follow(req) {
+                    if self
+                        .runner
+                        .logs(now / MILLISECOND, &task_id, stream)
+                        .is_none()
+                    {
+                        return Reply::Plain(Response::error(
+                            404,
+                            &format!("no logs for task {task_id}"),
+                        ));
+                    }
+                    return self.admit(Reply::Follow {
+                        head: resp,
+                        task_id,
+                        stream,
+                    });
+                }
                 match self.runner.logs(now / MILLISECOND, &task_id, stream) {
                     Some(ring) => Reply::Events {
                         head: resp,
@@ -464,7 +589,10 @@ impl Node {
                 };
                 let _ = l.mark_unplaced(&id, job, &mut net);
             }
-            l.notify(&format!("job:{job}:{}", event.as_str()));
+            // In de rij van `/v1/events` mét het event, zoals een notify
+            // van een andere agent via de API (LeaderCluster::with_events).
+            self.events
+                .push_topic(&format!("job:{job}:{}", event.as_str()));
             return;
         }
         let leader = self.agent.leader_addr();
@@ -691,8 +819,6 @@ impl Node {
         if let Err(e) = l.tick(Time(now), &mut net) {
             eprintln!("hop: leader tick: {e}");
         }
-        // Er zijn (nog) geen SSE-abonnees op de host; de rij blijft zo leeg.
-        let _ = l.drain_events();
     }
 
     fn persist_snapshot(&mut self, now: Nanos) {

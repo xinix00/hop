@@ -15,6 +15,8 @@
 //!   executor-rondes, handboek §4).
 //! - [`Hub`]: de brievenbus tussen de verbindingstaken en de eigenaar-taak
 //!   (handboek §1: wie iets wil met de staat, stuurt een bericht).
+//! - [`Handoff`]: de overdracht van een verbinding van de acceptor van een
+//!   poort aan een vrije werker uit een vaste pool.
 //!
 //! Wat hij niet bezit: sockets en de executor (de binary), de frames naar de
 //! kern (`hopos-runner`), HTTP (`hop-http`).
@@ -37,6 +39,7 @@ pub mod entropy;
 pub mod env;
 pub mod fetch;
 pub mod flip;
+mod handoff;
 mod hub;
 mod local;
 mod node;
@@ -44,7 +47,8 @@ pub mod sntp;
 
 pub use env::{BootConfig, BootError};
 pub use fetch::{Clock, Connect, HttpImages, Resolve};
-pub use hub::Hub;
+pub use handoff::Handoff;
+pub use hub::{Answer, Hub, Question};
 pub use node::{Images, Node, Port, Sink};
 
 /// De versie die de agent aan de leader meldt.

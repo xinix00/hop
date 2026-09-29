@@ -13,8 +13,10 @@
 //!   `Pending` kost een korte slaap en een nieuwe poll.
 //! - [`Http`]: de client voor `http://` en `https://` (leanhttps met
 //!   ketenverificatie tegen de ingebakken Mozilla-wortels, de systeemklok als
-//!   datum), met [`Http::request`] voor API-verkeer en [`Http::stream`] voor
-//!   downloads.
+//!   datum), met [`Http::request`] voor API-verkeer (en
+//!   [`Http::request_until`] met één totale termijn per aanroep),
+//!   [`Http::stream`] voor downloads en [`Http::open`] voor stromen die de
+//!   aanroeper hap voor hap leest (SSE, een log-tail door de proxy).
 //! - [`S3Transport`]: `leans3::Transport` over dezelfde verbindingen.
 //!
 //! # Waarom threads en geen eigen reactor
@@ -44,7 +46,7 @@ mod conn;
 mod exec;
 mod s3;
 
-pub use client::{Call, Error, HostConn, Http, ROOTS_DER, Reply, Result, entropy, unix_secs};
+pub use client::{Call, Error, HostConn, Http, Open, ROOTS_DER, Reply, Result, entropy, unix_secs};
 pub use conn::{Socket, StdConn};
 pub use exec::block_on;
 pub use s3::{S3Response, S3Transport};

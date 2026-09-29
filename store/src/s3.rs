@@ -12,7 +12,7 @@
 //! AWS rolde dit eind 2024 uit; een compatibele provider moet de voorwaarden
 //! eren en sterke read-after-write op de lease-sleutel geven.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use config::S3LockConfig;
 use discovery::{Backend, LeaseState};
@@ -123,7 +123,7 @@ impl S3Lease {
     }
 
     /// Eén voorwaardelijke PUT: aanmaken bij een lege `prev`, anders `If-Match`.
-    fn put(&mut self, prev: &str, body: &[u8]) -> discovery::Result<String> {
+    fn put(&mut self, prev: &str, body: &[u8], until: Instant) -> discovery::Result<String> {
         let opt = if prev.is_empty() {
             PutOptions {
                 content_type: JSON,
@@ -137,7 +137,7 @@ impl S3Lease {
                 ..PutOptions::default()
             }
         };
-        let mut t = S3Transport::new(&self.http, self.timeout);
+        let mut t = S3Transport::new(&self.http, self.timeout).until(until);
         let result = block_on(self.client.put(&mut t, &self.key, body, &opt));
         match result {
             Ok(Some(etag)) if !etag.is_empty() => Ok(etag),
@@ -161,10 +161,15 @@ impl S3Lease {
     /// Hetzner en Ceph geven een geciteerde ETag maar vergelijken `If-Match`
     /// met de kale waarde; zonder deze tweede poging faalde daar elke renew.
     /// AWS, R2 en MinIO slagen de eerste keer en merken er niets van.
-    fn put_unquoting(&mut self, prev: &str, body: &[u8]) -> discovery::Result<String> {
-        let first = self.put(prev, body);
+    fn put_unquoting(
+        &mut self,
+        prev: &str,
+        body: &[u8],
+        until: Instant,
+    ) -> discovery::Result<String> {
+        let first = self.put(prev, body, until);
         match (first, wire::strip_quotes(prev)) {
-            (Err(discovery::Error::LeaseHeld), Some(bare)) => self.put(bare, body),
+            (Err(discovery::Error::LeaseHeld), Some(bare)) => self.put(bare, body, until),
             (r, _) => r,
         }
     }
@@ -173,11 +178,11 @@ impl S3Lease {
     ///
     /// De eerste waarneming start alleen de klok. Een 404 op HEAD is een
     /// echte race (iemand maakte hem net aan), geen ghost.
-    fn ghost_handle(&mut self) -> Option<String> {
+    fn ghost_handle(&mut self, until: Instant) -> Option<String> {
         if self.takeover_after_ms == 0 {
             return None;
         }
-        let mut t = S3Transport::new(&self.http, self.timeout);
+        let mut t = S3Transport::new(&self.http, self.timeout).until(until);
         let etag = match block_on(self.client.head(&mut t, &self.key)) {
             Ok(e) if !e.is_empty() => e,
             _ => return None,
@@ -207,8 +212,8 @@ impl S3Lease {
     }
 
     /// Eén voorwaardelijke DELETE op `handle`.
-    fn remove(&mut self, handle: &str) -> discovery::Result {
-        let mut t = S3Transport::new(&self.http, self.timeout);
+    fn remove(&mut self, handle: &str, until: Instant) -> discovery::Result {
+        let mut t = S3Transport::new(&self.http, self.timeout).until(until);
         let opt = DeleteOptions { if_match: handle };
         match block_on(self.client.delete(&mut t, &self.key, &opt)) {
             Ok(()) => Ok(()),
@@ -222,9 +227,21 @@ impl S3Lease {
     }
 }
 
+/// Het einde van één backend-aanroep die nu begint: `timeout` is het
+/// budget van de hele aanroep, niet van elke fase erin.
+///
+/// Waarom: `discovery::backend_timeout_for` rekent een derde van de lease
+/// per aanroep, zodat er na een trage aanroep nog twee tikken over zijn.
+/// Met alleen een fasetermijn kon één schrijf (PUT, 412, HEAD, tweede PUT,
+/// elk met een verbinding, een kop en een body) een veelvoud daarvan
+/// duren, en verliep de lease terwijl de vernieuwing nog wachtte.
+pub(crate) fn deadline(timeout: Duration) -> Instant {
+    Instant::now() + timeout
+}
+
 impl Backend for S3Lease {
     fn read(&mut self) -> discovery::Result<(LeaseState, String)> {
-        let mut t = S3Transport::new(&self.http, self.timeout);
+        let mut t = S3Transport::new(&self.http, self.timeout).until(deadline(self.timeout));
         let result = block_on(self.client.get(&mut t, &self.key));
         let (body, etag) = match result {
             Ok(r) => r,
@@ -270,13 +287,14 @@ impl Backend for S3Lease {
                 return Err(self.unreachable(e));
             }
         };
-        let mut result = self.put_unquoting(prev, &body);
+        let until = deadline(self.timeout);
+        let mut result = self.put_unquoting(prev, &body, until);
         if result == Err(discovery::Error::LeaseHeld) && prev.is_empty() {
             // De aanmaak werd geweigerd terwijl de lees "geen lease" zei: een
             // echte race (een volgende lees laat de winnaar zien) of een
             // ghost. HEAD beslist.
-            if let Some(handle) = self.ghost_handle() {
-                result = self.put_unquoting(&handle, &body);
+            if let Some(handle) = self.ghost_handle(until) {
+                result = self.put_unquoting(&handle, &body, until);
             }
         }
         if result.is_ok() {
@@ -290,9 +308,10 @@ impl Backend for S3Lease {
         if handle.is_empty() {
             return Err(discovery::Error::LeaseHeld);
         }
-        let first = self.remove(handle);
+        let until = deadline(self.timeout);
+        let first = self.remove(handle, until);
         let result = match (first, wire::strip_quotes(handle)) {
-            (Err(discovery::Error::LeaseHeld), Some(bare)) => self.remove(bare),
+            (Err(discovery::Error::LeaseHeld), Some(bare)) => self.remove(bare, until),
             (r, _) => r,
         };
         if result.is_ok() {
@@ -336,7 +355,7 @@ impl S3StateStore {
 
 impl StateStore for S3StateStore {
     fn save(&mut self, snapshot: &[u8]) -> Result {
-        let mut t = S3Transport::new(&self.http, self.timeout);
+        let mut t = S3Transport::new(&self.http, self.timeout).until(deadline(self.timeout));
         let opt = PutOptions {
             content_type: JSON,
             ..PutOptions::default()
@@ -347,7 +366,7 @@ impl StateStore for S3StateStore {
     }
 
     fn load(&mut self) -> Result<Option<Vec<u8>>> {
-        let mut t = S3Transport::new(&self.http, self.timeout);
+        let mut t = S3Transport::new(&self.http, self.timeout).until(deadline(self.timeout));
         match block_on(self.client.get(&mut t, &self.key)) {
             Ok((data, _)) => Ok(Some(data)),
             Err(leans3::Error::NotFound) => Ok(None),

@@ -7,6 +7,14 @@
 //! van de verbinding per lees of schrijf, als stiltetermijn: een grote
 //! download mag lang duren zolang hij blijft stromen, en een vergeten
 //! termijn houdt nooit een thread voor altijd vast.
+//!
+//! Daarbovenop kan een verbinding een totale grens dragen
+//! ([`StdConn::with_limit`]): een absoluut moment waarna elke lees en
+//! schrijf `TimedOut` geeft, welke fasetermijn leanhttp ook zette. Waarom:
+//! een fasetermijn begint bij elke fase opnieuw, dus een server die elke
+//! paar seconden één byte druppelt, houdt een aanroep eindeloos open. Een
+//! backend-aanroep (de lease, de staat) heeft één budget, geen budget per
+//! fase.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -60,6 +68,8 @@ pub struct StdConn<S> {
     default: Option<Duration>,
     read_at: Option<Instant>,
     write_at: Option<Instant>,
+    /// De totale grens; `None` is geen grens.
+    limit: Option<Instant>,
 }
 
 impl<S: Socket> StdConn<S> {
@@ -70,7 +80,16 @@ impl<S: Socket> StdConn<S> {
             default,
             read_at: None,
             write_at: None,
+            limit: None,
         }
+    }
+
+    /// Zet de totale grens: na `at` faalt elke lees en schrijf met
+    /// `TimedOut`, en geen socket-termijn reikt verder dan `at`.
+    #[must_use]
+    pub fn with_limit(mut self, at: Option<Instant>) -> Self {
+        self.limit = at;
+        self
     }
 
     /// De socket, zolang de verbinding open is.
@@ -79,18 +98,33 @@ impl<S: Socket> StdConn<S> {
     }
 }
 
-/// De resterende tijd tot `at`, of `Err(TimedOut)` als hij voorbij is;
-/// zonder deadline de stiltetermijn `idle`.
-fn remaining(at: Option<Instant>, idle: Option<Duration>) -> Result<Option<Duration>, IoError> {
-    match at {
-        None => Ok(idle),
-        Some(at) => {
-            let left = at.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                Err(IoError::TimedOut)
-            } else {
-                Ok(Some(left.max(MIN_TIMEOUT)))
-            }
+/// De tijd tot `at`, of `Err(TimedOut)` als hij voorbij is.
+fn left(at: Instant) -> Result<Duration, IoError> {
+    let left = at.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        Err(IoError::TimedOut)
+    } else {
+        Ok(left.max(MIN_TIMEOUT))
+    }
+}
+
+/// De socket-termijn van de volgende lees of schrijf: de resterende tijd
+/// tot de fasedeadline `at`, zonder deadline de stiltetermijn `idle`, en
+/// in beide gevallen nooit voorbij de totale grens `limit`.
+fn remaining(
+    at: Option<Instant>,
+    limit: Option<Instant>,
+    idle: Option<Duration>,
+) -> Result<Option<Duration>, IoError> {
+    let phase = match at {
+        None => idle,
+        Some(at) => Some(left(at)?),
+    };
+    match limit {
+        None => Ok(phase),
+        Some(l) => {
+            let l = left(l)?;
+            Ok(Some(phase.map_or(l, |p| p.min(l))))
         }
     }
 }
@@ -115,7 +149,7 @@ impl<S: Socket> AsyncRead for StdConn<S> {
         let Some(sock) = self.sock.as_mut() else {
             return Poll::Ready(Err(IoError::Closed));
         };
-        let left = match remaining(self.read_at, self.default) {
+        let left = match remaining(self.read_at, self.limit, self.default) {
             Ok(l) => l,
             Err(e) => return Poll::Ready(Err(e)),
         };
@@ -142,7 +176,7 @@ impl<S: Socket> AsyncWrite for StdConn<S> {
         let Some(sock) = self.sock.as_mut() else {
             return Poll::Ready(Err(IoError::Closed));
         };
-        let left = match remaining(self.write_at, self.default) {
+        let left = match remaining(self.write_at, self.limit, self.default) {
             Ok(l) => l,
             Err(e) => return Poll::Ready(Err(e)),
         };

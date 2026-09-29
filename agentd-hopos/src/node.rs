@@ -27,8 +27,11 @@ use alloc::vec::Vec;
 use core::future::Future;
 
 use agent::{Action, Agent, Event, Settings, StartError, StartOk, Status};
-use api::{Effect, LeaderApi, LeaderCluster, NodeApi, Request, Response};
-use hop_http::{Reply, refuse};
+use api::{
+    Effect, EventLog, LeaderApi, LeaderCluster, LeaderEffect, LogStream, Method, NodeApi, Request,
+    Response,
+};
+use hop_http::{Ask, Chunk, Reply, refuse};
 use leader::{Leader, MemStore};
 use runner::{
     HopRunner, LogPolicy, RunState, Runner, StartRequest, Started, Stream, SystemApi, TaskRef,
@@ -43,6 +46,12 @@ use crate::local::Local;
 /// Hoe vaak de leader tikt (dode agents, settle, de vangnet-reconcile om de
 /// derde tik): 10 s, de cadans van de Go-leader.
 pub(crate) const LEADER_TICK: Nanos = 10 * SECOND;
+
+/// Hoeveel stromen (`/v1/events`, een log-tail) tegelijk open mogen staan.
+/// Een stroom houdt een verbindingstaak vast zolang hij loopt; de binary
+/// heeft er per poort een vast aantal (`WORKERS`, 3), dus met twee stromen
+/// houdt elke poort er minstens één vrij voor de CLI en de GUI.
+pub(crate) const MAX_STREAMS: usize = 2;
 
 /// De eerste dynamische poort; elke taak heeft een eigen IP op het slot-LAN,
 /// dus een nummer botst alleen binnen één taak.
@@ -141,6 +150,14 @@ pub struct Node<S, I> {
     images: I,
     node_api: NodeApi,
     leader_api: LeaderApi,
+    /// De clustersleutel: een doorgifte van de leader naar de eigen agent
+    /// gaat in-proces, maar door dezelfde HMAC-toets.
+    key: Vec<u8>,
+    /// De meldingen voor `/v1/events` (leader en `POST /v1/notify`).
+    events: EventLog,
+    /// Open stromen, aangemeld bij het antwoord en afgemeld met
+    /// [`Node::stream_done`].
+    streams: usize,
     /// `ip:poort` van de leader op deze node.
     own_leader: String,
     next_port: u16,
@@ -187,6 +204,9 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             // FLIP: Hop op HopOS kan de kern vervangen (crate::flip).
             node_api: NodeApi::new(&cfg.api_key, true),
             leader_api: LeaderApi::new(&cfg.api_key, &cfg.cluster),
+            key: cfg.api_key.clone(),
+            events: EventLog::new(),
+            streams: 0,
             own_leader,
             next_port: DYNAMIC_PORT_BASE,
             next_leader_tick: now.saturating_add(LEADER_TICK),
@@ -320,18 +340,14 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
         S: crate::flip::KernFlip,
     {
         let reply = match port {
-            Port::Leader => Reply::Plain(self.leader_handle(req, now)),
+            Port::Leader => self.leader_reply(req, now),
             Port::Agent => {
                 let pool = self.runner.pool_largest();
                 let (resp, effect) = self.node_api.handle(&mut self.agent, now, pool, req);
                 // FLIP: de kern-flip wacht op download en kern, dus hier en
                 // niet in het synchrone `effect` (crate::flip).
-                if let Effect::Flip { url, sha256 } = &effect {
-                    self.lines
-                        .push(format!("hop: kernel flip requested from {url} HOP_FLIP"));
-                    let r =
-                        crate::flip::flip(self.runner.system_mut(), &mut self.images, url, sha256)
-                            .await;
+                if let Effect::Flip { url, sha256, cold } = &effect {
+                    let r = self.flip(url, sha256, *cold, now).await;
                     match r {
                         Ok(()) => {
                             self.lines.push(String::from(
@@ -351,19 +367,160 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             }
         };
         self.drain(now).await;
+        self.collect_events();
         reply
     }
 
+    /// FLIP: haal de bundel, stop bij een koude flip eerst de eigen taken
+    /// op deze node, en vraag de kern de flip (crate::flip).
+    ///
+    /// De taken stoppen pas ná de download: een URL die niet werkt, laat
+    /// alles draaien. Ze stoppen via de agent (`stop_all`, dezelfde
+    /// Stop-acties als een preemptie), dus de jobs blijven in de staat op
+    /// hopfs en de koud herstarte Hop plaatst ze opnieuw; weigert de kern,
+    /// dan doet deze Hop dat bij zijn volgende tik.
+    async fn flip(&mut self, url: &str, sha256: &str, cold: bool, now: Nanos) -> Result<(), String>
+    where
+        S: crate::flip::KernFlip,
+    {
+        let how = if cold { " (cold)" } else { "" };
+        self.lines.push(format!(
+            "hop: kernel flip{how} requested from {url} HOP_FLIP"
+        ));
+        let slot = crate::flip::fetch(self.runner.system_mut(), &mut self.images, url).await?;
+        if cold {
+            let n = self.agent.stop_all();
+            self.drain(now).await;
+            self.lines.push(format!(
+                "hop: cold flip: {n} task(s) on this node stopped, their jobs come back after the new kernel HOP_FLIP_COLD_STOP stopped={n}"
+            ));
+        }
+        crate::flip::ask(self.runner.system_mut(), slot, sha256, cold).await
+    }
+
     /// Een verzoek aan de leader, met de eigen agent als transport.
-    fn leader_handle(&mut self, req: &Request, now: Nanos) -> Response {
+    fn leader_handle(&mut self, req: &Request, now: Nanos) -> (Response, LeaderEffect) {
         let pool = self.runner.pool_largest();
         let mut net = Local {
             agent: &mut self.agent,
             now,
             pool_largest: pool,
         };
-        let mut cluster = LeaderCluster::new(&mut self.leader, &mut net);
+        let mut cluster =
+            LeaderCluster::new(&mut self.leader, &mut net).with_events(&mut self.events);
         self.leader_api.handle(&mut cluster, now, req)
+    }
+
+    /// Een verzoek aan de leader, met zijn [`LeaderEffect`] uitgevoerd.
+    ///
+    /// De standalone-cluster heeft één agent, deze: de rondgang van
+    /// `/v1/tasks` en de doorgifte naar een agent gaan in-proces. Een andere
+    /// agent kent deze leader niet, en wie hem toch noemt, krijgt dat luid.
+    fn leader_reply(&mut self, req: &Request, now: Nanos) -> Reply {
+        let (resp, effect) = self.leader_handle(req, now);
+        match effect {
+            LeaderEffect::None => Reply::Plain(resp),
+            LeaderEffect::Tasks { agents } => {
+                let mut results = Vec::new();
+                if results.try_reserve_exact(agents.len()).is_err() {
+                    return Reply::Plain(Response::empty(500));
+                }
+                for (id, _) in agents {
+                    // Een andere agent kent deze leader niet: hij ontbreekt,
+                    // zoals een agent die niet antwoordt.
+                    let tasks = if id == self.agent.id() {
+                        own_tasks(&self.agent)
+                    } else {
+                        None
+                    };
+                    results.push((id, tasks));
+                }
+                Reply::Plain(api::tasks_reply(&results))
+            }
+            LeaderEffect::Agent { endpoint, path, .. } => {
+                if endpoint != self.agent.endpoint() {
+                    return Reply::Plain(Response::error(
+                        502,
+                        &format!("hop on HopOS: proxy to agent {endpoint} is not wired yet"),
+                    ));
+                }
+                // Dezelfde route op de eigen agent-API, ondertekend zoals een
+                // doorgifte over de draad dat zou zijn.
+                let mut inner = Request::new(Method::Get, &path, b"");
+                if let Some(sig) = auth::sign_call(&self.key, "GET", &path, b"") {
+                    inner.headers.push((
+                        String::from(auth::AUTH_HEADER),
+                        String::from_utf8_lossy(&sig).into_owned(),
+                    ));
+                }
+                let pool = self.runner.pool_largest();
+                let (resp, effect) = self.node_api.handle(&mut self.agent, now, pool, &inner);
+                self.effect(resp, effect, &inner, now)
+            }
+            LeaderEffect::Events => self.admit(Reply::Stream {
+                head: resp,
+                first: String::from(api::PING),
+                ask: Ask::Events {
+                    seq: self.events.seq(),
+                },
+            }),
+        }
+    }
+
+    /// Laat een stroom toe als er plaats is ([`MAX_STREAMS`]); anders 503.
+    fn admit(&mut self, r: Reply) -> Reply {
+        if !matches!(r, Reply::Stream { .. }) {
+            return r;
+        }
+        if self.streams >= MAX_STREAMS {
+            return Reply::Plain(Response::error(
+                503,
+                &format!("too many open streams ({MAX_STREAMS}); try again later"),
+            ));
+        }
+        self.streams += 1;
+        r
+    }
+
+    /// Een open stroom is af (de verbindingstaak meldt het).
+    pub fn stream_done(&mut self) {
+        self.streams = self.streams.saturating_sub(1);
+    }
+
+    /// Wat een open stroom sinds zijn volgnummer mist.
+    pub fn poll(&mut self, ask: &Ask, now: Nanos) -> Chunk {
+        let mut c = Chunk::default();
+        match ask {
+            Ask::Logs {
+                task_id,
+                stream,
+                seq,
+            } => match self
+                .runner
+                .logs(now / MILLISECOND, task_id, runner_stream(*stream))
+            {
+                Some(ring) => {
+                    for line in ring.since(*seq) {
+                        api::data_frame(line, &mut c.text);
+                    }
+                    c.seq = ring.seq();
+                    c.done = ring.is_closed();
+                }
+                None => c.done = true,
+            },
+            Ask::Events { seq } => {
+                self.collect_events();
+                c.seq = self.events.since(*seq, &mut c.text);
+            }
+        }
+        c
+    }
+
+    /// Haalt de meldingen van de leader in de rij van `/v1/events`.
+    fn collect_events(&mut self) {
+        for e in self.leader.drain_events() {
+            self.events.push(&e);
+        }
     }
 
     /// Voert een [`Effect`] uit, of weigert hem luid.
@@ -373,16 +530,29 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             // De leader is deze node: geen proxy over het net, maar dezelfde
             // handler in-proces (dezelfde HMAC, dezelfde body).
             Effect::Proxy { ref leader, .. } if *leader == self.own_leader => {
-                Reply::Plain(self.leader_handle(req, now))
+                self.leader_reply(req, now)
             }
             Effect::Logs {
                 ref task_id,
-                stream,
+                stream: which,
             } => {
-                let stream = match stream {
-                    api::LogStream::Stdout => Stream::Stdout,
-                    api::LogStream::Stderr => Stream::Stderr,
-                };
+                let stream = runner_stream(which);
+                if api::is_follow(req)
+                    && self
+                        .runner
+                        .logs(now / MILLISECOND, task_id, stream)
+                        .is_some()
+                {
+                    return self.admit(Reply::Stream {
+                        head: resp,
+                        first: String::new(),
+                        ask: Ask::Logs {
+                            task_id: task_id.clone(),
+                            stream: which,
+                            seq: 0,
+                        },
+                    });
+                }
                 match self.runner.logs(now / MILLISECOND, task_id, stream) {
                     Some(ring) => Reply::Events {
                         head: resp,
@@ -420,6 +590,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
         self.run_actions(now, actions).await;
         self.drain(now).await;
         self.runner.pump_logs(now / MILLISECOND).await;
+        self.collect_events();
     }
 
     /// Voert acties uit tot de agent niets meer vraagt (begrensd).
@@ -484,7 +655,11 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             let id = String::from(net.agent.id());
             let _ = self.leader.mark_unplaced(&id, job, &mut net);
         }
-        self.leader.notify(&format!("job:{job}:{}", event.as_str()));
+        // In de rij van `/v1/events` mét het event, zoals een notify over
+        // de API (LeaderCluster::with_events); de leader zelf onthoudt alleen
+        // de naam.
+        self.events
+            .push_topic(&format!("job:{job}:{}", event.as_str()));
     }
 
     /// Wijst de poorten van een job toe; 0 is dynamisch.
@@ -613,6 +788,24 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
                 Err((kind, why))
             }
         }
+    }
+}
+
+/// De taken van de eigen agent; `None` zonder geheugen.
+fn own_tasks(agent: &Agent) -> Option<Vec<types::Task>> {
+    let mut out = Vec::new();
+    for t in agent.tasks() {
+        out.try_reserve(1).ok()?;
+        out.push(t.clone());
+    }
+    Some(out)
+}
+
+/// De logstroom van de API als die van de runner.
+fn runner_stream(s: LogStream) -> Stream {
+    match s {
+        LogStream::Stdout => Stream::Stdout,
+        LogStream::Stderr => Stream::Stderr,
     }
 }
 

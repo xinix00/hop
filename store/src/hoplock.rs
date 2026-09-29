@@ -51,6 +51,9 @@ impl Server {
     }
 
     /// Eén verzoek op `key` met `extra` koppen; elke status is een antwoord.
+    ///
+    /// De termijn van de server geldt voor de hele aanroep (verbinden, kop
+    /// en body samen, zie `s3::deadline`), niet per fase.
     fn call(
         &self,
         method: &'static str,
@@ -71,7 +74,7 @@ impl Server {
             timeout: self.timeout,
         };
         self.http
-            .request(&call, MAX_OBJECT)
+            .request_until(&call, MAX_OBJECT, crate::s3::deadline(self.timeout))
             .map_err(|source| Error::Http {
                 op: method,
                 url: redact_url(&url),

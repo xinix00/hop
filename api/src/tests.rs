@@ -465,6 +465,15 @@ impl Cluster for FakeCluster {
 }
 
 fn lcall(c: &mut FakeCluster, method: Method, target: &str, body: &str) -> Response {
+    leffect(c, method, target, body).0
+}
+
+fn leffect(
+    c: &mut FakeCluster,
+    method: Method,
+    target: &str,
+    body: &str,
+) -> (Response, LeaderEffect) {
     LeaderApi::new(b"", "test-cluster").handle(
         c,
         T0,
@@ -830,4 +839,232 @@ fn contract_status_shape() {
     ] {
         assert!(v.as_object().unwrap().get(k).is_some(), "{k}");
     }
+}
+
+// ---- /v1/events, /v1/tasks en de doorgifte naar een agent ----
+
+/// Twee agents, zoals `/v1/agents` ze zou geven.
+fn two_agents() -> FakeCluster {
+    let mut c = FakeCluster::default();
+    for (id, ep) in [
+        ("a1", "http://10.0.0.1:8080"),
+        ("a2", "http://10.0.0.2:8080"),
+    ] {
+        c.agents.push(types::Agent {
+            id: id.into(),
+            endpoint: ep.into(),
+            ..types::Agent::default()
+        });
+    }
+    c
+}
+
+// TestSSEEventFormat: de eerste gebeurtenis is een ping met `{}`, en een
+// melding `job:my-api:started` wordt `event: task` met job en event.
+#[test]
+fn sse_event_format() {
+    let mut c = FakeCluster::default();
+    let (r, effect) = leffect(&mut c, Method::Get, "/v1/events", "");
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("Content-Type"), Some("text/event-stream"));
+    assert_eq!(effect, LeaderEffect::Events);
+    assert!(PING.contains("event: ping\ndata: {}\n\n"));
+    let mut log = EventLog::new();
+    let start = log.seq();
+    log.push_topic("job:my-api:started");
+    let mut out = String::new();
+    let next = log.since(start, &mut out);
+    assert_eq!(next, start + 1);
+    assert!(out.contains("event: task\n"), "{out}");
+    assert!(out.contains(r#""event":"started""#), "{out}");
+    assert!(out.contains(r#""job":"my-api""#), "{out}");
+    // Wie bij is, krijgt niets.
+    let mut none = String::new();
+    assert_eq!(log.since(next, &mut none), next);
+    assert!(none.is_empty());
+}
+
+// TestNotifyWithEventType: de melding van een agent komt met zijn event in
+// de rij van de stroom, niet zonder (de leider zelf onthoudt alleen de naam).
+#[test]
+fn notify_with_event_type() {
+    let mut leader = ::leader::Leader::new(String::from("me"), ::leader::MemStore::new());
+    let mut net = NoNet;
+    let mut log = EventLog::new();
+    let start = log.seq();
+    let mut cluster = LeaderCluster::new(&mut leader, &mut net).with_events(&mut log);
+    let (r, _) = LeaderApi::new(b"", "c").handle(
+        &mut cluster,
+        T0,
+        &Request::new(
+            Method::Post,
+            "/v1/notify",
+            br#"{"job":"my-api","event":"started"}"#,
+        ),
+    );
+    assert_eq!(r.status, 204);
+    let mut out = String::new();
+    log.since(start, &mut out);
+    assert_eq!(
+        out,
+        "event: task\ndata: {\"job\":\"my-api\",\"event\":\"started\"}\n\n"
+    );
+    // En de rij van de leider bleef leeg: geen dubbele melding.
+    assert!(leader.drain_events().is_empty());
+}
+
+/// Een transport zonder agents: de notify-route raakt het net niet.
+struct NoNet;
+
+impl ::leader::Transport for NoNet {
+    fn run(&mut self, _: &types::Agent, _: &types::Job, _: bool) -> ::leader::RunReply {
+        ::leader::RunReply::Unreachable
+    }
+    fn stop_job(&mut self, _: &types::Agent, _: &str) -> bool {
+        false
+    }
+    fn stop_task(&mut self, _: &types::Agent, _: &str) {}
+    fn delete_job(&mut self, _: &types::Agent, _: &str) {}
+    fn tasks(&mut self, _: &types::Agent) -> Option<Vec<types::Task>> {
+        None
+    }
+}
+
+#[test]
+fn event_frames_match_go_per_topic() {
+    let mut log = EventLog::new();
+    for t in ["agent:n1", "job:web", "job:web:crash", "", "settled"] {
+        log.push_topic(t);
+    }
+    log.push(&::leader::Event::Agent("n2".into()));
+    log.push(&::leader::Event::Job("db".into()));
+    log.push(&::leader::Event::Status);
+    let mut out = String::new();
+    log.since(0, &mut out);
+    let frames: Vec<&str> = out.split("\n\n").filter(|f| !f.is_empty()).collect();
+    assert_eq!(
+        frames,
+        [
+            "event: agent\ndata: {\"id\":\"n1\"}",
+            "event: job\ndata: {\"name\":\"web\"}",
+            "event: task\ndata: {\"job\":\"web\",\"event\":\"crash\"}",
+            "event: status\ndata: {}",
+            "event: status\ndata: {}",
+            "event: agent\ndata: {\"id\":\"n2\"}",
+            "event: job\ndata: {\"name\":\"db\"}",
+            "event: status\ndata: {}",
+        ]
+    );
+    // Een naam met een aanhalingsteken blijft geldige JSON.
+    let mut q = String::new();
+    topic_frame("job:a\"b", &mut q);
+    assert!(q.contains(r#"{"name":"a\"b"}"#), "{q}");
+}
+
+#[test]
+fn a_reader_that_fell_behind_gets_one_status() {
+    let mut log = EventLog::new();
+    let start = log.seq();
+    for i in 0..(EVENT_LOG_CAP + 3) {
+        log.push_topic(&format!("job:j{i}"));
+    }
+    let mut out = String::new();
+    let next = log.since(start, &mut out);
+    assert!(out.starts_with("event: status\ndata: {}\n\n"), "{out}");
+    assert_eq!(out.matches("event: job").count(), EVENT_LOG_CAP);
+    assert_eq!(next, log.seq());
+    // Een nummer uit een vorige rij (een nieuwe leider): ook `status`.
+    let mut again = String::new();
+    assert_eq!(EventLog::new().since(next, &mut again), 0);
+    assert_eq!(again, "event: status\ndata: {}\n\n");
+}
+
+#[test]
+fn log_lines_are_data_frames() {
+    let mut out = String::new();
+    data_frame("hello", &mut out);
+    data_frame("two\nlines\r", &mut out);
+    assert_eq!(out, "data: hello\n\ndata: two\ndata: lines\n\n");
+    assert!(is_follow(&Request::new(
+        Method::Get,
+        "/logs/t/stdout?follow=1",
+        b""
+    )));
+    assert!(!is_follow(&Request::new(
+        Method::Get,
+        "/logs/t/stdout",
+        b""
+    )));
+}
+
+#[test]
+fn tasks_asks_every_agent() {
+    let mut c = two_agents();
+    let (r, effect) = leffect(&mut c, Method::Get, "/v1/tasks", "");
+    assert_eq!(r.status, 200);
+    assert_eq!(
+        effect,
+        LeaderEffect::Tasks {
+            agents: vec![
+                ("a1".into(), "http://10.0.0.1:8080".into()),
+                ("a2".into(), "http://10.0.0.2:8080".into()),
+            ]
+        }
+    );
+}
+
+#[test]
+fn tasks_reply_keys_by_agent_and_names_the_silent() {
+    let t = types::Task {
+        id: "t1".into(),
+        job_name: "web".into(),
+        ..types::Task::default()
+    };
+    let r = tasks_reply(&[("a1".into(), Some(vec![t])), ("a2".into(), None)]);
+    assert_eq!(r.status, 200);
+    let v = body(&r);
+    let by = get(&v, "tasks_by_agent").as_object().unwrap();
+    let a1 = by.get("a1").unwrap().as_array().unwrap();
+    assert_eq!(a1.len(), 1);
+    assert_eq!(get(&a1[0], "id").as_str(), Some("t1"));
+    assert!(by.get("a2").is_none());
+    let silent = get(&v, "unreachable").as_array().unwrap();
+    assert_eq!(silent[0].as_str(), Some("a2"));
+}
+
+#[test]
+fn agent_logs_and_capacity_go_to_that_agent() {
+    let mut c = two_agents();
+    let (_, e) = leffect(
+        &mut c,
+        Method::Get,
+        "/v1/agents/a2/logs/t9/stderr?follow=1",
+        "",
+    );
+    assert_eq!(
+        e,
+        LeaderEffect::Agent {
+            endpoint: "http://10.0.0.2:8080".into(),
+            path: "/logs/t9/stderr?follow=1".into(),
+            stream: true,
+        }
+    );
+    let (_, e) = leffect(&mut c, Method::Get, "/v1/agents/a1/capacity", "");
+    assert_eq!(
+        e,
+        LeaderEffect::Agent {
+            endpoint: "http://10.0.0.1:8080".into(),
+            path: "/capacity".into(),
+            stream: false,
+        }
+    );
+    let (r, e) = leffect(&mut c, Method::Get, "/v1/agents/zz/capacity", "");
+    assert_eq!((r.status, e), (404, LeaderEffect::None));
+    let (r, _) = leffect(&mut c, Method::Get, "/v1/agents/a1/logs/t9/stdin", "");
+    assert_eq!(r.status, 400);
+    let (r, _) = leffect(&mut c, Method::Get, "/v1/agents/a1/logs/t9", "");
+    assert_eq!(r.status, 400);
+    // Een ander pad onder een agent blijft een 404, geen doorgifte.
+    let (r, e) = leffect(&mut c, Method::Get, "/v1/agents/a1/other", "");
+    assert_eq!((r.status, e), (404, LeaderEffect::None));
 }

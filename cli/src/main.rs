@@ -1,16 +1,18 @@
 //! `hop`: het commando voor een Hop-cluster, zoals `OLD/cmd/cli` in Go.
 //!
 //! Commando's: `apply` (een jobspec-bestand of vlaggen), `jobs`, `status`,
-//! `agents [id]`, `logs <job|taak>`, `delete <job>`, `flip <url> <sha256>`.
-//! De clusterroutes gaan naar de leader (`--leader`, standaard
-//! `localhost:9080`, of `HOP_LEADER`); taken, logs en de flip gaan naar de
-//! agents zelf (hun adres uit `/v1/agents`, of `--agent` voor de flip).
-//! Alles is ondertekend met `--api-key` (of `HOP_API_KEY`); de sleutel komt
-//! nooit in een melding.
+//! `agents [id]`, `logs <job|taak>` (met `--follow` een levende tail),
+//! `events`, `delete <job>`, `flip <url> <sha256> [--cold]`. Alles gaat naar de
+//! leader (`--leader`, standaard `localhost:9080`, of `HOP_LEADER`): de
+//! taken via `/v1/tasks`, logs en de capaciteit van een agent via de
+//! doorgifte `/v1/agents/{id}/...`. Alleen de flip gaat naar een agent zelf
+//! (`--agent`). Alles is ondertekend met `--api-key` (of `HOP_API_KEY`); de
+//! sleutel komt nooit in een melding.
 //!
-//! Waarom taken en logs bij de agents en niet via de leader: de leader-API
-//! van v3 heeft (nog) geen `/v1/tasks` en geen log-proxy; de agent-API
-//! heeft `/tasks` en `/logs/{taak}/{stroom}` wel, achter dezelfde HMAC.
+//! Waarom via de leader: een agent staat vaak op een adres dat de CLI niet
+//! ziet (het slot-LAN van HopOS, een privénet achter de leader), en de
+//! leader bereikt ze allemaal. Een oudere leader zonder die routes (404)
+//! krijgt de oude weg: de agents direct, op hun adres uit `/v1/agents`.
 
 #![cfg_attr(
     test,
@@ -25,6 +27,7 @@
 
 mod client;
 mod jobspec;
+mod sse;
 mod table;
 #[cfg(test)]
 mod tests;
@@ -49,8 +52,10 @@ Commands:
   status                 Show cluster status
   agents [id]            List agents, or show one agent's capacity
   logs <job|task>        Show the latest log lines (--stream stderr)
+  logs -f <job|task>     Follow the log live until the task stops (--follow)
+  events                 Follow the cluster events (SSE /v1/events)
   delete <job>           Delete a job and all its tasks
-  flip <url> <sha256>    Replace the kernel of a HopOS node (--agent)
+  flip <url> <sha256>    Replace the kernel of a HopOS node (--agent; --cold stops the apps first)
 
 Environment: HOP_LEADER, HOP_AGENT, HOP_API_KEY";
 
@@ -117,6 +122,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "status" => status(&client),
         "agents" => agents(&client, args),
         "logs" => logs(&client, args),
+        "events" => events(&client),
         "delete" => delete(&client, args),
         "flip" => flip(&client, args),
         "help" | "--help" | "-h" => {
@@ -263,15 +269,60 @@ fn get_agents(c: &Client) -> Result<Vec<Agent>, String> {
     list(&r.body, "agents", Agent::from_value)
 }
 
-/// De taken per agent; een agent die niet antwoordt, staat er met zijn fout in.
-fn cluster_tasks(c: &Client, agents: &[Agent]) -> Vec<(Agent, Result<Vec<Task>, String>)> {
+/// De taken per agent-id; een agent die niet antwoordt, staat er met zijn fout in.
+type AgentTasks = Vec<(String, Result<Vec<Task>, String>)>;
+
+/// De taken van het cluster in één aanroep bij de leader (`GET /v1/tasks`,
+/// Go's `clusterTasks`); een leader zonder die route (404) krijgt de oude
+/// weg langs de agents zelf.
+fn cluster_tasks(c: &Client) -> Result<AgentTasks, String> {
+    let url = format!("{}/v1/tasks", client::base(&c.leader));
+    let r = c.call("GET", &url, None)?;
+    if r.status == 404 {
+        let agents = get_agents(c)?;
+        return Ok(direct_tasks(c, &agents));
+    }
+    let r = client::check(r)?;
+    parse_tasks_by_agent(&r.body)
+}
+
+/// Het antwoord van `/v1/tasks`: `tasks_by_agent`, en `unreachable` als fout per agent.
+pub(crate) fn parse_tasks_by_agent(body: &[u8]) -> Result<AgentTasks, String> {
+    let v = json::parse(body).map_err(|e| format!("tasks: {e}"))?;
+    let mut out = Vec::new();
+    if let Some(o) = field(&v, "tasks_by_agent").and_then(Value::as_object) {
+        for (id, ts) in o.iter() {
+            let tasks = ts
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|t| Task::from_value(t).map_err(|e| format!("tasks: {e}")))
+                        .collect()
+                })
+                .unwrap_or_else(|| Ok(Vec::new()));
+            out.push((String::from(id), tasks));
+        }
+    }
+    if let Some(silent) = field(&v, "unreachable").and_then(Value::as_array) {
+        for id in silent.iter().filter_map(Value::as_str) {
+            out.push((
+                String::from(id),
+                Err(String::from("did not answer the leader in time")),
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// De oude weg: elke agent zelf om zijn taken vragen.
+fn direct_tasks(c: &Client, agents: &[Agent]) -> AgentTasks {
     agents
         .iter()
         .map(|a| {
             let tasks = c
                 .agent_at(&a.endpoint, "GET", "/tasks", None)
                 .and_then(|r| list(&r.body, "tasks", Task::from_value));
-            (a.clone(), tasks)
+            (a.id.clone(), tasks)
         })
         .collect()
 }
@@ -318,7 +369,7 @@ fn jobs(c: &Client) -> Result<(), String> {
     let st = json::parse(&st.body).map_err(|e| format!("status: {e}"))?;
     let placed = placed(&st);
     let agents = get_agents(c)?;
-    let tasks = cluster_tasks(c, &agents);
+    let tasks = cluster_tasks(c)?;
     let mut t = Table::new(&["NAME", "DRIVER", "PLACED", "EXPECTED", "TASKS"]);
     for j in &jobs {
         let (_, want) = expected(j, agents.len());
@@ -362,7 +413,7 @@ fn jobs(c: &Client) -> Result<(), String> {
                     tt.row(vec![
                         task.id.clone(),
                         task.job_name.clone(),
-                        a.id.clone(),
+                        a.clone(),
                         phase(task),
                         task.pid.to_string(),
                         if ports.is_empty() {
@@ -374,7 +425,7 @@ fn jobs(c: &Client) -> Result<(), String> {
                     ]);
                 }
             }
-            Err(e) => eprintln!("agent {} ({}): {e}", a.id, a.endpoint),
+            Err(e) => eprintln!("agent {a}: {e}"),
         }
     }
     if any {
@@ -413,9 +464,7 @@ fn status(c: &Client) -> Result<(), String> {
     }
     // De startfase uit de taken van de agents; onbereikbaar is een lege
     // kolom, de tabel blijft heel (Go: best effort).
-    let all = get_agents(c)
-        .map(|a| cluster_tasks(c, &a))
-        .unwrap_or_default();
+    let all = cluster_tasks(c).unwrap_or_default();
     let mut t = Table::new(&["NAME", "PLACED", "EXPECTED", "STATUS"]);
     for j in &jobs {
         let (want, want_s) = expected(j, agents);
@@ -489,7 +538,7 @@ fn agent_details(c: &Client, a: &Agent) -> Result<(), String> {
     }
     println!("LastSeen: {}", clock(a.last_seen));
     println!();
-    let r = match c.agent_at(&a.endpoint, "GET", "/capacity", None) {
+    let r = match capacity(c, a) {
         Ok(r) => r,
         Err(e) => {
             println!("Capacity: (unavailable - {e})");
@@ -527,8 +576,35 @@ fn agent_details(c: &Client, a: &Agent) -> Result<(), String> {
     Ok(())
 }
 
-fn logs(c: &Client, args: &[String]) -> Result<(), String> {
+/// De capaciteit van een agent: via de doorgifte van de leader, en bij een
+/// leader zonder die route (404) bij de agent zelf.
+fn capacity(c: &Client, a: &Agent) -> Result<hostnet::Reply, String> {
+    let url = format!("{}/v1/agents/{}/capacity", client::base(&c.leader), a.id);
+    let r = c.call("GET", &url, None)?;
+    if r.status == 404 && !String::from_utf8_lossy(&r.body).contains("agent not found") {
+        return c.agent_at(&a.endpoint, "GET", "/capacity", None);
+    }
+    client::check(r)
+}
+
+/// De vlaggen van `hop logs`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct LogsFlags {
+    /// `stdout` of `stderr` (`--stream`, zoals Go).
+    pub(crate) stream: String,
+    /// Levend volgen (`--follow`, `-f`).
+    pub(crate) follow: bool,
+    /// De job of de taak.
+    pub(crate) target: String,
+}
+
+/// Leest de vlaggen van `hop logs`.
+///
+/// `--stream` kiest de stroom (`stdout`, `stderr`), zoals in Go; `--follow`
+/// (of `-f`) houdt de stroom open en toont nieuwe regels tot de taak stopt.
+pub(crate) fn parse_logs(args: &[String]) -> Result<LogsFlags, String> {
     let mut stream = String::from("stdout");
+    let mut follow = false;
     let mut target = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -537,43 +613,100 @@ fn logs(c: &Client, args: &[String]) -> Result<(), String> {
                 stream = it.next().cloned().ok_or("--stream needs a value")?;
             }
             s if s.starts_with("--stream=") => stream = String::from(&s[9..]),
-            s => target = Some(String::from(s)),
+            "--follow" | "-follow" | "-f" => follow = true,
+            s if s.starts_with('-') => return Err(format!("logs: unknown flag {s}")),
+            s => {
+                if target.replace(String::from(s)).is_some() {
+                    return Err(String::from("logs takes one job name or task id"));
+                }
+            }
         }
     }
     let target = target.ok_or("job name or task id required")?;
     if stream != "stdout" && stream != "stderr" {
         return Err(String::from("stream must be stdout or stderr"));
     }
-    let agents = get_agents(c)?;
+    Ok(LogsFlags {
+        stream,
+        follow,
+        target,
+    })
+}
+
+fn logs(c: &Client, args: &[String]) -> Result<(), String> {
+    let f = parse_logs(args)?;
     let mut found = Vec::new();
-    for (a, ts) in cluster_tasks(c, &agents) {
+    for (a, ts) in cluster_tasks(c)? {
         for t in ts.unwrap_or_default() {
-            if t.id == target || t.job_name == target {
+            if t.id == f.target || t.job_name == f.target {
                 found.push((a.clone(), t));
             }
         }
     }
     if found.is_empty() {
-        return Err(format!("no task of job or with id {target} on any agent"));
+        return Err(format!(
+            "no task of job or with id {} on any agent",
+            f.target
+        ));
+    }
+    if f.follow {
+        let [(a, t)] = found.as_slice() else {
+            let ids: Vec<&str> = found.iter().map(|(_, t)| t.id.as_str()).collect();
+            return Err(format!(
+                "{} has {} tasks; follow one: {}",
+                f.target,
+                found.len(),
+                ids.join(" ")
+            ));
+        };
+        return follow(c, a, &t.id, &f.stream);
     }
     let many = found.len() > 1;
     for (a, t) in found {
         if many {
-            println!("== {} on {} ==", t.id, a.id);
+            println!("== {} on {a} ==", t.id);
         }
-        let path = format!("/logs/{}/{stream}", t.id);
-        match c.agent_at(&a.endpoint, "GET", &path, None) {
+        let path = format!("/v1/agents/{a}/logs/{}/{}", t.id, f.stream);
+        match c.leader("GET", &path, None) {
             Ok(r) => {
-                for line in String::from_utf8_lossy(&r.body).lines() {
-                    if let Some(l) = line.strip_prefix("data: ") {
-                        println!("{l}");
-                    }
+                let mut rd = sse::Reader::default();
+                for e in rd.feed(&r.body) {
+                    println!("{}", e.data);
                 }
             }
             Err(e) => eprintln!("{}: {e}", t.id),
         }
     }
     Ok(())
+}
+
+/// Volgt de log van één taak via de leader tot de taak stopt of de stroom breekt.
+fn follow(c: &Client, agent: &str, task: &str, stream: &str) -> Result<(), String> {
+    let path = format!("/v1/agents/{agent}/logs/{task}/{stream}?follow=1");
+    let mut o = c.leader_stream(&path)?;
+    print_stream(&mut o, |e| println!("{}", e.data))
+}
+
+/// Leest een SSE-stroom tot zijn einde en geeft elke gebeurtenis aan `each`.
+fn print_stream(o: &mut hostnet::Open, mut each: impl FnMut(&sse::Event)) -> Result<(), String> {
+    let mut rd = sse::Reader::default();
+    let mut buf = vec![0u8; 16 << 10];
+    loop {
+        let n = o.read(&mut buf).map_err(|e| format!("stream: {e}"))?;
+        if n == 0 {
+            return Ok(());
+        }
+        for e in rd.feed(buf.get(..n).unwrap_or_default()) {
+            each(&e);
+        }
+    }
+}
+
+/// `hop events`: de meldingen van de leader, één regel per gebeurtenis, tot
+/// de leader de stroom sluit (hij leidt niet meer) of Ctrl-C.
+fn events(c: &Client) -> Result<(), String> {
+    let mut o = c.leader_stream("/v1/events")?;
+    print_stream(&mut o, |e| println!("{} {}", e.kind, e.data))
 }
 
 fn delete(c: &Client, args: &[String]) -> Result<(), String> {
@@ -584,9 +717,15 @@ fn delete(c: &Client, args: &[String]) -> Result<(), String> {
 }
 
 fn flip(c: &Client, args: &[String]) -> Result<(), String> {
-    let (Some(url), Some(sum)) = (args.first(), args.get(1)) else {
+    // `--cold`: de koude weg (docs/flip.md in hop-os). Hop stopt eerst zijn
+    // taken op de node, de kern zet de app-cores uit en springt zonder
+    // adoptie; dat is de weg voor een bundel met een andere switch-code,
+    // die warm vóór de sprong geweigerd wordt.
+    let cold = args.iter().any(|a| a == "--cold");
+    let rest: Vec<&String> = args.iter().filter(|a| *a != "--cold").collect();
+    let (Some(url), Some(sum)) = (rest.first(), rest.get(1)) else {
         return Err(String::from(
-            "usage: hop flip <url> <sha256> [--agent host:port]",
+            "usage: hop flip <url> <sha256> [--cold] [--agent host:port]",
         ));
     };
     if sum.len() != 64 || !sum.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -597,6 +736,9 @@ fn flip(c: &Client, args: &[String]) -> Result<(), String> {
     json::write_string(url, &mut body).map_err(|e| e.to_string())?;
     body.push_str(",\"sha256\":");
     json::write_string(sum, &mut body).map_err(|e| e.to_string())?;
+    if cold {
+        body.push_str(",\"cold\":true");
+    }
     body.push('}');
     let r = c.agent_at(&c.agent, "POST", "/flip", Some(body.as_bytes()))?;
     let v = json::parse(&r.body).unwrap_or(Value::Null);

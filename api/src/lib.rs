@@ -6,7 +6,10 @@
 //! bezit GEEN sockets, geen streams en geen klok: een handler krijgt een
 //! [`Request`] en geeft een [`Response`], en waar het antwoord een stroom of
 //! een doorgifte is (een SSE-log, een proxy naar de leader, de kern-flip)
-//! geeft hij er een [`Effect`] bij dat de adapter uitvoert.
+//! geeft hij er een [`Effect`] (agent-API) of [`LeaderEffect`] (leader-API)
+//! bij dat de adapter uitvoert. De vorm van die stromen op de draad (SSE)
+//! en de rij van meldingen voor `/v1/events` staan ook hier ([`EventLog`]),
+//! zodat de daemon op de host en de bewoner op HopOS dezelfde bytes sturen.
 //!
 //! De HMAC-toets komt uit `auth`; een lege sleutel is de ongeauthenticeerde
 //! modus (dev, standalone).
@@ -28,6 +31,7 @@ extern crate alloc;
 mod cluster;
 mod leader;
 mod node;
+mod stream;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -37,8 +41,9 @@ use types::de::ObjectBuilder;
 use types::json::{self, Value};
 
 pub use cluster::LeaderCluster;
-pub use leader::{Cluster, ClusterError, LeaderApi};
+pub use leader::{Cluster, ClusterError, LeaderApi, LeaderEffect, tasks_reply};
 pub use node::{Effect, LogStream, NodeApi, PROXY_MAX_BODY};
+pub use stream::{EVENT_LOG_CAP, EventLog, KEEPALIVE, PING, data_frame, is_follow, topic_frame};
 
 /// Een HTTP-methode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

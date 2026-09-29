@@ -288,6 +288,8 @@ mod tests {
         (Elector::new(tx, 30_000, holding), rx)
     }
 
+    // TestAsyncGetLeaderNeverBlocks: de eerste vraag geeft leeg en start één
+    // lees; het antwoord komt bij een latere vraag.
     #[test]
     fn get_leader_asks_once_and_answers_from_the_last_read() {
         let (mut e, rx) = elector(false);
@@ -306,6 +308,7 @@ mod tests {
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![LeaseOp::Read]);
     }
 
+    // TestAsyncTryBecomeLeaderReportsOnce.
     #[test]
     fn claim_is_reported_once_on_the_next_ask() {
         let (mut e, rx) = elector(false);
@@ -327,6 +330,7 @@ mod tests {
         assert!(rx.try_iter().next().is_none());
     }
 
+    // TestAsyncDisplacedReportedOnce.
     #[test]
     fn displaced_renew_steps_down_once() {
         let (mut e, rx) = elector(true);
@@ -351,6 +355,8 @@ mod tests {
         assert_eq!(e.notes.len(), 1);
     }
 
+    // TestAsyncReleaseIsImmediate: loslaten vergeet de lease meteen; het
+    // verwijderen loopt op de lease-thread.
     #[test]
     fn release_forgets_the_lease_and_ignores_a_late_renew() {
         let (mut e, rx) = elector(true);
@@ -362,5 +368,70 @@ mod tests {
         );
         e.on_reply(LeaseReply::Renewed(true, false));
         assert_eq!(e.renew_lease(), (false, false));
+    }
+
+    // TestAsyncRenewAnswersFromTheLeaseTimer: terwijl een renew hangt,
+    // antwoordt de elector uit de lease-timer: van ons tot de lease afloopt,
+    // daarna "niet vernieuwd" (tijdelijk, niet verdrongen); een renew die
+    // alsnog lukt, zet de timer opnieuw.
+    #[test]
+    fn renew_answers_from_the_lease_timer() {
+        let (mut e, rx) = elector(true);
+        e.tick(now_ms() + 11_000);
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![LeaseOp::Renew]);
+        assert_eq!(e.renew_lease(), (true, false));
+        // De TTL is om zonder antwoord van de opslag.
+        e.expires_at = now_ms().saturating_sub(1);
+        assert_eq!(e.renew_lease(), (false, false));
+        e.on_reply(LeaseReply::Renewed(true, false));
+        assert_eq!(e.renew_lease(), (true, false));
+    }
+
+    // TestAsyncInvalidateForcesARead: na `invalidate` vraagt de volgende
+    // `get_leader` de opslag opnieuw, ook binnen de TTL.
+    #[test]
+    fn invalidate_forces_a_read() {
+        let (mut e, rx) = elector(false);
+        e.get_leader();
+        e.on_reply(LeaseReply::Read {
+            leader: Some("10.0.0.2:9080".into()),
+            ok: true,
+        });
+        assert_eq!(e.get_leader().as_deref(), Some("10.0.0.2:9080"));
+        e.invalidate();
+        assert_eq!(e.get_leader(), None);
+        assert_eq!(
+            rx.try_iter().collect::<Vec<_>>(),
+            vec![LeaseOp::Read, LeaseOp::Read]
+        );
+        // De lease verliep: het verse antwoord is "niemand".
+        e.on_reply(LeaseReply::Read {
+            leader: None,
+            ok: true,
+        });
+        assert_eq!(e.get_leader(), None);
+        assert!(rx.try_iter().next().is_none());
+    }
+
+    // TestAsyncStoreReachableFollowsTheRead: onwaar vóór elke lees, onwaar
+    // als de opslag niet antwoordde, waar als hij antwoordde (ook zonder
+    // leider).
+    #[test]
+    fn store_reachable_follows_the_read() {
+        let (mut e, _rx) = elector(false);
+        assert!(!e.store_reachable());
+        e.get_leader();
+        e.on_reply(LeaseReply::Read {
+            leader: None,
+            ok: false,
+        });
+        assert!(!e.store_reachable());
+        e.invalidate();
+        e.get_leader();
+        e.on_reply(LeaseReply::Read {
+            leader: None,
+            ok: true,
+        });
+        assert!(e.store_reachable());
     }
 }

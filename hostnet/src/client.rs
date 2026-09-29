@@ -14,7 +14,7 @@ use std::fmt;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::task::{Context, Poll};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use leanhttp::{AsyncRead, AsyncWrite, Close, IoError, Target};
 use leanhttps::{TlsConn, TlsDial};
@@ -34,6 +34,10 @@ pub const ROOTS_DER: &[u8] = include_bytes!("../../agentd-hopos/roots.der");
 
 /// Hoeveel van een foutbody bewaard wordt voor de melding: 4 KiB.
 const ERROR_BODY: usize = 4 << 10;
+
+/// De zin van een dial die geen tijd meer had binnen de totale grens; het
+/// S3-transport herkent hem en meldt een termijn in plaats van "dial failed".
+pub(crate) const OUT_OF_TIME: &str = "the call ran out of its total time";
 
 /// De leesbuffer van een gestroomde download.
 const STREAM_BUF: usize = 64 << 10;
@@ -215,6 +219,8 @@ impl leanhttp::Dial for Ready {
 pub(crate) struct Dialer<'t> {
     trust: Option<Trust<'t>>,
     timeout: Duration,
+    /// De totale grens van de aanroep; de verbinding krijgt hem mee.
+    limit: Option<Instant>,
     why: Option<String>,
 }
 
@@ -223,8 +229,27 @@ impl<'t> Dialer<'t> {
         Self {
             trust,
             timeout,
+            limit: None,
             why: None,
         }
+    }
+
+    /// Zet de totale grens van de aanroep (zie [`StdConn::with_limit`]).
+    pub(crate) fn with_limit(mut self, at: Option<Instant>) -> Self {
+        self.limit = at;
+        self
+    }
+
+    /// De verbindtermijn: de fasetermijn, maar niet voorbij de grens.
+    fn connect_timeout(&self) -> Result<Duration, String> {
+        let Some(at) = self.limit else {
+            return Ok(self.timeout);
+        };
+        let left = at.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(String::from(OUT_OF_TIME));
+        }
+        Ok(self.timeout.min(left))
     }
 
     /// Waarom de laatste dial faalde, en wist het.
@@ -246,7 +271,10 @@ impl<'t> Dialer<'t> {
         let mut last = format!("resolve {host}: no addresses");
         let mut stream = None;
         for a in addrs {
-            match TcpStream::connect_timeout(&a, self.timeout) {
+            let t = self
+                .connect_timeout()
+                .map_err(|why| format!("connect {host}: {why}"))?;
+            match TcpStream::connect_timeout(&a, t) {
                 Ok(s) => {
                     stream = Some(s);
                     break;
@@ -257,7 +285,7 @@ impl<'t> Dialer<'t> {
         let stream = stream.ok_or(last)?;
         // Verzoeken zijn klein en praterig; Nagle zou elke kop laten wachten.
         let _ = stream.set_nodelay(true);
-        let raw = StdConn::new(stream, Some(self.timeout));
+        let raw = StdConn::new(stream, Some(self.timeout)).with_limit(self.limit);
         let Some(trust) = self.trust.filter(|_| target.https) else {
             return Ok(HostConn::Plain(raw));
         };
@@ -335,13 +363,30 @@ impl Http {
     /// Elke status is een antwoord, ook 4xx en 5xx; alleen transport en
     /// framing zijn fouten. GET en HEAD volgen redirects.
     pub fn request(&self, call: &Call<'_>, limit: usize) -> Result<Reply> {
-        block_on(self.request_async(call, limit))
+        block_on(self.request_async(call, limit, None))
     }
 
-    async fn request_async(&self, call: &Call<'_>, limit: usize) -> Result<Reply> {
+    /// Als [`Http::request`], maar de hele aanroep (verbinden, TLS, kop,
+    /// body, elke redirect) is klaar vóór `until`, of hij faalt met een
+    /// termijnfout.
+    ///
+    /// Waarom naast de fasetermijn van [`Call::timeout`]: die begint per
+    /// fase opnieuw, dus een trage of druppelende server kan een aanroep
+    /// een veelvoud ervan laten duren. Een lease-vernieuwing die dat doet,
+    /// verliest de lease terwijl hij nog wacht.
+    pub fn request_until(&self, call: &Call<'_>, limit: usize, until: Instant) -> Result<Reply> {
+        block_on(self.request_async(call, limit, Some(until)))
+    }
+
+    async fn request_async(
+        &self,
+        call: &Call<'_>,
+        limit: usize,
+        until: Option<Instant>,
+    ) -> Result<Reply> {
         let verifier = self.verifier();
         let trust = verifier.as_ref().map(|v| Trust::Chain(v));
-        let mut dial = Dialer::new(trust, call.timeout);
+        let mut dial = Dialer::new(trust, call.timeout).with_limit(until);
         let lc = leanhttp_call(call)?;
         let mut resp = leanhttp::fetch(&mut dial, lc)
             .await
@@ -409,6 +454,63 @@ impl Http {
             total = total.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
             progress(total, length);
         }
+    }
+
+    /// Opent een verzoek en geeft het antwoord zodra de kop binnen is; de
+    /// body leest de aanroeper zelf, hap voor hap ([`Open::read`]).
+    ///
+    /// Voor stromen die niet af zijn als het antwoord begint: een SSE-stroom
+    /// of een log-tail door de proxy. [`Call::timeout`] geldt per lees als
+    /// stiltetermijn; een stroom die langer zwijgt, is dood. Elke status is
+    /// een antwoord; GET volgt redirects.
+    pub fn open(&self, call: &Call<'_>) -> Result<Open> {
+        block_on(async {
+            let verifier = self.verifier();
+            let trust = verifier.as_ref().map(|v| Trust::Chain(v));
+            let mut dial = Dialer::new(trust, call.timeout);
+            let lc = leanhttp_call(call)?;
+            let resp = leanhttp::fetch(&mut dial, lc)
+                .await
+                .map_err(|e| dial.take_why().map_or(Error::Http(e), Error::Dial))?;
+            Ok(Open { resp })
+        })
+    }
+}
+
+/// Een antwoord waarvan de body nog op de verbinding staat ([`Http::open`]).
+///
+/// Bezit de verbinding; `Drop` sluit hem.
+pub struct Open {
+    resp: leanhttp::Response<HostConn>,
+}
+
+impl fmt::Debug for Open {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Open")
+            .field("status", &self.resp.status)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Open {
+    /// De status.
+    pub fn status(&self) -> u16 {
+        self.resp.status
+    }
+
+    /// Een header op naam (hoofdletterongevoelig).
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.resp.header.get(name)
+    }
+
+    /// Leest de volgende hap van de body in `buf`; 0 is het einde.
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        block_on(self.resp.read(buf)).map_err(Error::Http)
+    }
+
+    /// Leest de rest van de body, hoogstens `limit` bytes.
+    pub fn read_to_end(&mut self, limit: usize) -> Result<Vec<u8>> {
+        block_on(self.resp.read_to_end(limit)).map_err(Error::Http)
     }
 }
 

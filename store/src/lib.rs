@@ -11,7 +11,9 @@
 //! Elke backend is van één eigenaar. De daemon draait de lease op een eigen
 //! thread en de staat op de leader-thread; alles is daarom `Send`, niets is
 //! `Sync` nodig en er is geen slot. Elke aanroep blokkeert zijn thread met
-//! een termijn uit [`discovery::backend_timeout_for`].
+//! een termijn uit [`discovery::backend_timeout_for`], en die termijn is
+//! het budget van de hele aanroep: verbinden, kop, body en een eventuele
+//! tweede poging samen (niet per fase).
 //!
 //! De lease-JSON is die van Go's `hoplock.State`, zodat Go- en Rust-nodes
 //! één bucket of één hoplockserver kunnen delen (zie `wire`).

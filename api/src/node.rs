@@ -59,6 +59,11 @@ pub enum Effect {
         url: String,
         /// De sha256 in hex.
         sha256: String,
+        /// De KOUDE flip (`"cold": true`): de taken op deze node stoppen,
+        /// de kern springt zonder ze over te dragen en start Hop koud. De
+        /// weg voor een kern met een andere switch-code, die de warme flip
+        /// weigert (HopOS `docs/flip.md`).
+        cold: bool,
     },
 }
 
@@ -145,6 +150,10 @@ impl NodeApi {
     /// Achter dezelfde HMAC als dispatch, want wie een kern mag aanleveren mag
     /// alles. Het antwoord is een 202 en niet de uitkomst: een geslaagde flip
     /// keert per definitie nooit terug.
+    ///
+    /// Met `"cold": true` draaien de taken NIET door: ze stoppen, de kern
+    /// springt koud en Hop start opnieuw, en de jobs komen daarna terug
+    /// (29-09). Dezelfde ene route, een vlag in dezelfde body.
     fn flip(&self, req: &Request) -> (Response, Effect) {
         let none = |r| (r, Effect::None);
         if req.method != Method::Post {
@@ -175,11 +184,25 @@ impl NodeApi {
         if sum.len() != 64 || !sum.bytes().all(|c| c.is_ascii_hexdigit()) {
             return none(Response::error(400, "sha256 must be 64 hex characters"));
         }
+        // Afwezig is warm; iets anders dan een bool is een typefout, geen
+        // stille warme flip.
+        let cold = match v.as_object().and_then(|o| o.get("cold")) {
+            None => false,
+            Some(c) => match c.as_bool() {
+                Some(b) => b,
+                None => return none(Response::error(400, "cold must be true or false")),
+            },
+        };
         let effect = Effect::Flip {
             url: String::from(url),
             sha256: String::from(sum),
+            cold,
         };
-        let msg = "flip requested: the node fetches, verifies and replaces its kernel; watch its console and its re-registration";
+        let msg = if cold {
+            "cold flip requested: the tasks on this node stop, the node fetches, verifies and replaces its kernel, and Hop starts again; watch its console and its re-registration"
+        } else {
+            "flip requested: the node fetches, verifies and replaces its kernel; watch its console and its re-registration"
+        };
         (reply(202, [("status", s(msg))]), effect)
     }
 }
@@ -368,4 +391,48 @@ fn logs(rest: &str) -> (Response, Effect) {
             stream,
         },
     )
+}
+
+#[cfg(test)]
+mod flip_tests {
+    //! De vlag van de koude flip op `POST /flip`.
+    use super::*;
+    use crate::Method;
+
+    fn api_agent() -> Agent {
+        Agent::new(agent::Settings {
+            id: "flip-node".into(),
+            ..agent::Settings::default()
+        })
+    }
+
+    #[test]
+    fn the_cold_flag_rides_on_the_same_route() {
+        let mut a = api_agent();
+        let on = NodeApi::new(b"", true);
+        let sum = "b".repeat(64);
+        let body = |extra: &str| {
+            alloc::format!(r#"{{"url":"http://10.0.2.2/k.flip","sha256":"{sum}"{extra}}}"#)
+        };
+        let ask = |a: &mut Agent, b: String| {
+            on.handle(
+                a,
+                0,
+                None,
+                &Request::new(Method::Post, "/flip", b.as_bytes()),
+            )
+        };
+        let (r, e) = ask(&mut a, body(""));
+        assert_eq!(r.status, 202);
+        assert!(
+            matches!(e, Effect::Flip { cold: false, .. }),
+            "absent is warm"
+        );
+        let (r, e) = ask(&mut a, body(r#","cold":true"#));
+        assert_eq!(r.status, 202);
+        assert!(matches!(e, Effect::Flip { cold: true, .. }));
+        let (r, e) = ask(&mut a, body(r#","cold":"yes""#));
+        assert_eq!(r.status, 400, "a string is not a flag");
+        assert_eq!(e, Effect::None);
+    }
 }

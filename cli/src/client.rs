@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use hostnet::{Call, Http, Reply};
+use hostnet::{Call, Http, Open, Reply};
 use types::json::{self, Value};
 
 /// Hoe lang één verzoek mag duren. Een apply wacht op de plaatsing (een
@@ -15,6 +15,11 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 
 /// De grootste body die de CLI leest: 8 MiB (een grote jobs-lijst).
 const MAX_BODY: usize = 8 << 20;
+
+/// De stiltetermijn van een gevolgde stroom (`hop logs --follow`, `hop
+/// events`): de server schrijft elke 15 s een keepalive, dus wie een
+/// minuut zwijgt, is weg.
+const STREAM_IDLE: Duration = Duration::from_secs(60);
 
 /// Waar de CLI mee praat.
 pub(crate) struct Client {
@@ -75,6 +80,36 @@ impl Client {
         check(r)
     }
 
+    /// Opent een ondertekende GET op de leader als stroom; een foutstatus
+    /// wordt de melding uit `{"error": ...}`.
+    pub(crate) fn leader_stream(&self, path: &str) -> Result<Open, String> {
+        let url = format!("{}{path}", base(&self.leader));
+        let sig = auth::sign_call(self.key.as_bytes(), "GET", &url, b"");
+        let sig = sig.map(|s| String::from_utf8_lossy(&s).into_owned());
+        let mut headers: Vec<(&str, &str)> = vec![("Accept", "text/event-stream")];
+        if let Some(s) = &sig {
+            headers.push((auth::AUTH_HEADER, s));
+        }
+        let call = Call {
+            method: "GET",
+            url: &url,
+            headers: &headers,
+            body: None,
+            timeout: STREAM_IDLE,
+        };
+        let mut o = self.http.open(&call).map_err(|e| format!("{url}: {e}"))?;
+        if o.status() >= 400 {
+            let body = o.read_to_end(MAX_BODY).unwrap_or_default();
+            return check(Reply {
+                status: o.status(),
+                headers: Vec::new(),
+                body,
+            })
+            .map(|_| o);
+        }
+        Ok(o)
+    }
+
     /// Een verzoek aan een agent (`base` is `http://ip:poort` of `host:poort`).
     pub(crate) fn agent_at(
         &self,
@@ -100,7 +135,7 @@ pub(crate) fn base(addr: &str) -> String {
 }
 
 /// Een 4xx of 5xx als fout met de reden van de server.
-fn check(r: Reply) -> Result<Reply, String> {
+pub(crate) fn check(r: Reply) -> Result<Reply, String> {
     if r.status < 400 {
         return Ok(r);
     }

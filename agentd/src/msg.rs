@@ -41,7 +41,88 @@ pub(crate) enum Reply {
     Proxy {
         /// `ip:poort` van de leader.
         leader: String,
+        /// Of het antwoord een stroom is: per brok doorspoelen in plaats van
+        /// bufferen (`/v1/events`, een log-tail). De eigenaar telde hem al
+        /// als open stroom; de thread meldt [`Msg::StreamDone`].
+        stream: bool,
     },
+    /// Volg de log van een taak: de kop, dan steeds [`Poll::Logs`] bij de
+    /// eigenaar tot de ring dicht is of de lezer weg (een open stroom).
+    Follow {
+        /// Status en headers.
+        head: Response,
+        /// De taak.
+        task_id: String,
+        /// De stroom.
+        stream: runner::Stream,
+    },
+    /// De meldingen van de leader als SSE: de kop, [`api::PING`], dan
+    /// steeds [`Poll::Events`] vanaf `seq` (een open stroom).
+    Subscribe {
+        /// Status en headers.
+        head: Response,
+        /// Het volgnummer waarmee de lezer begint.
+        seq: u64,
+    },
+    /// `GET /v1/tasks`: vraag elke agent zijn taken; de thread doet de
+    /// rondgang, met één totale termijn, zodat de eigenaar nergens op wacht.
+    Tasks {
+        /// `(id, endpoint)` van elke agent.
+        agents: Vec<(String, String)>,
+    },
+    /// Geef het verzoek door aan één agent, ondertekend met de clustersleutel.
+    Agent {
+        /// Het endpoint van de agent.
+        endpoint: String,
+        /// Pad en query op de agent.
+        path: String,
+        /// Of het een (getelde) stroom is.
+        stream: bool,
+    },
+}
+
+impl Reply {
+    /// Of dit antwoord een stroom is die de eigenaar als open telt.
+    pub(crate) fn is_stream(&self) -> bool {
+        matches!(
+            self,
+            Self::Proxy { stream: true, .. }
+                | Self::Agent { stream: true, .. }
+                | Self::Follow { .. }
+                | Self::Subscribe { .. }
+        )
+    }
+}
+
+/// Wat een open stroom de eigenaar vraagt: wat er sinds zijn volgnummer bij kwam.
+#[derive(Debug)]
+pub(crate) enum Poll {
+    /// De regels van een taak na `seq` (0: alles wat de ring nog heeft).
+    Logs {
+        /// De taak.
+        task_id: String,
+        /// De stroom.
+        stream: runner::Stream,
+        /// Het volgnummer van de laatste regel die de lezer al heeft.
+        seq: u64,
+    },
+    /// De meldingen na `seq`.
+    Events {
+        /// Het volgnummer waarmee de lezer vraagt.
+        seq: u64,
+    },
+}
+
+/// Het antwoord op een [`Poll`]: de SSE-bytes, het nieuwe volgnummer, en
+/// of de stroom klaar is (de ring dicht, of deze node leidt niet meer).
+#[derive(Debug, Default)]
+pub(crate) struct Chunk {
+    /// De SSE-gebeurtenissen, klaar voor de draad.
+    pub(crate) text: String,
+    /// Het volgnummer voor de volgende vraag.
+    pub(crate) seq: u64,
+    /// Na deze bytes is de stroom af.
+    pub(crate) done: bool,
 }
 
 /// Wat de lease-thread terugmeldt.
@@ -112,4 +193,14 @@ pub(crate) enum Msg {
     },
     /// Het wegschrijven van de clusterstaat faalde.
     SnapshotFailed(String),
+    /// Een open stroom vraagt wat er bij kwam.
+    Poll {
+        /// De vraag.
+        poll: Poll,
+        /// Waar het antwoord heen gaat.
+        reply: SyncSender<Chunk>,
+    },
+    /// Een open stroom is dicht (de thread meldt het in `Drop`): de
+    /// eigenaar telt hem af.
+    StreamDone,
 }
