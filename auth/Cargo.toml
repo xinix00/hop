@@ -1,0 +1,13 @@
+[package]
+name = "auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "De HMAC-verzoekauthenticatie (X-Hop-Auth): ondertekenen, toetsen, de tijdvenster-regels."
+
+[dependencies]
+
+[lints]
+workspace = true

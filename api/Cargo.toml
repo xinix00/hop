@@ -1,0 +1,18 @@
+[package]
+name = "api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "De HTTP-API als pure handlers over eigen request/response-typen; de HTTP-laag (leanhttp) is een dunne adapter erbuiten."
+
+[dependencies]
+types = { path = "../types" }
+config = { path = "../config" }
+auth = { path = "../auth" }
+leader = { path = "../leader" }
+agent = { path = "../agent" }
+
+[lints]
+workspace = true

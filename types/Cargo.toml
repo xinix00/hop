@@ -1,0 +1,13 @@
+[package]
+name = "types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "De woordenschat van Hop: jobspec, taakstaat, node-identiteit, poorten, artifacts."
+
+[dependencies]
+
+[lints]
+workspace = true

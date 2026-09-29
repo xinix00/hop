@@ -1,0 +1,15 @@
+[package]
+name = "agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "De node: taken, heartbeats, herstarts, gezondheidscontroles, staat die een herstart overleeft."
+
+[dependencies]
+types = { path = "../types" }
+config = { path = "../config" }
+
+[lints]
+workspace = true

@@ -1,4 +1,3 @@
-bin/
-data/
-*.log
-/agent
+/target/
+.DS_Store
+.claude/

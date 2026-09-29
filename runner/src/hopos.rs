@@ -1,0 +1,467 @@
+//! De HopOS-backend: elke taak is een native app-image in een eigen kooi.
+//!
+//! Bezit de boekhouding welke taak welke kooi houdt, de startfase per taak
+//! (wachten op het image, stromen, gearmd) en de logringen. De kern bezit
+//! de kooien zelf, de cores en de partities; HopOS dwingt isolatie en de
+//! geheugenlimiet af in hardware, dus deze runner geeft alleen image, env
+//! en limieten door.
+//!
+//! Poorten: elke taak heeft een eigen netwerkstack op het interne net van
+//! HopOS; de node publiceert elke toegewezen poort met stateless DNAT, en de
+//! taak bindt hetzelfde nummer (uit `ER_PORT_<NAAM>`).
+
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+
+use crate::env::{attr_env_vars, port_env_vars};
+use crate::logs::{LogPolicy, LogRing, LogStore};
+use crate::system::{Slot, SlotApp, StartSpec, SysError, SystemApi};
+use crate::{Error, Result, RunState, Runner, StartRequest, Started, Stream, TaskRef};
+
+/// Het coöperatieve venster voordat een stop escaleert naar de stage-2-intrekking.
+///
+/// Een gezonde app parkeert binnen ongeveer 100 ms na de killvlag (de
+/// bewaaklus pollt elke 50 ms), dus 3 s is ruim; de oude 10 s liet elke
+/// weerspannige stop in een delete-storm 10 geserialiseerde seconden kosten
+/// (gemeten 15-07: 127 deletes duurden tientallen minuten).
+pub const HOP_STOP_TIMEOUT_MS: u64 = 3_000;
+
+/// Hoeveel images de node tegelijk binnenhaalt.
+///
+/// De grens is fysiek, geen beleid: elke stroom kost de Hop-core een
+/// TLS-sessie plus een leesbuffer, en TLS is op een klein board CPU-werk op
+/// die core. Wie in de rij staat is gewoon "queued": zichtbaar, en de
+/// capaciteit is al geteld.
+pub const MAX_CONCURRENT_DOWNLOADS: usize = 4;
+
+/// De bovengrens van het kooinummer waar de toewijzer zoekt.
+///
+/// De kern heeft zijn eigen harde plafond en weigert daarboven toch; deze
+/// grens is er alleen zodat de zoektocht altijd eindigt. Kooien zijn niet aan
+/// het aantal cores gebonden (sharegroups stapelen er meer dan er cores zijn).
+pub const MAX_CAGES: u32 = 256;
+
+/// Hoe lang een logregel uit de kern maximaal is; langer wordt afgekapt.
+const LOG_LINE_MAX: usize = 512;
+
+/// Waar de start van een taak is.
+#[derive(Debug)]
+enum Phase {
+    /// De kooi is gereserveerd; het image is nog niet begonnen.
+    Queued(StartSpec),
+    /// Het image stroomt: `done` van `size` bytes.
+    Streaming { done: u64, size: u64 },
+    /// De app draait (of draaide); een stop is een gewone app-stop.
+    Armed,
+}
+
+/// Eén kooi van één taak.
+#[derive(Debug)]
+struct Cage {
+    slot: Slot,
+    phase: Phase,
+    /// De reden van het einde is al in de log gezet (één keer, niet per poll).
+    fault_logged: bool,
+}
+
+/// De HopOS-runner bovenop een [`SystemApi`].
+///
+/// # Invariants
+///
+/// `in_use[slot] == id` precies dan als `cages[id].slot == slot`, en het
+/// aantal kooien in [`Phase::Streaming`] is `downloads`.
+#[derive(Debug)]
+pub struct HopRunner<S> {
+    sys: S,
+    node_attrs: BTreeMap<String, String>,
+    logs: LogStore,
+    cages: BTreeMap<String, Cage>,
+    in_use: BTreeMap<Slot, String>,
+    downloads: usize,
+}
+
+impl<S: SystemApi> HopRunner<S> {
+    /// Een runner op `sys`; `node_attrs` gaan als `ER_ATTR_*` mee naar elke app.
+    pub fn new(sys: S, node_attrs: BTreeMap<String, String>, logs: LogPolicy) -> Self {
+        Self {
+            sys,
+            node_attrs,
+            logs: LogStore::new(logs),
+            cages: BTreeMap::new(),
+            in_use: BTreeMap::new(),
+            downloads: 0,
+        }
+    }
+
+    /// De kern-kant (tests en diagnose).
+    pub fn system(&self) -> &S {
+        &self.sys
+    }
+
+    /// De kern-kant, muteerbaar (tests).
+    pub fn system_mut(&mut self) -> &mut S {
+        &mut self.sys
+    }
+
+    /// De grootste partitie die de node nog kan plaatsen; `None` als hij het niet weet.
+    pub fn pool_largest(&self) -> Option<u64> {
+        self.sys.pool_largest()
+    }
+
+    /// De kooi van een taak, als deze runner hem bezit.
+    pub fn slot_of(&self, task_id: &str) -> Option<Slot> {
+        self.cages.get(task_id).map(|c| c.slot)
+    }
+
+    /// Het aantal kooien dat deze runner bezit.
+    pub fn cages_in_use(&self) -> usize {
+        self.in_use.len()
+    }
+
+    /// De eerste vrije kooi.
+    ///
+    /// Vrij is: niet door ons uitgedeeld EN niet door de node als draaiend
+    /// gemeld. Dat laatste vangt de bewoners die een kern-flip overleefden
+    /// voordat deze runner opnieuw gebouwd werd (gemeten 02-09 op de M4).
+    pub fn allocate_slot(&self) -> Option<Slot> {
+        (1..=MAX_CAGES)
+            .map(Slot)
+            .find(|s| !self.in_use.contains_key(s) && !self.sys.slot_status(*s).core_on)
+    }
+
+    /// Draagt de kooien van al draaiende taken over (na een kern-flip).
+    ///
+    /// Dit is geen tweede waarheid over wat er draait, alleen EIGENDOM: welke
+    /// taak deze kooi straks mag stoppen. Zonder deze stap is zo'n bewoner niet
+    /// meer te stoppen (GEMETEN 02-09 op de M4: welcome verwijderd, node meldde
+    /// hem nog live). Idempotent; pakt nooit een kooi af die al uitgedeeld is.
+    pub fn adopt_running(&mut self, slots: &[(String, Slot)]) {
+        for (id, slot) in slots {
+            if slot.0 < 1 || self.cages.contains_key(id) || self.in_use.contains_key(slot) {
+                continue;
+            }
+            self.in_use.insert(*slot, id.clone());
+            self.cages.insert(
+                id.clone(),
+                Cage {
+                    slot: *slot,
+                    phase: Phase::Armed,
+                    fault_logged: false,
+                },
+            );
+            self.logs.open(id);
+        }
+    }
+
+    /// CPU (procent van de eigen cores) en werkelijk geheugen, zoals de app ze meldt.
+    ///
+    /// `None` voor een veld dat nog niet gemeten is (de app start nog).
+    pub fn usage(&self, task: &TaskRef<'_>) -> (Option<u8>, Option<u64>) {
+        if task.pid == 0 {
+            return (None, None);
+        }
+        let slot = self.slot_of(task.id).unwrap_or(Slot(task.pid));
+        let s = self.sys.slot_status(slot);
+        (s.cpu_pct, (s.mem_sys != 0).then_some(s.mem_sys))
+    }
+
+    /// Haalt de logregels van alle draaiende apps uit de kern in hun ringen.
+    ///
+    /// De executor roept dit periodiek; hij is de pomp die in Go een goroutine
+    /// per taak was.
+    pub fn pump_logs(&mut self, now: u64) {
+        let mut buf = [0u8; LOG_LINE_MAX];
+        for (id, cage) in &self.cages {
+            if !matches!(cage.phase, Phase::Armed) {
+                continue;
+            }
+            while let Some(n) = self.sys.next_log_line(cage.slot, &mut buf) {
+                let line = buf.get(..n).unwrap_or(&[]);
+                let text = core::str::from_utf8(line).unwrap_or("<log line not utf-8>");
+                if let Some(ring) = self.logs.live_mut(id, Stream::Stdout) {
+                    ring.write(text);
+                }
+            }
+        }
+        self.logs.sweep(now);
+    }
+
+    /// Schrijft een regel in de stdout-ring van een taak.
+    fn log(&mut self, task_id: &str, line: &str) {
+        if let Some(ring) = self.logs.live_mut(task_id, Stream::Stdout) {
+            ring.write(line);
+        }
+    }
+
+    /// Schrijft de reden dat een taak niet startte in zijn eigen log, en pensioneert die.
+    ///
+    /// Op een node is er geen console om op terug te vallen, en een start die
+    /// faalt heeft nog geen app die het zelf kan zeggen (GEMETEN 12-08 op een
+    /// LicheeRV: "failed, restarts 5" en de reden stond alleen op een seriële
+    /// lijn die niemand las).
+    fn fail(&mut self, now: u64, task_id: &str, err: Error) -> Error {
+        let line = format!("hop: this task did not start: {err}");
+        self.log(task_id, &line);
+        self.logs.retire(now, task_id);
+        err
+    }
+
+    /// Geeft de boekhouding van een taak vrij en pensioneert zijn logs.
+    fn release(&mut self, now: u64, task_id: &str) {
+        self.drop_cage(task_id);
+        self.logs.retire(now, task_id);
+    }
+
+    /// Geeft alleen de boekhouding vrij; de logs blijven open voor de faalreden.
+    fn drop_cage(&mut self, task_id: &str) {
+        if let Some(cage) = self.cages.remove(task_id) {
+            self.in_use.remove(&cage.slot);
+            if matches!(cage.phase, Phase::Streaming { .. }) {
+                self.downloads = self.downloads.saturating_sub(1);
+            }
+        }
+    }
+
+    /// Bouwt de spec voor een start, zonder de image-maat.
+    fn spec(&self, req: &StartRequest<'_>) -> Result<StartSpec> {
+        if !req.image.is_empty() {
+            return Err(Error::Rejected("containers are not supported on HopOS"));
+        }
+        if req.artifacts != 1 {
+            return Err(Error::Rejected(
+                "exactly one artifact (the app image) is required",
+            ));
+        }
+        if !req.extract.is_empty() {
+            return Err(Error::Rejected(
+                "artifact must be a raw app image (no extract)",
+            ));
+        }
+        let mut env = req.env.clone();
+        attr_env_vars(&self.node_attrs, &mut env);
+        port_env_vars(req.ports, &mut env);
+
+        // 1024 shares is één core (de Docker/Nomad-conventie), minimaal 1. Met
+        // een sharegroup draait de app op één core in een pool van zoveel cores
+        // die hij deelt met gelijk-getagde apps.
+        let cores = (req.cpu_shares / 1024).max(1);
+        let sharegroup = req.tags.get("sharegroup").cloned().unwrap_or_default();
+        let (app_cores, pool_cores) = if sharegroup.is_empty() {
+            (cores, 1)
+        } else {
+            (1, cores)
+        };
+        Ok(StartSpec {
+            image_size: 0,
+            mem_limit: req.memory_limit,
+            core_class: req.tags.get("core-class").cloned().unwrap_or_default(),
+            cores: app_cores,
+            sharegroup,
+            pool_cores,
+            env,
+            mounts: req.volumes.clone(),
+            ports: req.ports.clone(),
+            job: req.job_name.to_string(),
+        })
+    }
+
+    fn placement_err(e: SysError) -> Error {
+        match e {
+            SysError::NoCapacity(why) => Error::NoCapacity(why),
+            other => Error::System(other),
+        }
+    }
+
+    /// Breekt een stroom af of stopt een app; `Ok` als de kern de vrijgave op zich neemt.
+    fn stop_cage(&mut self, now: u64, task_id: &str, slot: Slot) -> Result {
+        match self.sys.stop_slot(slot, HOP_STOP_TIMEOUT_MS) {
+            Ok(()) => {
+                self.release(now, task_id);
+                Ok(())
+            }
+            // De kern kon de vrijgave niet bevestigen. De kooi blijft van ons, zodat
+            // niemand hem hergebruikt op basis van een onbevestigde vrijgave.
+            Err(_) => Err(Error::Quarantined(slot)),
+        }
+    }
+
+    /// Zet de reden van een einde één keer in de log van de taak.
+    fn log_end_once(&mut self, task_id: &str, slot: Slot) {
+        let Some(cage) = self.cages.get_mut(task_id) else {
+            return;
+        };
+        if cage.fault_logged {
+            return;
+        }
+        cage.fault_logged = true;
+        let s = self.sys.slot_status(slot);
+        let line = if s.fault_vec != 0 {
+            format!(
+                "hop: task failed: stage-2 fault on slot {} (vec {}, ESR {:#x}, FAR {:#x})",
+                slot.0,
+                s.fault_vec - 1,
+                s.fault_esr,
+                s.fault_far
+            )
+        } else if !s.cage.is_empty() {
+            format!(
+                "hop: task failed: exit code {} (slot {}): {}",
+                s.exit_code, slot.0, s.cage
+            )
+        } else if s.exit_code != 0 {
+            format!(
+                "hop: task failed: exit code {} (slot {})",
+                s.exit_code, slot.0
+            )
+        } else {
+            return;
+        };
+        self.log(task_id, &line);
+    }
+}
+
+impl<S: SystemApi> Runner for HopRunner<S> {
+    fn start(&mut self, now: u64, req: &StartRequest<'_>) -> Result<Started> {
+        // De log bestaat vóór de eerste faalbare stap: anders is er geen plek
+        // om de fout in te schrijven.
+        self.logs.open(req.task_id);
+        let spec = match self.spec(req) {
+            Ok(s) => s,
+            Err(e) => return Err(self.fail(now, req.task_id, e)),
+        };
+        let Some(slot) = self.allocate_slot() else {
+            return Err(self.fail(now, req.task_id, Error::NoFreeCage));
+        };
+        self.in_use.insert(slot, req.task_id.to_string());
+        self.cages.insert(
+            req.task_id.to_string(),
+            Cage {
+                slot,
+                phase: Phase::Queued(spec),
+                fault_logged: false,
+            },
+        );
+        Ok(Started::AwaitImage)
+    }
+
+    fn image_begin(&mut self, now: u64, task_id: &str, size: u64) -> Result {
+        let (slot, queued) = match self.cages.get(task_id) {
+            None => return Err(Error::UnknownTask),
+            Some(c) => (c.slot, matches!(c.phase, Phase::Queued(_))),
+        };
+        if !queued {
+            return Err(Error::Stream("image already begun"));
+        }
+        if size == 0 {
+            // Verplicht: de plaatsing valideert tegen de image-maat, en een
+            // afgekapte stroom moet een luide fout zijn, geen halve app.
+            self.drop_cage(task_id);
+            return Err(self.fail(now, task_id, Error::Stream("no Content-Length")));
+        }
+        if self.downloads >= MAX_CONCURRENT_DOWNLOADS {
+            return Err(Error::Busy);
+        }
+        let spec = match self.cages.get_mut(task_id).map(|c| &mut c.phase) {
+            Some(Phase::Queued(spec)) => {
+                spec.image_size = size;
+                spec.clone()
+            }
+            _ => return Err(Error::UnknownTask),
+        };
+        if let Err(e) = self.sys.start_slot(slot, &spec) {
+            // De kern ruimde zijn eigen reserveringen op; wij de onze.
+            self.drop_cage(task_id);
+            return Err(self.fail(now, task_id, Self::placement_err(e)));
+        }
+        if let Some(c) = self.cages.get_mut(task_id) {
+            c.phase = Phase::Streaming { done: 0, size };
+        }
+        self.downloads = self.downloads.saturating_add(1);
+        Ok(())
+    }
+
+    fn image_chunk(&mut self, now: u64, task_id: &str, chunk: &[u8]) -> Result<Started> {
+        let (slot, done, size) = match self.cages.get(task_id) {
+            Some(Cage {
+                slot,
+                phase: Phase::Streaming { done, size },
+                ..
+            }) => (*slot, *done, *size),
+            Some(_) => return Err(Error::Stream("image not begun")),
+            None => return Ok(Started::Aborted),
+        };
+        let len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+        let total = done.saturating_add(len);
+        if total > size {
+            // Afbreken; lukt dat niet, dan blijft de kooi in quarantaine.
+            if self.sys.stop_slot(slot, HOP_STOP_TIMEOUT_MS).is_ok() {
+                self.drop_cage(task_id);
+            }
+            return Err(self.fail(
+                now,
+                task_id,
+                Error::Stream("more bytes than Content-Length"),
+            ));
+        }
+        if let Err(e) = self.sys.stream_image(slot, chunk) {
+            self.drop_cage(task_id);
+            return Err(self.fail(now, task_id, Self::placement_err(e)));
+        }
+        if total < size {
+            if let Some(c) = self.cages.get_mut(task_id) {
+                c.phase = Phase::Streaming { done: total, size };
+            }
+            return Ok(Started::AwaitImage);
+        }
+        // Gearmd: een stop is vanaf nu een gewone app-stop, geen afbreking meer.
+        if let Some(c) = self.cages.get_mut(task_id) {
+            c.phase = Phase::Armed;
+        }
+        self.downloads = self.downloads.saturating_sub(1);
+        // Welke kooi kreeg deze taak? De node weet het, en vooraan in de eigen log
+        // komt het heel aan, waar een operator al kijkt (`hop logs`).
+        let cage = self.sys.slot_status(slot).cage;
+        if !cage.is_empty() {
+            self.log(task_id, &cage);
+        }
+        Ok(Started::Running { pid: slot.0 })
+    }
+
+    fn stop(&mut self, now: u64, task: &TaskRef<'_>) -> Result {
+        // Onbekend = niet van ons, en met opzet: een VEROUDERD taakrecord mag nooit
+        // de nieuwe bewoner van dat kooinummer omleggen.
+        let Some(cage) = self.cages.get(task.id) else {
+            return Ok(());
+        };
+        let slot = cage.slot;
+        match cage.phase {
+            Phase::Queued(_) => {
+                self.release(now, task.id);
+                Ok(())
+            }
+            Phase::Streaming { .. } | Phase::Armed => self.stop_cage(now, task.id, slot),
+        }
+    }
+
+    fn status(&mut self, _now: u64, task: &TaskRef<'_>) -> Result<RunState> {
+        // Zonder pid zit de taak nog in zijn startfase; die bevraagt de monitor
+        // niet, en komt er toch iemand, dan is "draait" het eerlijke antwoord.
+        if task.pid == 0 {
+            return Ok(RunState::Running);
+        }
+        let slot = self.slot_of(task.id).unwrap_or(Slot(task.pid));
+        let s = self.sys.slot_status(slot);
+        if s.core_on {
+            return Ok(RunState::Running);
+        }
+        if s.app != SlotApp::Exited || s.exit_code != 0 || s.fault_vec != 0 {
+            self.log_end_once(task.id, slot);
+        }
+        Ok(RunState::Failed)
+    }
+
+    fn logs(&self, now: u64, task_id: &str, stream: Stream) -> Option<&LogRing> {
+        self.logs.get(now, task_id, stream)
+    }
+}

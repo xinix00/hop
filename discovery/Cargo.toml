@@ -1,0 +1,14 @@
+[package]
+name = "discovery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Nodes vinden op het LAN."
+
+[dependencies]
+types = { path = "../types" }
+
+[lints]
+workspace = true
