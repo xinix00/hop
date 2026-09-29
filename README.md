@@ -28,6 +28,22 @@ runner/     the task backends: HopOS slots, processes, docker
 hopos-runner/  runner::SystemApi over applib's system client (the kernel frames)
 hop-http/   the HTTP adapter: leanhttp over an applib TcpStream, api in and out
 agentd-hopos/  Hop as the HopOS resident: agent + leader in a slot (lib + no_std bin)
-agentd/     the daemon binary (Linux, macOS)
-cli/        the `hop` command
+hostnet/    the host side of the net (std): std sockets for leanhttp, block_on, HTTP(S) client, S3 transport
+store/      the lease and the committed cluster state on the host: S3, hoplockserver, a file
+agentd/     the daemon binary (Linux, macOS): agent, election, leader, both APIs, processes and docker
+cli/        the `hop` command: apply, jobs, status, agents, logs, delete, flip
 ```
+
+## On a host
+
+```
+cargo build --release -p agentd -p cli
+target/release/agentd --cluster demo            # standalone: in-memory lock, state in ./data
+target/release/hop apply job.json               # {"name": "sleeper", "command": "sleep 30"}
+target/release/hop jobs
+target/release/hop delete sleeper
+```
+
+`sh tools/e2e-host.sh` runs exactly that and checks the process comes and goes.
+Cross-build for Linux: `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld
+cargo build --release -p agentd -p cli --target aarch64-unknown-linux-musl`.

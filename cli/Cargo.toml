@@ -1,0 +1,20 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Het `hop`-commando: jobs toepassen, tonen en verwijderen, agents, status, logs, de kern-flip."
+
+[[bin]]
+name = "hop"
+path = "src/main.rs"
+
+[dependencies]
+types = { path = "../types" }
+auth = { path = "../auth" }
+hostnet = { path = "../hostnet" }
+
+[lints]
+workspace = true

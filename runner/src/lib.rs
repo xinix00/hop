@@ -16,7 +16,7 @@
 //! De proces- en docker-backends van de Go-versie hebben een OS nodig en
 //! staan (nog) niet in deze crate; zie het eindrapport van de port.
 
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![cfg_attr(
     test,
     allow(
@@ -29,9 +29,14 @@
 #![forbid(unsafe_code)]
 
 extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
 
 mod env;
 mod hopos;
+/// De host-backends (feature `std`): processen, Docker, downloads, uitpakken en isolatie.
+#[cfg(feature = "std")]
+pub mod host;
 mod logs;
 mod system;
 

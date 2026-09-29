@@ -15,6 +15,12 @@ members = [
     "hopos-runner",
     "hop-http",
     "agentd-hopos",
+    # De host-kant (std): sockets, de opslag, de daemon en de CLI. Buiten de
+    # no_std-stap van de poort (tools/gate.sh).
+    "hostnet",
+    "store",
+    "agentd",
+    "cli",
 ]
 
 [workspace.package]

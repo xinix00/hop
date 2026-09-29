@@ -9,6 +9,16 @@ description = "De taak-backends achter één trait: HopOS-slots (via de bevoegde
 
 [dependencies]
 types = { path = "../types" }
+# Alleen met de feature `std` (de host-backends): het net van de host.
+hostnet = { path = "../hostnet", optional = true }
+leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.1", optional = true }
+# De Docker-API over de unix-socket: één verzoek per verbinding (`leanhttp::send`).
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.1", optional = true }
+
+[features]
+# De host-backends (processen, docker, downloads, isolatie); zonder deze
+# feature is de crate no_std, zoals de HopOS-bewoner hem gebruikt.
+std = ["dep:hostnet", "dep:leans3", "dep:leanhttp"]
 
 [lints]
 workspace = true

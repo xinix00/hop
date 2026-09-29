@@ -1,0 +1,22 @@
+[package]
+name = "store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "De opslag van de host: de leader-lease en de gecommitte clusterstaat op S3, hoplockserver of een bestand."
+
+[dependencies]
+types = { path = "../types" }
+config = { path = "../config" }
+discovery = { path = "../discovery" }
+hostnet = { path = "../hostnet" }
+leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.1" }
+
+[dev-dependencies]
+# De nep-servers van de tests: leanhttp::serve over een std-socket.
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.1" }
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "agentd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "De Hop-daemon voor Linux en macOS: agent, leader-verkiezing, de twee API's, processen en docker."
+
+[dependencies]
+types = { path = "../types" }
+config = { path = "../config" }
+auth = { path = "../auth" }
+leader = { path = "../leader" }
+agent = { path = "../agent" }
+api = { path = "../api" }
+discovery = { path = "../discovery" }
+runner = { path = "../runner", features = ["std"] }
+hostnet = { path = "../hostnet" }
+store = { path = "../store" }
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.1" }
+
+[lints]
+workspace = true

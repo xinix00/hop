@@ -1,0 +1,17 @@
+[package]
+name = "hostnet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "De host-kant van het net (std): std-sockets als leanhttp-verbinding, een block_on, de HTTP(S)-client met de Mozilla-wortels, en het leans3-transport."
+
+[dependencies]
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.1" }
+leanhttps = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.1" }
+leantls = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.1" }
+leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.1" }
+
+[lints]
+workspace = true

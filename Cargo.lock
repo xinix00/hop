@@ -20,6 +20,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentd"
+version = "3.0.0"
+dependencies = [
+ "agent",
+ "api",
+ "auth",
+ "config",
+ "discovery",
+ "hostnet",
+ "leader",
+ "leanhttp",
+ "runner",
+ "store",
+ "types",
+]
+
+[[package]]
 name = "agentd-hopos"
 version = "3.0.0"
 dependencies = [
@@ -75,6 +92,15 @@ version = "3.0.0"
 source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.8#084245dc2640ecbc7b52edd01f0fed530709b8d8"
 
 [[package]]
+name = "cli"
+version = "3.0.0"
+dependencies = [
+ "auth",
+ "hostnet",
+ "types",
+]
+
+[[package]]
 name = "config"
 version = "3.0.0"
 dependencies = [
@@ -123,6 +149,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostnet"
+version = "3.0.0"
+dependencies = [
+ "leanhttp",
+ "leanhttps",
+ "leans3",
+ "leantls",
+]
+
+[[package]]
 name = "leader"
 version = "3.0.0"
 dependencies = [
@@ -155,6 +191,11 @@ version = "3.0.0"
 source = "git+https://github.com/xinix00/lean.git?tag=v3.0.0#a7e089448c903fe199b604d246401cbd88640de3"
 
 [[package]]
+name = "leans3"
+version = "3.1.1"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
+
+[[package]]
 name = "leantls"
 version = "3.1.1"
 source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
@@ -171,6 +212,21 @@ dependencies = [
 name = "runner"
 version = "3.0.0"
 dependencies = [
+ "hostnet",
+ "leanhttp",
+ "leans3",
+ "types",
+]
+
+[[package]]
+name = "store"
+version = "3.0.0"
+dependencies = [
+ "config",
+ "discovery",
+ "hostnet",
+ "leanhttp",
+ "leans3",
  "types",
 ]
 
