@@ -15,6 +15,8 @@ struct FakeSlot {
     spec: Option<StartSpec>,
     core_on: bool,
     exited: bool,
+    streaming: bool,
+    quarantined: bool,
     exit_code: u64,
     logs: VecDeque<String>,
 }
@@ -27,7 +29,10 @@ struct FakeSys {
     classes: BTreeMap<u32, String>,
     cage: String,
     stop_err: bool,
+    /// De plaatsing na de laatste byte faalt (een kapot image).
+    place_err: bool,
     stops: Vec<u32>,
+    clock: u64,
 }
 
 impl FakeSys {
@@ -59,7 +64,7 @@ impl SystemApi for FakeSys {
     fn num_cores(&self) -> u32 {
         self.num
     }
-    fn start_slot(&mut self, slot: Slot, spec: &StartSpec) -> Result<(), SysError> {
+    fn start_slot(&mut self, spec: &StartSpec) -> Result<Slot, SysError> {
         if spec.cores.max(spec.pool_cores) > self.num {
             return Err(SysError::NoCapacity("insufficient physical cores".into()));
         }
@@ -69,35 +74,59 @@ impl SystemApi for FakeSys {
                 spec.core_class
             )));
         }
+        // De kern kiest: het laagste slot zonder eigenaar. Een levende,
+        // stromende of in quarantaine gehouden kooi is bezet.
+        let free = |i: &u32| {
+            self.slots
+                .get(i)
+                .is_none_or(|s| !s.core_on && !s.streaming && !s.quarantined)
+        };
+        let slot = (1..=64)
+            .find(free)
+            .ok_or(SysError::NoCapacity("no free slot".into()))?;
         self.slots.insert(
-            slot.0,
+            slot,
             FakeSlot {
                 size: spec.image_size,
                 spec: Some(spec.clone()),
+                streaming: true,
                 ..Default::default()
             },
         );
-        Ok(())
+        Ok(Slot(slot))
     }
-    fn stream_image(&mut self, slot: Slot, chunk: &[u8]) -> Result<(), SysError> {
+    fn stream_image(&mut self, slot: Slot, chunk: &[u8]) -> Result<Streamed, SysError> {
+        let place_err = self.place_err;
         let s = self
             .slots
             .get_mut(&slot.0)
-            .ok_or(SysError::Refused("no slot".into()))?;
+            .filter(|s| s.streaming)
+            .ok_or(SysError::Refused("no stream".into()))?;
         s.image.extend_from_slice(chunk);
-        if s.image.len() as u64 == s.size {
-            s.core_on = true;
-            s.logs.push_back("app leeft".into());
+        if (s.image.len() as u64) < s.size {
+            return Ok(Streamed::More);
         }
-        Ok(())
+        s.streaming = false;
+        if place_err {
+            return Ok(Streamed::Failed(SysError::Refused(
+                "placement: no PT_LOAD segments".into(),
+            )));
+        }
+        s.core_on = true;
+        s.logs.push_back("app leeft".into());
+        Ok(Streamed::Placed)
     }
     fn stop_slot(&mut self, slot: Slot, _timeout_ms: u64) -> Result<(), SysError> {
         self.stops.push(slot.0);
         if self.stop_err {
+            if let Some(s) = self.slots.get_mut(&slot.0) {
+                s.quarantined = true;
+            }
             return Err(SysError::NotConfirmed);
         }
         if let Some(s) = self.slots.get_mut(&slot.0) {
             s.core_on = false;
+            s.streaming = false;
             s.exited = true;
         }
         Ok(())
@@ -106,6 +135,15 @@ impl SystemApi for FakeSys {
         let mut st = SlotStatus::empty();
         if let Some(s) = self.slots.get(&slot.0) {
             st.core_on = s.core_on;
+            st.state = if s.quarantined {
+                SlotState::Quarantined
+            } else if s.streaming {
+                SlotState::Streaming
+            } else if s.core_on {
+                SlotState::Running
+            } else {
+                SlotState::Empty
+            };
             st.app = if s.core_on {
                 SlotApp::Ready
             } else if s.exited {
@@ -123,6 +161,10 @@ impl SystemApi for FakeSys {
         let n = line.len().min(buf.len());
         buf[..n].copy_from_slice(&line.as_bytes()[..n]);
         Some(n)
+    }
+    fn set_clock(&mut self, unix_ns: u64) -> Result<(), SysError> {
+        self.clock = unix_ns;
+        Ok(())
     }
 }
 
@@ -386,7 +428,8 @@ fn allocate_skips_cages_the_node_reports_live() {
     let mut r = runner(9, &[("node.os", "hopos")]);
     r.system_mut().live(1);
     r.system_mut().live(3);
-    assert_eq!(r.allocate_slot(), Some(Slot(2)));
+    // De kern kiest, en slaat de levende kooien over.
+    assert_eq!(run(&mut r, "t", &hop_job()).unwrap(), 2);
 }
 
 #[test]
@@ -431,9 +474,9 @@ fn hop_runner_adoption_and_reuse_keep_neighbor() {
     r.system_mut().live(1);
     r.system_mut().live(2);
     r.adopt_running(&[("smp".into(), Slot(1)), ("shared".into(), Slot(2))]);
-    assert_eq!(r.allocate_slot(), Some(Slot(3)));
+    assert_eq!(run(&mut r, "new", &hop_job()).unwrap(), 3);
     r.stop(0, &TaskRef { id: "smp", pid: 1 }).unwrap();
-    assert_eq!(r.allocate_slot(), Some(Slot(1)));
+    assert_eq!(run(&mut r, "again", &hop_job()).unwrap(), 1);
     assert_eq!(r.slot_of("shared"), Some(Slot(2)));
     assert!(r.system().slot_status(Slot(2)).core_on);
 }
@@ -527,8 +570,9 @@ fn hop_stop_failure_keeps_slot_quarantined() {
         Err(Error::Quarantined(Slot(pid)))
     );
     assert_eq!(r.slot_of("q"), Some(Slot(pid)));
-    // De kooi is niet opnieuw uit te delen.
-    assert_ne!(r.allocate_slot(), Some(Slot(pid)));
+    // De kooi is niet opnieuw uit te delen: de kern geeft een andere.
+    r.system_mut().stop_err = false;
+    assert_ne!(run(&mut r, "next", &hop_job()).unwrap(), pid);
 }
 
 #[test]
@@ -569,6 +613,35 @@ fn stream_placement_failure_releases_the_slot() {
         Err(Error::NoCapacity(_))
     ));
     assert_eq!(r.cages_in_use(), 0);
+}
+
+#[test]
+fn stream_failure_at_the_last_byte_releases_and_logs() {
+    let mut r = runner(11, &[]);
+    r.system_mut().place_err = true;
+    let err = run(&mut r, "kapot", &hop_job()).unwrap_err();
+    assert!(
+        matches!(err, Error::System(SysError::Refused(_))),
+        "{err:?}"
+    );
+    assert_eq!(r.cages_in_use(), 0);
+    assert!(tail(&r, 0, "kapot").concat().contains("PT_LOAD"));
+    // De kern ruimde op; het volgende image krijgt hetzelfde slot.
+    r.system_mut().place_err = false;
+    assert_eq!(run(&mut r, "heel", &hop_job()).unwrap(), 1);
+}
+
+#[test]
+fn kern_picks_the_slot_at_image_begin() {
+    let mut r = runner(11, &[]);
+    let j = hop_job();
+    r.start(0, &req("k", &j)).unwrap();
+    assert_eq!(r.slot_of("k"), None, "no slot before the kern gave one");
+    r.image_begin(0, "k", IMG.len() as u64).unwrap();
+    assert_eq!(r.slot_of("k"), Some(Slot(1)));
+    assert_eq!(r.system().slot_status(Slot(1)).state, SlotState::Streaming);
+    r.system_mut().set_clock(1_759_000_000).unwrap();
+    assert_eq!(r.system().clock, 1_759_000_000);
 }
 
 #[test]

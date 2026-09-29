@@ -27,18 +27,40 @@ pub enum SlotApp {
     Exited,
 }
 
-/// Een momentopname van één slot.
+/// De toestand van een slot in het grootboek van de kern
+/// (`abi::systemapi::SlotState`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotState {
+    /// Geen eigenaar.
+    Empty,
+    /// Gereserveerd; het image stroomt.
+    Streaming,
+    /// Gedispatcht.
+    Running,
+    /// Beëindiging onbevestigd; de kern hergebruikt het slot niet.
+    Quarantined,
+}
+
+/// Een momentopname van één slot (`SLOT_STATUS`, abi `SlotInfo`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlotStatus {
+    /// De toestand in het grootboek van de kern.
+    pub state: SlotState,
     /// Of de core(s) van dit slot aan staan.
     pub core_on: bool,
     /// De app-toestand.
     pub app: SlotApp,
     /// De exitcode als de app gestopt is.
     pub exit_code: u64,
+    /// De heartbeat-teller van de app.
+    pub heartbeat: u64,
     /// Het werkelijke geheugengebruik dat de app meldt; 0 = nog niet gemeld.
+    ///
+    /// Nog niet in `SLOT_STATUS`: de adapter laat hem 0.
     pub mem_sys: u64,
     /// CPU als percentage van de EIGEN cores (0 tot 100); `None` zolang er geen meetvenster is.
+    ///
+    /// Nog niet in `SLOT_STATUS`: de adapter laat hem `None`.
     pub cpu_pct: Option<u8>,
     /// Vector + 1 van een stage-2-fout of harde kill; 0 = geen fout.
     pub fault_vec: u64,
@@ -58,9 +80,11 @@ impl SlotStatus {
     /// Een leeg slot.
     pub fn empty() -> Self {
         Self {
+            state: SlotState::Empty,
             core_on: false,
             app: SlotApp::Empty,
             exit_code: 0,
+            heartbeat: 0,
             mem_sys: 0,
             cpu_pct: None,
             fault_vec: 0,
@@ -72,6 +96,11 @@ impl SlotStatus {
 }
 
 /// Alles wat een start in één fase nodig heeft.
+///
+/// Op de draad (`START_SLOT`, abi `StartReq`) gaan `mem_limit`,
+/// `image_size`, `cores`, `pool_cores`, `core_class`, `sharegroup`, de env
+/// als `key=val\n`-blob en `job`. `mounts` en `ports` gaan nog niet mee:
+/// dat is de naad van rpc/mounts en de DNAT-publicatie (PORT.md §7).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartSpec {
     /// De maat van het image in bytes; verplicht: de plaatsing valideert ertegen.
@@ -117,43 +146,70 @@ impl fmt::Display for SysError {
     }
 }
 
+/// Hoe een brok image viel (abi `StreamState`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Streamed {
+    /// De kern wacht op meer bytes.
+    More,
+    /// Dit was de laatste byte: de kern plaatste het image en startte de app.
+    Placed,
+    /// Dit was de laatste byte, maar plaatsen of starten faalde. De kern
+    /// ruimde zijn reserveringen zelf op (of hield het slot in quarantaine
+    /// bij een onbekende dispatch-uitkomst); de aanroeper ruimt alleen zijn
+    /// boekhouding op.
+    Failed(SysError),
+}
+
 /// De bevoegde system-API van de HopOS-kern, zoals Hop hem ziet.
 ///
-/// Geen methode blokkeert. Een start is één fase: [`SystemApi::start_slot`]
-/// reserveert partitie en cores voor een image van bekende maat, daarna
-/// stroomt het image met [`SystemApi::stream_image`] RECHTSTREEKS de
-/// partitie in (elke byte landt op het adres waar hij gaat draaien), en na
-/// de laatste byte start de kern de app. Faalt een start, dan ruimt de kern
-/// zijn eigen reserveringen op; de aanroeper ruimt alleen zijn boekhouding op.
+/// Eén-op-één de ops van `abi::systemapi::PrivOp` (0x40 tot en met 0x45;
+/// `FLIP`, 0x46, komt hier met de kern-flip); een adapter bouwt en leest de
+/// frames. Geen methode blokkeert. Een start
+/// is één fase: [`SystemApi::start_slot`] reserveert partitie en cores voor
+/// een image van bekende maat en de KERN kiest het slot; daarna stroomt het
+/// image met [`SystemApi::stream_image`] RECHTSTREEKS de partitie in (elke
+/// byte landt op het adres waar hij gaat draaien), en na de laatste byte
+/// plaatst de kern het en start hij de app. Faalt een start, dan ruimt de
+/// kern zijn eigen reserveringen op; de aanroeper ruimt alleen zijn
+/// boekhouding op.
 pub trait SystemApi {
     /// Het aantal bruikbare app-cores: de enige capaciteit waar Hop tegen plant.
     fn num_cores(&self) -> u32;
 
-    /// Reserveert slot `slot` voor een image van `spec.image_size` bytes.
-    fn start_slot(&mut self, slot: Slot, spec: &StartSpec) -> Result<(), SysError>;
+    /// `START_SLOT`: reserveert een slot voor een image van
+    /// `spec.image_size` bytes; de kern kiest het slot en geeft het terug.
+    fn start_slot(&mut self, spec: &StartSpec) -> Result<Slot, SysError>;
 
-    /// Schrijft de volgende bytes van het image; na de laatste byte start de app.
+    /// `STREAM_IMAGE`: schrijft de volgende bytes van het image.
     ///
-    /// Te veel bytes is een fout. De stroom is afgebroken als de aanroeper
-    /// [`SystemApi::stop_slot`] roept voordat alle bytes er zijn.
-    fn stream_image(&mut self, slot: Slot, chunk: &[u8]) -> Result<(), SysError>;
+    /// Na de laatste byte zegt het antwoord [`Streamed::Placed`] of
+    /// [`Streamed::Failed`]. Een `Err` is een geweigerde brok (te veel bytes,
+    /// een onbekend slot); ook dan is de stroom afgebroken en ruimde de kern
+    /// op.
+    fn stream_image(&mut self, slot: Slot, chunk: &[u8]) -> Result<Streamed, SysError>;
 
-    /// Stopt het slot (killvlag, na `timeout_ms` de stage-2-intrekking) en geeft het vrij.
+    /// `STOP_SLOT`: stopt het slot (killvlag, na `timeout_ms` de
+    /// stage-2-intrekking) en geeft het vrij.
     ///
     /// Ook voor een half gestroomd slot: dan breekt de kern de stroom af. `Ok`
     /// betekent dat de kern de vrijgave op zich neemt; tot de core uit is meldt
     /// [`SystemApi::slot_status`] hem nog als aan, en wordt hij niet
-    /// hergebruikt. Een fout betekent: niet bevestigd.
+    /// hergebruikt. Een fout betekent: niet bevestigd (quarantaine).
     fn stop_slot(&mut self, slot: Slot, timeout_ms: u64) -> Result<(), SysError>;
 
-    /// De toestand van een slot.
+    /// `SLOT_STATUS`: de toestand van een slot.
     fn slot_status(&self, slot: Slot) -> SlotStatus;
 
-    /// Haalt de volgende logregel van de app (hop-ABI outbox) in `buf`, zonder regeleinde.
+    /// `NEXT_LOG`: haalt de volgende logregel van de app in `buf`, zonder
+    /// regeleinde.
     ///
     /// Geeft de lengte, of `None` als er niets klaarstaat. Een regel langer dan
-    /// `buf` wordt afgekapt.
+    /// `buf` wordt afgekapt. De kern bewaart per slot een korte ring; wie te
+    /// laat komt, mist de oudste regels.
     fn next_log_line(&mut self, slot: Slot, buf: &mut [u8]) -> Option<usize>;
+
+    /// `SET_CLOCK`: zet de klok van de node (Unix-nanoseconden).
+    fn set_clock(&mut self, unix_ns: u64) -> Result<(), SysError>;
 
     /// De grootste partitie die de node nu nog in één stuk kan plaatsen; `None` als hij het niet weet.
     ///

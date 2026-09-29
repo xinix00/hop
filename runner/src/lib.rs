@@ -38,9 +38,9 @@ use alloc::string::String;
 use core::fmt;
 
 pub use env::{attr_env_vars, env_key, port_env_vars};
-pub use hopos::{HOP_STOP_TIMEOUT_MS, HopRunner, MAX_CAGES, MAX_CONCURRENT_DOWNLOADS};
+pub use hopos::{HOP_STOP_TIMEOUT_MS, HopRunner, MAX_CONCURRENT_DOWNLOADS};
 pub use logs::{LogPolicy, LogRing, LogStore};
-pub use system::{Slot, SlotApp, SlotStatus, StartSpec, SysError, SystemApi};
+pub use system::{Slot, SlotApp, SlotState, SlotStatus, StartSpec, Streamed, SysError, SystemApi};
 
 /// Een runner-fout.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,8 +62,6 @@ pub enum Error {
     Stream(&'static str),
     /// De kern kon de stop niet bevestigen; de kooi blijft in quarantaine.
     Quarantined(Slot),
-    /// Alle [`MAX_CAGES`] kooien zijn in gebruik.
-    NoFreeCage,
     /// Een fout van de kern die geen plaatsingsfout is.
     System(SysError),
     /// Deze runner heeft geen startfase met een image.
@@ -90,7 +88,6 @@ impl fmt::Display for Error {
                     slot.0
                 )
             }
-            Error::NoFreeCage => write!(f, "hop driver: all {MAX_CAGES} cages in use"),
             Error::System(e) => write!(f, "hop driver: {e}"),
             Error::Unsupported => f.write_str("runner: no image phase"),
             Error::Alloc => f.write_str("runner: out of memory"),

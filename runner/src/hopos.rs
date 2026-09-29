@@ -16,7 +16,7 @@ use alloc::string::{String, ToString};
 
 use crate::env::{attr_env_vars, port_env_vars};
 use crate::logs::{LogPolicy, LogRing, LogStore};
-use crate::system::{Slot, SlotApp, StartSpec, SysError, SystemApi};
+use crate::system::{Slot, SlotApp, StartSpec, Streamed, SysError, SystemApi};
 use crate::{Error, Result, RunState, Runner, StartRequest, Started, Stream, TaskRef};
 
 /// Het coöperatieve venster voordat een stop escaleert naar de stage-2-intrekking.
@@ -35,31 +35,33 @@ pub const HOP_STOP_TIMEOUT_MS: u64 = 3_000;
 /// capaciteit is al geteld.
 pub const MAX_CONCURRENT_DOWNLOADS: usize = 4;
 
-/// De bovengrens van het kooinummer waar de toewijzer zoekt.
-///
-/// De kern heeft zijn eigen harde plafond en weigert daarboven toch; deze
-/// grens is er alleen zodat de zoektocht altijd eindigt. Kooien zijn niet aan
-/// het aantal cores gebonden (sharegroups stapelen er meer dan er cores zijn).
-pub const MAX_CAGES: u32 = 256;
-
 /// Hoe lang een logregel uit de kern maximaal is; langer wordt afgekapt.
 const LOG_LINE_MAX: usize = 512;
 
 /// Waar de start van een taak is.
 #[derive(Debug)]
 enum Phase {
-    /// De kooi is gereserveerd; het image is nog niet begonnen.
+    /// De taak wacht op zijn image; de kern heeft nog niets gereserveerd.
     Queued(StartSpec),
-    /// Het image stroomt: `done` van `size` bytes.
-    Streaming { done: u64, size: u64 },
+    /// De kern gaf `slot`; het image stroomt: `done` van `size` bytes.
+    Streaming { slot: Slot, done: u64, size: u64 },
     /// De app draait (of draaide); een stop is een gewone app-stop.
-    Armed,
+    Armed(Slot),
 }
 
-/// Eén kooi van één taak.
+impl Phase {
+    /// Het slot, zodra de kern er een gaf.
+    fn slot(&self) -> Option<Slot> {
+        match self {
+            Phase::Queued(_) => None,
+            Phase::Streaming { slot, .. } | Phase::Armed(slot) => Some(*slot),
+        }
+    }
+}
+
+/// De start en de kooi van één taak.
 #[derive(Debug)]
 struct Cage {
-    slot: Slot,
     phase: Phase,
     /// De reden van het einde is al in de log gezet (één keer, niet per poll).
     fault_logged: bool,
@@ -69,8 +71,8 @@ struct Cage {
 ///
 /// # Invariants
 ///
-/// `in_use[slot] == id` precies dan als `cages[id].slot == slot`, en het
-/// aantal kooien in [`Phase::Streaming`] is `downloads`.
+/// `in_use[slot] == id` precies dan als `cages[id].phase.slot() == Some(slot)`,
+/// en het aantal kooien in `Phase::Streaming` is `downloads`.
 #[derive(Debug)]
 pub struct HopRunner<S> {
     sys: S,
@@ -109,25 +111,14 @@ impl<S: SystemApi> HopRunner<S> {
         self.sys.pool_largest()
     }
 
-    /// De kooi van een taak, als deze runner hem bezit.
+    /// De kooi van een taak, als deze runner hem bezit en de kern er een gaf.
     pub fn slot_of(&self, task_id: &str) -> Option<Slot> {
-        self.cages.get(task_id).map(|c| c.slot)
+        self.cages.get(task_id).and_then(|c| c.phase.slot())
     }
 
     /// Het aantal kooien dat deze runner bezit.
     pub fn cages_in_use(&self) -> usize {
         self.in_use.len()
-    }
-
-    /// De eerste vrije kooi.
-    ///
-    /// Vrij is: niet door ons uitgedeeld EN niet door de node als draaiend
-    /// gemeld. Dat laatste vangt de bewoners die een kern-flip overleefden
-    /// voordat deze runner opnieuw gebouwd werd (gemeten 02-09 op de M4).
-    pub fn allocate_slot(&self) -> Option<Slot> {
-        (1..=MAX_CAGES)
-            .map(Slot)
-            .find(|s| !self.in_use.contains_key(s) && !self.sys.slot_status(*s).core_on)
     }
 
     /// Draagt de kooien van al draaiende taken over (na een kern-flip).
@@ -145,8 +136,7 @@ impl<S: SystemApi> HopRunner<S> {
             self.cages.insert(
                 id.clone(),
                 Cage {
-                    slot: *slot,
-                    phase: Phase::Armed,
+                    phase: Phase::Armed(*slot),
                     fault_logged: false,
                 },
             );
@@ -173,10 +163,10 @@ impl<S: SystemApi> HopRunner<S> {
     pub fn pump_logs(&mut self, now: u64) {
         let mut buf = [0u8; LOG_LINE_MAX];
         for (id, cage) in &self.cages {
-            if !matches!(cage.phase, Phase::Armed) {
+            let Phase::Armed(slot) = cage.phase else {
                 continue;
-            }
-            while let Some(n) = self.sys.next_log_line(cage.slot, &mut buf) {
+            };
+            while let Some(n) = self.sys.next_log_line(slot, &mut buf) {
                 let line = buf.get(..n).unwrap_or(&[]);
                 let text = core::str::from_utf8(line).unwrap_or("<log line not utf-8>");
                 if let Some(ring) = self.logs.live_mut(id, Stream::Stdout) {
@@ -216,7 +206,9 @@ impl<S: SystemApi> HopRunner<S> {
     /// Geeft alleen de boekhouding vrij; de logs blijven open voor de faalreden.
     fn drop_cage(&mut self, task_id: &str) {
         if let Some(cage) = self.cages.remove(task_id) {
-            self.in_use.remove(&cage.slot);
+            if let Some(slot) = cage.phase.slot() {
+                self.in_use.remove(&slot);
+            }
             if matches!(cage.phase, Phase::Streaming { .. }) {
                 self.downloads = self.downloads.saturating_sub(1);
             }
@@ -330,14 +322,12 @@ impl<S: SystemApi> Runner for HopRunner<S> {
             Ok(s) => s,
             Err(e) => return Err(self.fail(now, req.task_id, e)),
         };
-        let Some(slot) = self.allocate_slot() else {
-            return Err(self.fail(now, req.task_id, Error::NoFreeCage));
-        };
-        self.in_use.insert(slot, req.task_id.to_string());
+        // Het slot kiest de kern pas bij `image_begin`: hij kent de bewoners
+        // die een kern-flip overleefden, en wij hoeven geen tweede waarheid
+        // bij te houden over welke kooi vrij is.
         self.cages.insert(
             req.task_id.to_string(),
             Cage {
-                slot,
                 phase: Phase::Queued(spec),
                 fault_logged: false,
             },
@@ -346,9 +336,9 @@ impl<S: SystemApi> Runner for HopRunner<S> {
     }
 
     fn image_begin(&mut self, now: u64, task_id: &str, size: u64) -> Result {
-        let (slot, queued) = match self.cages.get(task_id) {
+        let queued = match self.cages.get(task_id) {
             None => return Err(Error::UnknownTask),
-            Some(c) => (c.slot, matches!(c.phase, Phase::Queued(_))),
+            Some(c) => matches!(c.phase, Phase::Queued(_)),
         };
         if !queued {
             return Err(Error::Stream("image already begun"));
@@ -369,13 +359,21 @@ impl<S: SystemApi> Runner for HopRunner<S> {
             }
             _ => return Err(Error::UnknownTask),
         };
-        if let Err(e) = self.sys.start_slot(slot, &spec) {
-            // De kern ruimde zijn eigen reserveringen op; wij de onze.
-            self.drop_cage(task_id);
-            return Err(self.fail(now, task_id, Self::placement_err(e)));
-        }
+        let slot = match self.sys.start_slot(&spec) {
+            Ok(slot) => slot,
+            Err(e) => {
+                // De kern ruimde zijn eigen reserveringen op; wij de onze.
+                self.drop_cage(task_id);
+                return Err(self.fail(now, task_id, Self::placement_err(e)));
+            }
+        };
+        self.in_use.insert(slot, task_id.to_string());
         if let Some(c) = self.cages.get_mut(task_id) {
-            c.phase = Phase::Streaming { done: 0, size };
+            c.phase = Phase::Streaming {
+                slot,
+                done: 0,
+                size,
+            };
         }
         self.downloads = self.downloads.saturating_add(1);
         Ok(())
@@ -384,8 +382,7 @@ impl<S: SystemApi> Runner for HopRunner<S> {
     fn image_chunk(&mut self, now: u64, task_id: &str, chunk: &[u8]) -> Result<Started> {
         let (slot, done, size) = match self.cages.get(task_id) {
             Some(Cage {
-                slot,
-                phase: Phase::Streaming { done, size },
+                phase: Phase::Streaming { slot, done, size },
                 ..
             }) => (*slot, *done, *size),
             Some(_) => return Err(Error::Stream("image not begun")),
@@ -404,28 +401,58 @@ impl<S: SystemApi> Runner for HopRunner<S> {
                 Error::Stream("more bytes than Content-Length"),
             ));
         }
-        if let Err(e) = self.sys.stream_image(slot, chunk) {
-            self.drop_cage(task_id);
-            return Err(self.fail(now, task_id, Self::placement_err(e)));
-        }
-        if total < size {
-            if let Some(c) = self.cages.get_mut(task_id) {
-                c.phase = Phase::Streaming { done: total, size };
+        let streamed = match self.sys.stream_image(slot, chunk) {
+            Ok(s) => s,
+            Err(e) => {
+                // Een geweigerde brok: de kern brak de stroom af en ruimde op.
+                self.drop_cage(task_id);
+                return Err(self.fail(now, task_id, Self::placement_err(e)));
             }
-            return Ok(Started::AwaitImage);
+        };
+        match streamed {
+            Streamed::More if total < size => {
+                if let Some(c) = self.cages.get_mut(task_id) {
+                    c.phase = Phase::Streaming {
+                        slot,
+                        done: total,
+                        size,
+                    };
+                }
+                Ok(Started::AwaitImage)
+            }
+            Streamed::Placed if total == size => {
+                // Gearmd: een stop is vanaf nu een gewone app-stop, geen
+                // afbreking meer.
+                if let Some(c) = self.cages.get_mut(task_id) {
+                    c.phase = Phase::Armed(slot);
+                }
+                self.downloads = self.downloads.saturating_sub(1);
+                // Welke kooi kreeg deze taak? De node weet het, en vooraan in
+                // de eigen log komt het heel aan, waar een operator al kijkt
+                // (`hop logs`).
+                let cage = self.sys.slot_status(slot).cage;
+                if !cage.is_empty() {
+                    self.log(task_id, &cage);
+                }
+                Ok(Started::Running { pid: slot.0 })
+            }
+            Streamed::Failed(e) => {
+                self.drop_cage(task_id);
+                Err(self.fail(now, task_id, Self::placement_err(e)))
+            }
+            Streamed::More | Streamed::Placed => {
+                // De kern en wij tellen anders: nooit een halve app laten
+                // staan. Lukt de stop niet, dan blijft de kooi van ons.
+                if self.sys.stop_slot(slot, HOP_STOP_TIMEOUT_MS).is_ok() {
+                    self.drop_cage(task_id);
+                }
+                Err(self.fail(
+                    now,
+                    task_id,
+                    Error::Stream("kernel and runner disagree on the image size"),
+                ))
+            }
         }
-        // Gearmd: een stop is vanaf nu een gewone app-stop, geen afbreking meer.
-        if let Some(c) = self.cages.get_mut(task_id) {
-            c.phase = Phase::Armed;
-        }
-        self.downloads = self.downloads.saturating_sub(1);
-        // Welke kooi kreeg deze taak? De node weet het, en vooraan in de eigen log
-        // komt het heel aan, waar een operator al kijkt (`hop logs`).
-        let cage = self.sys.slot_status(slot).cage;
-        if !cage.is_empty() {
-            self.log(task_id, &cage);
-        }
-        Ok(Started::Running { pid: slot.0 })
     }
 
     fn stop(&mut self, now: u64, task: &TaskRef<'_>) -> Result {
@@ -434,13 +461,12 @@ impl<S: SystemApi> Runner for HopRunner<S> {
         let Some(cage) = self.cages.get(task.id) else {
             return Ok(());
         };
-        let slot = cage.slot;
-        match cage.phase {
-            Phase::Queued(_) => {
+        match cage.phase.slot() {
+            None => {
                 self.release(now, task.id);
                 Ok(())
             }
-            Phase::Streaming { .. } | Phase::Armed => self.stop_cage(now, task.id, slot),
+            Some(slot) => self.stop_cage(now, task.id, slot),
         }
     }
 
