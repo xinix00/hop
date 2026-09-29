@@ -198,7 +198,10 @@ pub trait SystemApi {
     fn stop_slot(&mut self, slot: Slot, timeout_ms: u64) -> Result<(), SysError>;
 
     /// `SLOT_STATUS`: de toestand van een slot.
-    fn slot_status(&self, slot: Slot) -> SlotStatus;
+    ///
+    /// `&mut self`: op HopOS is dit een call over de verbinding met de kern
+    /// (applib's system-client), en die verbinding is van één eigenaar.
+    fn slot_status(&mut self, slot: Slot) -> SlotStatus;
 
     /// `NEXT_LOG`: haalt de volgende logregel van de app in `buf`, zonder
     /// regeleinde.

@@ -25,6 +25,9 @@ agent/      the node: tasks, heartbeats, restarts, state persistence
 api/        the HTTP API as pure handlers over request/response types
 discovery/  finding nodes on the LAN
 runner/     the task backends: HopOS slots, processes, docker
+hopos-runner/  runner::SystemApi over applib's system client (the kernel frames)
+hop-http/   the HTTP adapter: leanhttp over an applib TcpStream, api in and out
+agentd-hopos/  Hop as the HopOS resident: agent + leader in a slot (lib + no_std bin)
 agentd/     the daemon binary (Linux, macOS)
 cli/        the `hop` command
 ```

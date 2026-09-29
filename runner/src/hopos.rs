@@ -147,7 +147,7 @@ impl<S: SystemApi> HopRunner<S> {
     /// CPU (procent van de eigen cores) en werkelijk geheugen, zoals de app ze meldt.
     ///
     /// `None` voor een veld dat nog niet gemeten is (de app start nog).
-    pub fn usage(&self, task: &TaskRef<'_>) -> (Option<u8>, Option<u64>) {
+    pub fn usage(&mut self, task: &TaskRef<'_>) -> (Option<u8>, Option<u64>) {
         if task.pid == 0 {
             return (None, None);
         }

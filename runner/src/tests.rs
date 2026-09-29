@@ -131,7 +131,7 @@ impl SystemApi for FakeSys {
         }
         Ok(())
     }
-    fn slot_status(&self, slot: Slot) -> SlotStatus {
+    fn slot_status(&mut self, slot: Slot) -> SlotStatus {
         let mut st = SlotStatus::empty();
         if let Some(s) = self.slots.get(&slot.0) {
             st.core_on = s.core_on;
@@ -333,7 +333,7 @@ fn hop_runner_smp_cores() {
     r.stop(0, &TaskRef { id: "t-smp", pid }).unwrap();
     assert_eq!(r.cages_in_use(), 1);
     assert_eq!(r.slot_of("neighbor"), Some(Slot(2)));
-    assert!(r.system().slot_status(Slot(2)).core_on);
+    assert!(r.system_mut().slot_status(Slot(2)).core_on);
 }
 
 #[test]
@@ -478,7 +478,7 @@ fn hop_runner_adoption_and_reuse_keep_neighbor() {
     r.stop(0, &TaskRef { id: "smp", pid: 1 }).unwrap();
     assert_eq!(run(&mut r, "again", &hop_job()).unwrap(), 1);
     assert_eq!(r.slot_of("shared"), Some(Slot(2)));
-    assert!(r.system().slot_status(Slot(2)).core_on);
+    assert!(r.system_mut().slot_status(Slot(2)).core_on);
 }
 
 #[test]
@@ -598,7 +598,7 @@ fn repeated_hop_stop_cannot_kill_reused_slot() {
         },
     )
     .unwrap();
-    assert!(r.system().slot_status(Slot(new)).core_on);
+    assert!(r.system_mut().slot_status(Slot(new)).core_on);
     assert_eq!(r.slot_of("new"), Some(Slot(new)));
 }
 
@@ -639,7 +639,10 @@ fn kern_picks_the_slot_at_image_begin() {
     assert_eq!(r.slot_of("k"), None, "no slot before the kern gave one");
     r.image_begin(0, "k", IMG.len() as u64).unwrap();
     assert_eq!(r.slot_of("k"), Some(Slot(1)));
-    assert_eq!(r.system().slot_status(Slot(1)).state, SlotState::Streaming);
+    assert_eq!(
+        r.system_mut().slot_status(Slot(1)).state,
+        SlotState::Streaming
+    );
     r.system_mut().set_clock(1_759_000_000).unwrap();
     assert_eq!(r.system().clock, 1_759_000_000);
 }

@@ -3,7 +3,19 @@
 # kiezen hun runtime.
 [workspace]
 resolver = "3"
-members = ["types", "config", "auth", "leader", "agent", "api", "discovery", "runner"]
+members = [
+    "types",
+    "config",
+    "auth",
+    "leader",
+    "agent",
+    "api",
+    "discovery",
+    "runner",
+    "hopos-runner",
+    "hop-http",
+    "agentd-hopos",
+]
 
 [workspace.package]
 version = "3.0.0"
