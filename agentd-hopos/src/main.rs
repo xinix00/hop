@@ -54,7 +54,6 @@ use core::time::Duration;
 
 use agentd_hopos::entropy::{HARVEST_ROUNDS, Pool};
 use agentd_hopos::env::INIT_JOBS_FILE;
-use agentd_hopos::fetch::IpOnly;
 use agentd_hopos::sntp::{self, NtpLink, PACKET};
 use agentd_hopos::{BootConfig, Clock, Connect, HttpImages, Hub, Images, Node, Port, Resolve};
 use applib::appnet::{self, Endpoint, Net, NetError, TcpListener};
@@ -136,7 +135,11 @@ struct SlotResolver;
 
 impl Resolve for SlotResolver {
     async fn resolve(&mut self, host: &str) -> Result<[u8; 4], String> {
-        IpOnly.resolve(host).await
+        // De resolver van applib (sinds HopOS alpha.6): een naam die al een
+        // IP is gaat er meteen doorheen, de rest via de DNS uit de env.
+        applib::appnet::resolve(host)
+            .await
+            .map_err(|e| alloc::format!("{e}"))
     }
 }
 
