@@ -398,9 +398,12 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
     /// Laat de tijd verstrijken: heartbeat en tik van de leader, tik van de agent, de logpomp.
     pub async fn tick(&mut self, now: Nanos) {
         // De eigen agent is altijd levend zolang deze taak draait; zonder
-        // heartbeat zou de eigen leader hem na 30 s dood verklaren.
+        // heartbeat zou de eigen leader hem na 30 s dood verklaren. De
+        // temperatuur komt van de kern: die zet hem elke seconde op de
+        // control-page (CTRL_TEMP, HopOS alpha.9); 0 is geen meting.
+        let temp = applib::app().map_or(0, |a| i64::from(a.ctrl().temp_milli_c()));
         self.leader
-            .heartbeat(self.agent.id(), VERSION, 0, Time(now));
+            .heartbeat(self.agent.id(), VERSION, temp, Time(now));
         if now >= self.next_leader_tick {
             self.next_leader_tick = now.saturating_add(LEADER_TICK);
             let pool = self.runner.pool_largest();

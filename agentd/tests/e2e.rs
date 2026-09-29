@@ -24,12 +24,17 @@ use types::json::{self, Value};
 const KEY: &str = "e2e-secret";
 const T: Duration = Duration::from_secs(10);
 
-/// Twee vrije poorten P en P + 1000.
+/// Twee vrije poorten P en P + 1000. Niet uit de ephemere reeks: macOS
+/// deelt die oplopend uit vanaf 49152 en zit na een dag testen boven de
+/// 60000, waarna P + 1000 nooit meer past (29-09: "no free port pair" na
+/// vijftig pogingen). Daarom een vaste lage reeks, begonnen op een plek
+/// die van de pid afhangt, zodat twee tests naast elkaar niet botsen.
 fn ports() -> u16 {
-    for _ in 0..50 {
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let p = l.local_addr().unwrap().port();
-        if p < 60_000 && TcpListener::bind(("127.0.0.1", p + 1000)).is_ok() {
+    let start = 20_000 + (std::process::id() % 200) as u16 * 100;
+    for p in (start..40_000).chain(20_000..start) {
+        if TcpListener::bind(("127.0.0.1", p)).is_ok()
+            && TcpListener::bind(("127.0.0.1", p + 1000)).is_ok()
+        {
             return p;
         }
     }
