@@ -88,6 +88,10 @@ pub struct KernState {
     pub store_done: Vec<(u64, u16, u64, Vec<u8>)>,
     /// Het volgende ticket.
     pub next_ticket: u64,
+    /// Geen schijf: elke gewone bestandscall krijgt `STATUS_ERROR` met "no
+    /// storage layer on board", zoals `kern::system` zonder hopfs (de Pi's
+    /// zonder NVMe).
+    pub no_storage: bool,
 }
 
 /// Eén store-call van een app in de nep-kern. De bestanden van de app zijn
@@ -451,6 +455,7 @@ impl FakeKern {
                 k.store_done.push((req.off, h.status, req.n, rest.to_vec()));
                 ok(0, b"")
             }
+            None if k.no_storage => err("no storage layer on board"),
             None => match req.op {
                 hopabi::OP_TRUNCATE => {
                     let f = k.files.entry(String::from(path)).or_default();

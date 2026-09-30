@@ -469,6 +469,17 @@ impl<C: Call> SystemApi for KernSys<C> {
     }
 }
 
+/// De fout van de kern als opslagfout: "no storage layer on board" is
+/// geen schijf (`StoreError::NoStorage`), al het andere is een i/o-fout.
+fn store_err(e: &sys::Error) -> agent::StoreError {
+    match e {
+        sys::Error::Call { msg, .. } if msg.as_str().starts_with("no storage layer") => {
+            agent::StoreError::NoStorage
+        }
+        _ => agent::StoreError::Io,
+    }
+}
+
 impl<C: Call> agent::Store for KernSys<C> {
     async fn save(&mut self, blob: &[u8]) -> Result<(), agent::StoreError> {
         // Eerst op nul, dan de happen: een halve schrijf is dan een kort
@@ -479,7 +490,7 @@ impl<C: Call> agent::Store for KernSys<C> {
         };
         self.exchange(trunc, &mut [])
             .await
-            .map_err(|_| agent::StoreError::Io)?;
+            .map_err(|e| store_err(&e))?;
         let mut off = 0u64;
         for piece in blob.chunks(sys::MAX_CHUNK) {
             let w = sys::Req {
@@ -487,9 +498,7 @@ impl<C: Call> agent::Store for KernSys<C> {
                 data: piece,
                 ..sys::Req::path(hopabi::OP_WRITE, STATE_PATH)
             };
-            self.exchange(w, &mut [])
-                .await
-                .map_err(|_| agent::StoreError::Io)?;
+            self.exchange(w, &mut []).await.map_err(|e| store_err(&e))?;
             off = off.saturating_add(u64::try_from(piece.len()).unwrap_or(u64::MAX));
         }
         Ok(())
@@ -502,7 +511,7 @@ impl<C: Call> agent::Store for KernSys<C> {
         {
             Ok((r, _)) => r.size,
             Err(sys::Error::NotFound { .. }) => return Ok(None),
-            Err(_) => return Err(agent::StoreError::Io),
+            Err(e) => return Err(store_err(&e)),
         };
         let len = usize::try_from(size).map_err(|_| agent::StoreError::Io)?;
         let mut out = Vec::new();
@@ -518,10 +527,7 @@ impl<C: Call> agent::Store for KernSys<C> {
                 n: u64::try_from(dst.len()).unwrap_or(u64::MAX),
                 ..sys::Req::path(hopabi::OP_READ, STATE_PATH)
             };
-            let (_, n) = self
-                .exchange(r, dst)
-                .await
-                .map_err(|_| agent::StoreError::Io)?;
+            let (_, n) = self.exchange(r, dst).await.map_err(|e| store_err(&e))?;
             if n == 0 {
                 break;
             }

@@ -283,6 +283,23 @@ fn state_store_roundtrips_over_hopfs() {
 }
 
 #[test]
+fn without_a_disk_the_state_store_says_so() {
+    // De kern zonder hopfs weigert elke bestandscall met "no storage layer
+    // on board": dat is geen i/o-fout maar "geen schijf", en zo heet hij
+    // ook in de logregel van Hop (de Pi 5, 30-09).
+    use agent::Store;
+    let (mut s, k) = sys(4);
+    k.0.borrow_mut().no_storage = true;
+    assert_eq!(bl(s.load()), Err(agent::StoreError::NoStorage));
+    assert_eq!(bl(s.save(b"{}")), Err(agent::StoreError::NoStorage));
+    assert!(
+        agent::StoreError::NoStorage
+            .to_string()
+            .starts_with("no disk on this node")
+    );
+}
+
+#[test]
 fn a_chunk_bigger_than_one_io_bite_goes_in_bites() {
     let big = applib::sys::MAX_CHUNK + 10;
     let mut image = alloc::vec![0u8; big];

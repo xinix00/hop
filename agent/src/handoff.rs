@@ -30,11 +30,22 @@ pub const HANDOFF_VERSION: u64 = 1;
 pub enum StoreError {
     /// Het medium weigerde (vol, kapot, onbereikbaar).
     Io,
+    /// Er is geen medium: de node heeft geen schijf, dus de staat blijft
+    /// niet over een herstart (op HopOS: de kern weigert elke bestandscall
+    /// met "no storage layer on board", de Pi's zonder NVMe). Geen fout van
+    /// de opslag, een eigenschap van de node; de logregel hoort dat te
+    /// zeggen (Derek, 30-09: "hoort geen schijf te zeggen").
+    NoStorage,
 }
 
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("store i/o failed")
+        match self {
+            Self::Io => f.write_str("store i/o failed"),
+            Self::NoStorage => {
+                f.write_str("no disk on this node, the agent state is not kept over a restart")
+            }
+        }
     }
 }
 
