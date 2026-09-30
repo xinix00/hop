@@ -184,6 +184,23 @@ impl<S: JobStore, T: Transport> Cluster for LeaderCluster<'_, S, T> {
         out
     }
 
+    fn placed_agents(&self, name: &str) -> Vec<Agent> {
+        let Ok(on) = self.leader.placed(name) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for a in self.leader.agents() {
+            if on.get(&a.id).is_none() {
+                continue;
+            }
+            match a.try_clone() {
+                Ok(c) if out.try_reserve(1).is_ok() => out.push(c),
+                _ => return Vec::new(),
+            }
+        }
+        out
+    }
+
     fn is_settled(&self) -> bool {
         self.leader.is_settled()
     }

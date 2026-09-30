@@ -1,6 +1,7 @@
 //! De stromen van de daemon van begin tot eind: `/v1/events` als SSE, de
 //! rondgang van `/v1/tasks`, en de log van een taak via de leader, eerst
-//! als momentopname en dan levend (`?follow=1`) tot de taak stopt.
+//! als momentopname (`?follow=0`) en dan levend (`?follow=1`) tot de taak
+//! stopt.
 //!
 //! Alles gaat naar de leader-poort, zoals `hop jobs`, `hop logs` en `hop
 //! events` zonder `--agent` doen.
@@ -206,11 +207,12 @@ fn events_tasks_and_a_live_log_through_the_leader() {
     let r = call("GET", &format!("{agent}/v1/tasks"), None);
     assert!(String::from_utf8_lossy(&r.body).contains(&task));
 
-    // hop logs: een momentopname via de doorgifte van de leader.
+    // hop logs: een momentopname via de doorgifte van de leader
+    // (`follow=0`; zonder query volgt deze route, zoals in Go).
     let snap_url = format!("{leader}/v1/agents/s1/logs/{task}/stdout");
     let mut snap = String::new();
     wait_for("a few ticks in the snapshot", &d, || {
-        let r = call("GET", &snap_url, None);
+        let r = call("GET", &format!("{snap_url}?follow=0"), None);
         snap = String::from_utf8_lossy(&r.body).into_owned();
         r.status == 200 && last_tick(&snap).is_some_and(|n| n >= 2)
     });

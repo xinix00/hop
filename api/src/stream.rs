@@ -38,10 +38,14 @@ pub const KEEPALIVE: &str = ": keepalive\n\n";
 /// Of een verzoek om een levende stroom vraagt (`?follow=1`) in plaats van
 /// een momentopname.
 ///
-/// `/logs/{taak}/{stroom}` geeft zonder `follow` wat er nu is en sluit (de
-/// vorm van v3 tot nu, voor scripts en `hop logs`); met `follow=1` blijft de
-/// stroom open en komen nieuwe regels erbij tot de taak stopt (Go's gedrag,
-/// voor `hop logs --follow`).
+/// `/logs/{taak}/{stroom}` op een agent geeft zonder `follow` wat er nu is
+/// en sluit (de vorm van v3, voor scripts); met `follow=1` blijft de stroom
+/// open en komen nieuwe regels erbij tot de taak stopt (Go's gedrag).
+///
+/// De clusterroute `/v1/agents/{id}/logs/...` op de leader volgt zonder
+/// query, zoals in Go: het dashboard vraagt hem zo en verwacht een levende
+/// log. Daar is `follow=0` de momentopname (`hop logs` zonder `--follow`);
+/// de leader zet `follow=1` op de doorgifte als de aanroeper niets zei.
 pub fn is_follow(req: &crate::Request) -> bool {
     matches!(req.query_param("follow"), Some("1" | "true"))
 }

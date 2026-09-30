@@ -137,6 +137,17 @@ pub enum Reply {
     },
 }
 
+impl Reply {
+    /// Status en headers van dit antwoord: de kop van een stroom, of het
+    /// antwoord zelf. De eigenaar zet er de CORS-koppen van de agent-poort
+    /// op ([`api::cors`]), ook als het antwoord van de leader kwam.
+    pub fn head_mut(&mut self) -> &mut Response {
+        match self {
+            Self::Plain(r) | Self::Events { head: r, .. } | Self::Stream { head: r, .. } => r,
+        }
+    }
+}
+
 /// Een fout van de adapter: die van leanhttp.
 pub type Error = leanhttp::Error;
 

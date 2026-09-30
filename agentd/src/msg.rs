@@ -64,11 +64,14 @@ pub(crate) enum Reply {
         /// Het volgnummer waarmee de lezer begint.
         seq: u64,
     },
-    /// `GET /v1/tasks`: vraag elke agent zijn taken; de thread doet de
-    /// rondgang, met één totale termijn, zodat de eigenaar nergens op wacht.
+    /// `GET /v1/tasks` of `GET /v1/jobs/{naam}/status`: vraag elke agent
+    /// zijn taken; de thread doet de rondgang, met één totale termijn,
+    /// zodat de eigenaar nergens op wacht.
     Tasks {
         /// `(id, endpoint)` van elke agent.
         agents: Vec<(String, String)>,
+        /// Welke taken het antwoord draagt ([`api::TasksScope::reply`]).
+        scope: api::TasksScope,
     },
     /// Geef het verzoek door aan één agent, ondertekend met de clustersleutel.
     Agent {

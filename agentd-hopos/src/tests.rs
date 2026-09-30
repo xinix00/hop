@@ -616,12 +616,22 @@ fn a_log_is_followed_live_through_the_leader() {
     block_on(n.tick(T0 + 2 * types::time::SECOND));
     let c2 = n.poll(&again, T0);
     assert_eq!((c2.text.as_str(), c2.seq), ("data: two\n\n", 2));
-    // Zonder follow: de momentopname, zoals altijd.
-    let snap = signed(Method::Get, &format!("/v1/agents/n1/logs/{task}/stdout"));
+    // Met follow=0: de momentopname (`hop logs` zonder --follow).
+    let snap = signed(
+        Method::Get,
+        &format!("/v1/agents/n1/logs/{task}/stdout?follow=0"),
+    );
     let Reply::Events { lines, .. } = block_on(n.handle(Port::Leader, &snap, T0)) else {
         panic!("no snapshot");
     };
     assert_eq!(lines, ["one", "two"]);
+    n.stream_done();
+    // Zonder query: de levende tail, Go's contract (het dashboard vraagt zo).
+    let dash = signed(Method::Get, &format!("/v1/agents/n1/logs/{task}/stdout"));
+    let Reply::Stream { ask, .. } = block_on(n.handle(Port::Leader, &dash, T0)) else {
+        panic!("the dashboard's log route is no live tail");
+    };
+    assert_eq!(n.poll(&ask, T0).text, "data: one\n\ndata: two\n\n");
     // Een onbekende agent: 404; een onbekende taak: geen stroom.
     let Reply::Plain(r) = block_on(n.handle(
         Port::Leader,
@@ -685,4 +695,70 @@ fn events_and_tasks_through_the_leader() {
     n.stream_done();
     let again = block_on(n.handle(Port::Leader, &signed(Method::Get, "/v1/events"), T0));
     assert!(matches!(again, Reply::Stream { .. }));
+}
+
+/// De CORS-koppen op een antwoord, voor elke soort `Reply`.
+fn allow_origin(r: &Reply) -> Option<&str> {
+    match r {
+        Reply::Plain(h) | Reply::Events { head: h, .. } | Reply::Stream { head: h, .. } => {
+            h.header("Access-Control-Allow-Origin")
+        }
+    }
+}
+
+#[test]
+fn the_dashboard_gets_cors_on_every_agent_answer() {
+    let (mut n, _k) = node();
+    http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
+    // Een /v1/-route op de agent-poort gaat in-proces naar de leader; ook
+    // dat antwoord draagt de koppen, anders gooit de browser het weg.
+    for target in [
+        "/v1/status",
+        "/v1/agents",
+        "/v1/jobs",
+        "/v1/jobs/web/status",
+        "/v1/agents/n1/capacity",
+        "/leader",
+    ] {
+        let r = block_on(n.handle(Port::Agent, &signed(Method::Get, target), T0));
+        assert_eq!(allow_origin(&r), Some("*"), "{target}: {r:?}");
+        let Reply::Plain(p) = &r else {
+            panic!("{target}: not a plain answer");
+        };
+        assert_eq!(
+            p.status,
+            200,
+            "{target}: {:?}",
+            core::str::from_utf8(&p.body)
+        );
+    }
+    // De takentabel van het dashboard: de taak van web op n1.
+    let Reply::Plain(p) =
+        block_on(n.handle(Port::Agent, &signed(Method::Get, "/v1/jobs/web/status"), T0))
+    else {
+        panic!("no plain reply");
+    };
+    let v = types::json::parse(&p.body).unwrap();
+    let by = v.as_object().unwrap().get("tasks_by_agent").unwrap();
+    assert_eq!(
+        by.as_object()
+            .unwrap()
+            .get("n1")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // De kop van een stroom (SSE) ook.
+    let r = block_on(n.handle(Port::Agent, &signed(Method::Get, "/v1/events"), T0));
+    assert!(matches!(r, Reply::Stream { .. }), "{r:?}");
+    assert_eq!(allow_origin(&r), Some("*"));
+    n.stream_done();
+    // En een weigering: ongetekend is 401, met de koppen.
+    let r = block_on(n.handle(Port::Agent, &Request::new(Method::Get, "/v1/jobs", b""), T0));
+    assert_eq!(allow_origin(&r), Some("*"));
+    // De leader-poort is geen browserpoort: daar geen koppen, zoals in Go.
+    let r = block_on(n.handle(Port::Leader, &signed(Method::Get, "/v1/status"), T0));
+    assert_eq!(allow_origin(&r), None);
 }

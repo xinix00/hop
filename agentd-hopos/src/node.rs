@@ -339,7 +339,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
     where
         S: crate::flip::KernFlip,
     {
-        let reply = match port {
+        let mut reply = match port {
             Port::Leader => self.leader_reply(req, now),
             Port::Agent => {
                 let pool = self.runner.pool_largest();
@@ -366,6 +366,12 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
                 }
             }
         };
+        if port == Port::Agent {
+            // De browser van het dashboard praat met deze poort: élk antwoord
+            // draagt de CORS-koppen, ook een dat van de leader in-proces kwam
+            // (`/v1/...`) en de kop van een stroom.
+            api::cors(req, reply.head_mut());
+        }
         self.drain(now).await;
         self.collect_events();
         reply
@@ -420,7 +426,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
         let (resp, effect) = self.leader_handle(req, now);
         match effect {
             LeaderEffect::None => Reply::Plain(resp),
-            LeaderEffect::Tasks { agents } => {
+            LeaderEffect::Tasks { agents, scope } => {
                 let mut results = Vec::new();
                 if results.try_reserve_exact(agents.len()).is_err() {
                     return Reply::Plain(Response::empty(500));
@@ -435,7 +441,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
                     };
                     results.push((id, tasks));
                 }
-                Reply::Plain(api::tasks_reply(&results))
+                Reply::Plain(scope.reply(&results))
             }
             LeaderEffect::Agent { endpoint, path, .. } => {
                 if endpoint != self.agent.endpoint() {

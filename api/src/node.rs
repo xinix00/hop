@@ -207,18 +207,39 @@ impl NodeApi {
     }
 }
 
-/// De CORS-koppen voor browsertoegang (de gehoste GUI praat direct met de agent).
-fn cors(req: &Request, resp: &mut Response) {
-    resp.set_header("Access-Control-Allow-Origin", "*");
-    resp.set_header(
+/// De vaste CORS-koppen van de agent-poort, zoals Go's `corsMiddleware`.
+///
+/// De browser van het dashboard stuurt `X-Hop-Auth` en bij een POST of
+/// PATCH `Content-Type`; beide zijn geen "simple headers", dus de preflight
+/// moet ze noemen. PATCH (de sleepvolgorde) en DELETE (een job weg) ook.
+const CORS: [(&str, &str); 3] = [
+    ("Access-Control-Allow-Origin", "*"),
+    (
         "Access-Control-Allow-Methods",
         "GET, POST, DELETE, PATCH, OPTIONS",
-    );
-    resp.set_header("Access-Control-Allow-Headers", "Content-Type, X-Hop-Auth");
-    // Chrome Private Network Access: een publieke origin die een LAN-adres
-    // haalt, krijgt de preflight alleen door als de server het toestaat.
-    if req.header("Access-Control-Request-Private-Network") == Some("true") {
-        resp.set_header("Access-Control-Allow-Private-Network", "true");
+    ),
+    ("Access-Control-Allow-Headers", "Content-Type, X-Hop-Auth"),
+];
+
+/// De CORS-koppen voor een antwoord op `req` op de agent-poort.
+///
+/// Chrome Private Network Access: een publieke origin die een LAN-adres
+/// haalt, krijgt de preflight alleen door als de server het toestaat; dat
+/// ene koppel komt er alleen bij als de browser erom vraagt.
+///
+/// De adapter zet deze koppen op élk antwoord van de agent-poort, ook op
+/// een doorgifte naar de leader en op een stroom (SSE, log-tail): zonder
+/// `Access-Control-Allow-Origin` gooit de browser een geslaagd antwoord weg.
+pub fn cors_headers(req: &Request) -> impl Iterator<Item = (&'static str, &'static str)> {
+    let pna = req.header("Access-Control-Request-Private-Network") == Some("true");
+    CORS.into_iter()
+        .chain(pna.then_some(("Access-Control-Allow-Private-Network", "true")))
+}
+
+/// Zet de CORS-koppen van [`cors_headers`] op `resp`.
+pub fn cors(req: &Request, resp: &mut Response) {
+    for (k, v) in cors_headers(req) {
+        resp.set_header(k, v);
     }
 }
 

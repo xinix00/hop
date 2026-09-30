@@ -13,6 +13,12 @@
 //!
 //! De HMAC-toets komt uit `auth`; een lege sleutel is de ongeauthenticeerde
 //! modus (dev, standalone).
+//!
+//! De agent-poort is ook de poort van het dashboard (hop-gui): de browser
+//! praat direct met een agent, dus elk antwoord op die poort draagt de
+//! CORS-koppen ([`cors_headers`]), ook een antwoord dat van de leader komt
+//! of een stroom is. De handler zet ze op zijn eigen antwoorden; de adapter
+//! zet ze op wat hij zelf maakt (een doorgifte, een stroom).
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -41,8 +47,10 @@ use types::de::ObjectBuilder;
 use types::json::{self, Value};
 
 pub use cluster::LeaderCluster;
-pub use leader::{Cluster, ClusterError, LeaderApi, LeaderEffect, tasks_reply};
-pub use node::{Effect, LogStream, NodeApi, PROXY_MAX_BODY};
+pub use leader::{
+    Cluster, ClusterError, LeaderApi, LeaderEffect, TasksScope, job_status_reply, tasks_reply,
+};
+pub use node::{Effect, LogStream, NodeApi, PROXY_MAX_BODY, cors, cors_headers};
 pub use stream::{EVENT_LOG_CAP, EventLog, KEEPALIVE, PING, data_frame, is_follow, topic_frame};
 
 /// Een HTTP-methode.
@@ -265,3 +273,5 @@ pub(crate) fn s(v: &str) -> Value {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_gui;

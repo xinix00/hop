@@ -383,6 +383,8 @@ struct FakeCluster {
     topics: Vec<String>,
     unplaced: Vec<(String, String)>,
     no_agents_for_dispatch: bool,
+    /// `(agent, job)`: waar een job staat, voor `/v1/jobs/{naam}/status`.
+    placed_on: Vec<(String, String)>,
 }
 
 impl Cluster for FakeCluster {
@@ -449,6 +451,17 @@ impl Cluster for FakeCluster {
     }
     fn placed_counts(&self) -> Vec<(String, i64)> {
         self.jobs.iter().map(|j| (j.name.clone(), 1)).collect()
+    }
+    fn placed_agents(&self, name: &str) -> Vec<types::Agent> {
+        self.agents
+            .iter()
+            .filter(|a| {
+                self.placed_on
+                    .iter()
+                    .any(|(ag, j)| *ag == a.id && j == name)
+            })
+            .cloned()
+            .collect()
     }
     fn is_settled(&self) -> bool {
         true
@@ -1008,7 +1021,8 @@ fn tasks_asks_every_agent() {
             agents: vec![
                 ("a1".into(), "http://10.0.0.1:8080".into()),
                 ("a2".into(), "http://10.0.0.2:8080".into()),
-            ]
+            ],
+            scope: TasksScope::All,
         }
     );
 }
@@ -1049,6 +1063,23 @@ fn agent_logs_and_capacity_go_to_that_agent() {
             stream: true,
         }
     );
+    // Zonder query is de leader-route de levende tail (Go, het dashboard);
+    // `follow=0` blijft de momentopname.
+    let (_, e) = leffect(&mut c, Method::Get, "/v1/agents/a2/logs/t9/stdout", "");
+    assert!(
+        matches!(&e, LeaderEffect::Agent { path, stream: true, .. } if path == "/logs/t9/stdout?follow=1"),
+        "{e:?}"
+    );
+    let (_, e) = leffect(
+        &mut c,
+        Method::Get,
+        "/v1/agents/a2/logs/t9/stdout?follow=0",
+        "",
+    );
+    assert!(
+        matches!(&e, LeaderEffect::Agent { path, .. } if path == "/logs/t9/stdout?follow=0"),
+        "{e:?}"
+    );
     let (_, e) = leffect(&mut c, Method::Get, "/v1/agents/a1/capacity", "");
     assert_eq!(
         e,
@@ -1067,4 +1098,176 @@ fn agent_logs_and_capacity_go_to_that_agent() {
     // Een ander pad onder een agent blijft een 404, geen doorgifte.
     let (r, e) = leffect(&mut c, Method::Get, "/v1/agents/a1/other", "");
     assert_eq!((r.status, e), (404, LeaderEffect::None));
+}
+
+// ---- contract_test.go: /v1/jobs/{naam}/status ------------------------------------
+
+// TestContract_JobStatusHasTasksByAgent: tasks_by_agent staat hier, ook
+// voor een job die niet bestaat (200, zoals Go).
+#[test]
+fn contract_job_status_has_tasks_by_agent() {
+    let r = lcall(
+        &mut FakeCluster::default(),
+        Method::Get,
+        "/v1/jobs/anything/status",
+        "",
+    );
+    assert_eq!(r.status, 200);
+    let text = core::str::from_utf8(&r.body).unwrap();
+    assert!(text.contains("tasks_by_agent"), "{text}");
+    // Go's vorm op de byte: een onbekende job heeft nil-kaarten.
+    assert_eq!(text, r#"{"agents":null,"tasks_by_agent":null}"#);
+}
+
+fn job_named(name: &str) -> types::Job {
+    types::Job {
+        name: name.into(),
+        command: "sleep 1".into(),
+        ..types::Job::default()
+    }
+}
+
+#[test]
+fn job_status_asks_only_the_agents_that_have_it() {
+    let mut c = two_agents();
+    c.jobs.push(job_named("web"));
+    c.placed_on.push(("a2".into(), "web".into()));
+    let (r, e) = leffect(&mut c, Method::Get, "/v1/jobs/web/status", "");
+    assert_eq!(r.status, 200);
+    let LeaderEffect::Tasks { agents, scope } = e else {
+        panic!("no round: {e:?}");
+    };
+    assert_eq!(agents, vec![("a2".into(), "http://10.0.0.2:8080".into())]);
+    let TasksScope::Job { name, agents } = &scope else {
+        panic!("wrong scope: {scope:?}");
+    };
+    assert_eq!((name.as_str(), agents.len()), ("web", 1));
+}
+
+#[test]
+fn job_status_of_a_job_placed_nowhere_has_an_empty_map() {
+    let mut c = two_agents();
+    c.jobs.push(job_named("web"));
+    let (r, e) = leffect(&mut c, Method::Get, "/v1/jobs/web/status", "");
+    assert_eq!(e, LeaderEffect::None);
+    assert_eq!(
+        core::str::from_utf8(&r.body).unwrap(),
+        r#"{"agents":null,"tasks_by_agent":{}}"#
+    );
+    let (r, _) = leffect(&mut c, Method::Get, "/v1/jobs//status", "");
+    assert_eq!(r.status, 400);
+}
+
+#[test]
+fn job_status_reply_keeps_only_the_tasks_of_the_job() {
+    let task = |id: &str, job: &str| types::Task {
+        id: id.into(),
+        job_name: job.into(),
+        ..types::Task::default()
+    };
+    let agents = [types::Agent {
+        id: "a1".into(),
+        endpoint: "http://10.0.0.1:8080".into(),
+        ..types::Agent::default()
+    }];
+    let results = [
+        ("a1".into(), Some(vec![task("t1", "web"), task("t2", "db")])),
+        ("a2".into(), None),
+        ("a3".into(), Some(vec![task("t3", "db")])),
+    ];
+    let r = job_status_reply("web", &agents, &results);
+    let v = body(&r);
+    let by = get(&v, "tasks_by_agent").as_object().unwrap();
+    let a1 = by.get("a1").unwrap().as_array().unwrap();
+    assert_eq!(a1.len(), 1);
+    assert_eq!(get(&a1[0], "id").as_str(), Some("t1"));
+    // Stil, of zonder taak van deze job: weg, zoals Go.
+    assert!(by.get("a2").is_none() && by.get("a3").is_none());
+    let listed = get(&v, "agents").as_array().unwrap();
+    assert_eq!(
+        get(&listed[0], "endpoint").as_str(),
+        Some("http://10.0.0.1:8080")
+    );
+    // En de scope geeft hetzelfde antwoord als de functie.
+    let scope = TasksScope::Job {
+        name: "web".into(),
+        agents: agents.to_vec(),
+    };
+    assert_eq!(scope.reply(&results), r);
+}
+
+// ---- PATCH /v1/jobs/{naam}/priority: de sleepvolgorde van het dashboard -------
+
+#[test]
+fn patch_job_priority() {
+    let mut c = FakeCluster::default();
+    c.jobs.push(job_named("web"));
+    let r = lcall(
+        &mut c,
+        Method::Patch,
+        "/v1/jobs/web/priority",
+        r#"{"priority":3}"#,
+    );
+    assert_eq!(r.status, 204);
+    assert_eq!(c.jobs[0].priority, Some(3));
+    let r = lcall(
+        &mut c,
+        Method::Patch,
+        "/v1/jobs/nope/priority",
+        r#"{"priority":1}"#,
+    );
+    assert_eq!(r.status, 404);
+    assert_eq!(get(&body(&r), "error").as_str(), Some("job nope not found"));
+    let r = lcall(&mut c, Method::Patch, "/v1/jobs/web/priority", "{");
+    assert_eq!(r.status, 400);
+}
+
+// ---- CORS: de browser praat direct met de agent ----------------------------------
+
+#[test]
+fn cors_on_every_agent_answer_even_a_refusal() {
+    let mut a = agent();
+    let api = NodeApi::new(b"secret", false);
+    // Ongetekend: 401, en toch met de koppen, anders ziet de browser alleen
+    // "CORS error" in plaats van de weigering.
+    let (r, _) = api.handle(
+        &mut a,
+        T0,
+        None,
+        &Request::new(Method::Get, "/v1/jobs", b""),
+    );
+    assert_eq!(r.status, 401);
+    assert_eq!(r.header("Access-Control-Allow-Origin"), Some("*"));
+    // De preflight heeft geen handtekening nodig, en noemt PATCH, DELETE,
+    // X-Hop-Auth en Content-Type.
+    let (r, e) = api.handle(
+        &mut a,
+        T0,
+        None,
+        &Request::new(Method::Options, "/v1/jobs/web/priority", b""),
+    );
+    assert_eq!((r.status, e), (200, Effect::None));
+    let methods = r.header("Access-Control-Allow-Methods").unwrap();
+    assert!(
+        methods.contains("PATCH") && methods.contains("DELETE"),
+        "{methods}"
+    );
+    let headers = r.header("Access-Control-Allow-Headers").unwrap();
+    assert!(
+        headers.contains("X-Hop-Auth") && headers.contains("Content-Type"),
+        "{headers}"
+    );
+    // Een privé-netwerkkop alleen op verzoek.
+    assert!(r.header("Access-Control-Allow-Private-Network").is_none());
+    let mut req = Request::new(Method::Get, "/v1/events", b"");
+    req.headers.push((
+        "Access-Control-Request-Private-Network".into(),
+        "true".into(),
+    ));
+    let mut resp = Response::empty(200);
+    cors(&req, &mut resp);
+    assert_eq!(
+        resp.header("Access-Control-Allow-Private-Network"),
+        Some("true")
+    );
 }

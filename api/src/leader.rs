@@ -4,12 +4,14 @@
 //! [`Cluster`] implementeert. De trait is het deel van de leader dat de API
 //! nodig heeft, zodat de handlers zonder de hele leader te testen zijn.
 //!
-//! Drie routes gaan verder dan de staat van de leader, en krijgen daarom
+//! Vier routes gaan verder dan de staat van de leader, en krijgen daarom
 //! een [`LeaderEffect`] dat de adapter uitvoert (de handler heeft geen
 //! sockets): `/v1/tasks` (de taken van elke agent, Go's `GetClusterStatus`),
+//! `/v1/jobs/{naam}/status` (de taken van één job bij de agents waar hij
+//! staat, Go's `GetJobStatus`: de takentabel van het dashboard),
 //! `/v1/agents/{id}/logs/...` en `/v1/agents/{id}/capacity` (een doorgifte
-//! naar die agent, zodat `hop logs` en `hop agents <id>` alleen de leader
-//! hoeven te bereiken), en `/v1/events` (de SSE-stroom).
+//! naar die agent, zodat `hop logs`, `hop agents <id>` en het dashboard
+//! alleen de leader hoeven te bereiken), en `/v1/events` (de SSE-stroom).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -71,6 +73,9 @@ pub trait Cluster {
     fn delete_job(&mut self, now: Nanos, name: &str);
     /// Geplaatste instanties per job, over alle agents.
     fn placed_counts(&self) -> Vec<(String, i64)>;
+    /// De agents waar job `name` minstens één keer staat (Go's
+    /// `GetJobStatus`: alleen die worden gevraagd).
+    fn placed_agents(&self, name: &str) -> Vec<AgentRecord>;
     /// Of de settle-periode voorbij is.
     fn is_settled(&self) -> bool;
     /// Wanneer de job-store het laatst veranderde.
@@ -82,16 +87,19 @@ pub trait Cluster {
 }
 
 /// Wat de adapter na een antwoord van de leader-API nog moet doen.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LeaderEffect {
     /// Niets: het antwoord is compleet.
     None,
-    /// `GET /v1/tasks`: vraag elke agent zijn taken (`GET /tasks`,
-    /// ondertekend, met één totale termijn) en antwoord met [`tasks_reply`].
-    /// Een agent die niet antwoordt, ontbreekt, zoals in Go.
+    /// Een rondgang: vraag elke agent in `agents` zijn taken (`GET /tasks`,
+    /// ondertekend, met één totale termijn) en antwoord met
+    /// [`TasksScope::reply`]. Een agent die niet antwoordt, ontbreekt,
+    /// zoals in Go.
     Tasks {
-        /// `(id, endpoint)` van elke geregistreerde agent.
+        /// `(id, endpoint)` van elke agent om te vragen.
         agents: Vec<(String, String)>,
+        /// Welke taken het antwoord draagt, en in welke vorm.
+        scope: TasksScope,
     },
     /// Geef het verzoek door aan één agent: `GET {endpoint}{path}`,
     /// ondertekend met de clustersleutel, en zijn antwoord terug.
@@ -106,6 +114,75 @@ pub enum LeaderEffect {
     /// `GET /v1/events`: open een SSE-stroom met [`crate::PING`] en daarna
     /// de meldingen uit de [`crate::EventLog`] van de node.
     Events,
+}
+
+/// Welke taken een rondgang ([`LeaderEffect::Tasks`]) terugmeldt, en in welke vorm.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TasksScope {
+    /// `GET /v1/tasks`: alle taken van elke agent ([`tasks_reply`]).
+    All,
+    /// `GET /v1/jobs/{naam}/status`: alleen de taken van deze job, van de
+    /// agents waar hij staat ([`job_status_reply`]).
+    Job {
+        /// De job.
+        name: String,
+        /// De agents waar hij staat, zoals Go ze in `agents` teruggeeft.
+        agents: Vec<AgentRecord>,
+    },
+}
+
+impl TasksScope {
+    /// Het antwoord uit de taken per agent (`None`: die agent antwoordde niet).
+    pub fn reply(&self, results: &[(String, Option<Vec<types::Task>>)]) -> Response {
+        match self {
+            Self::All => tasks_reply(results),
+            Self::Job { name, agents } => job_status_reply(name, agents, results),
+        }
+    }
+}
+
+/// Het antwoord op `/v1/jobs/{naam}/status`, zoals Go's `handleJobStatus`:
+/// `{"agents": [agent, ...], "tasks_by_agent": {id: [taak, ...]}}`, met
+/// alleen de taken van job `name`.
+///
+/// Een agent die niet antwoordde, of die geen taak van deze job meer heeft,
+/// ontbreekt in `tasks_by_agent` (Go stuurde er dan `nil` in en liet hem
+/// weg); in `agents` staat hij wel, want daar staat waar de job geplaatst is.
+pub fn job_status_reply(
+    name: &str,
+    agents: &[AgentRecord],
+    results: &[(String, Option<Vec<types::Task>>)],
+) -> Response {
+    let mut list = Vec::new();
+    for a in agents {
+        match a.to_value() {
+            Ok(v) if list.try_reserve(1).is_ok() => list.push(v),
+            _ => return Response::empty(500),
+        }
+    }
+    let mut by_agent = types::de::ObjectBuilder::new();
+    for (id, tasks) in results {
+        let mut mine = Vec::new();
+        for t in tasks.iter().flatten().filter(|t| t.job_name == name) {
+            match t.to_value() {
+                Ok(v) if mine.try_reserve(1).is_ok() => mine.push(v),
+                _ => return Response::empty(500),
+            }
+        }
+        if mine.is_empty() {
+            continue;
+        }
+        if by_agent.field(id, Value::Array(mine)).is_err() {
+            return Response::empty(500);
+        }
+    }
+    reply(
+        200,
+        [
+            ("agents", Value::Array(list)),
+            ("tasks_by_agent", by_agent.build()),
+        ],
+    )
 }
 
 /// Het antwoord op `/v1/tasks` uit de taken per agent: `{"tasks_by_agent":
@@ -175,6 +252,9 @@ impl LeaderApi {
         }
         match (req.method, path) {
             (Method::Get, "/v1/tasks") => return tasks(cluster),
+            (Method::Get, p) if p.starts_with("/v1/jobs/") && p.ends_with("/status") => {
+                return job_status(cluster, p);
+            }
             (Method::Get, "/v1/events") => {
                 let mut r = Response::empty(200);
                 r.set_header("Content-Type", "text/event-stream");
@@ -265,7 +345,59 @@ fn tasks<C: Cluster>(cluster: &C) -> (Response, LeaderEffect) {
         }
         agents.push((a.id, a.endpoint));
     }
-    (Response::empty(200), LeaderEffect::Tasks { agents })
+    (
+        Response::empty(200),
+        LeaderEffect::Tasks {
+            agents,
+            scope: TasksScope::All,
+        },
+    )
+}
+
+/// `GET /v1/jobs/{naam}/status`: de taken van één job, van de agents waar
+/// hij staat (Go's `GetJobStatus`). Het dashboard leest er zijn
+/// takentabel uit (`tasks_by_agent`).
+///
+/// Zonder de job, of zonder plaatsing, is er niets te vragen en antwoordt
+/// de handler zelf, met Go's vorm op de byte: een onbekende job is
+/// `{"agents":null,"tasks_by_agent":null}`, een job die nergens staat
+/// `{"agents":null,"tasks_by_agent":{}}`. Beide 200, zoals in Go.
+fn job_status<C: Cluster>(cluster: &C, path: &str) -> (Response, LeaderEffect) {
+    let name = path
+        .strip_prefix("/v1/jobs/")
+        .and_then(|p| p.strip_suffix("/status"))
+        .unwrap_or("");
+    if name.is_empty() || name.contains('/') {
+        return (
+            Response::error(400, "job name required"),
+            LeaderEffect::None,
+        );
+    }
+    if !cluster.has_job(name) {
+        let r = reply(
+            200,
+            [("agents", Value::Null), ("tasks_by_agent", Value::Null)],
+        );
+        return (r, LeaderEffect::None);
+    }
+    let placed = cluster.placed_agents(name);
+    if placed.is_empty() {
+        let empty = types::de::ObjectBuilder::new().build();
+        let r = reply(200, [("agents", Value::Null), ("tasks_by_agent", empty)]);
+        return (r, LeaderEffect::None);
+    }
+    let mut agents = Vec::new();
+    if agents.try_reserve_exact(placed.len()).is_err() {
+        return (Response::empty(500), LeaderEffect::None);
+    }
+    for a in &placed {
+        agents.push((a.id.clone(), a.endpoint.clone()));
+    }
+    let scope = TasksScope::Job {
+        name: String::from(name),
+        agents: placed,
+    };
+    (Response::empty(200), LeaderEffect::Tasks { agents, scope })
 }
 
 /// `GET /v1/agents/{id}/capacity` en `GET /v1/agents/{id}/logs/{taak}/{stroom}`:
@@ -292,6 +424,15 @@ fn agent_route<C: Cluster>(
         if !req.query.is_empty() {
             t.push('?');
             t.push_str(&req.query);
+        }
+        // Go's contract: deze route IS de levende tail (het dashboard en de
+        // Go-CLI vragen hem zonder query en verwachten "Live output"). De
+        // agent-route `/logs/...` geeft zonder `follow` een momentopname;
+        // hier volgt de doorgifte dus tenzij de aanroeper `follow=0` zegt
+        // (`hop logs` zonder `--follow`).
+        if req.query_param("follow").is_none() {
+            t.push(if req.query.is_empty() { '?' } else { '&' });
+            t.push_str("follow=1");
         }
         (t, true)
     };

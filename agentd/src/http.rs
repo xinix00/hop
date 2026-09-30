@@ -11,6 +11,10 @@
 //! rondgang van `/v1/tasks` en de doorgifte naar één agent
 //! ([`Reply::Tasks`], [`Reply::Agent`]): de eigenaar wacht nooit op het net.
 //!
+//! Op de agent-poort zet de thread de CORS-koppen ([`api::cors_headers`])
+//! op elk antwoord voordat hij het verzoek doorgeeft: ook een doorgifte en
+//! een stroom, die hun kop hier krijgen en niet in de handler.
+//!
 //! Een stroom (SSE van `/v1/events`, een log-tail, een doorgegeven stroom)
 //! houdt zijn thread vast tot hij af is of de lezer weg. De thread vraagt
 //! de eigenaar elke [`STREAM_POLL`] wat er bij kwam ([`Msg::Poll`]); de
@@ -175,6 +179,14 @@ fn worker(l: &TcpListener, w: &Worker) {
 async fn serve(conn: Capped, w: &Worker) -> leanhttp::Result {
     let out = leanhttp::serve(conn, async |ex: &mut Exchange<'_, Capped>| {
         let req = read_request(ex).await?;
+        if w.port == Port::Agent {
+            // De browser van het dashboard praat met deze poort: élk antwoord
+            // draagt de CORS-koppen, ook een doorgifte naar de leader en een
+            // stroom, die hun kop hier en niet in de handler krijgen.
+            for (k, v) in api::cors_headers(&req) {
+                ex.header_mut().set(k, v)?;
+            }
+        }
         let reply = ask(&w.owner, w.port, &req);
         // Een stroom is al geteld; vanaf hier meldt de guard hem af, ook als
         // de eerste schrijf al faalt.
@@ -207,8 +219,8 @@ async fn execute<C: leanhttp::Conn>(
             let auth = req.header(auth::AUTH_HEADER).map(String::from);
             relay(ex, &w.http, &url, auth.as_deref()).await
         }
-        Reply::Tasks { agents } => {
-            let r = fan_out(&w.http, &w.key, &agents);
+        Reply::Tasks { agents, scope } => {
+            let r = fan_out(&w.http, &w.key, &agents, &scope);
             write_reply(ex, &Reply::Plain(r)).await
         }
         Reply::Agent {
@@ -369,15 +381,21 @@ async fn relay<C: leanhttp::Conn>(
     }
 }
 
-/// De rondgang van `/v1/tasks`: elke agent `GET /tasks`, ondertekend, met
-/// één totaal budget ([`TASKS_BUDGET`]); wie niet antwoordt, ontbreekt.
-fn fan_out(http: &Http, key: &[u8], agents: &[(String, String)]) -> Response {
+/// De rondgang van `/v1/tasks` en `/v1/jobs/{naam}/status`: elke agent
+/// `GET /tasks`, ondertekend, met één totaal budget ([`TASKS_BUDGET`]);
+/// wie niet antwoordt, ontbreekt. `scope` kiest de vorm van het antwoord.
+fn fan_out(
+    http: &Http,
+    key: &[u8],
+    agents: &[(String, String)],
+    scope: &api::TasksScope,
+) -> Response {
     let until = Instant::now() + TASKS_BUDGET;
     let results: Vec<(String, Option<Vec<types::Task>>)> = agents
         .iter()
         .map(|(id, endpoint)| (id.clone(), agent_tasks(http, key, endpoint, until)))
         .collect();
-    api::tasks_reply(&results)
+    scope.reply(&results)
 }
 
 /// De taken van één agent, of `None` als hij niet (op tijd) antwoordde.
@@ -685,7 +703,7 @@ mod tests {
             (String::from("a1"), format!("http://{addr}")),
             (String::from("a2"), format!("http://{dead_addr}")),
         ];
-        let r = fan_out(&Http::new(), b"key", &agents);
+        let r = fan_out(&Http::new(), b"key", &agents, &api::TasksScope::All);
         assert_eq!(r.status, 200);
         let body = String::from_utf8(r.body).unwrap();
         assert!(body.contains(r#""tasks_by_agent":{"a1":[{"#), "{body}");

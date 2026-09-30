@@ -666,7 +666,9 @@ fn logs(c: &Client, args: &[String]) -> Result<(), String> {
         if many {
             println!("== {} on {a} ==", t.id);
         }
-        let path = format!("/v1/agents/{a}/logs/{}/{}", t.id, f.stream);
+        // `follow=0`: de momentopname. Zonder query volgt de leader-route
+        // de log (Go's contract, voor het dashboard).
+        let path = format!("/v1/agents/{a}/logs/{}/{}?follow=0", t.id, f.stream);
         match c.leader("GET", &path, None) {
             Ok(r) => {
                 let mut rd = sse::Reader::default();
