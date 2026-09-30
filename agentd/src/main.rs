@@ -59,7 +59,6 @@ use runner::host::{HostConfig, HostRunner};
 use types::Nanos;
 use types::time::MILLISECOND;
 
-use crate::elector::Elector;
 use crate::msg::Port;
 use crate::node::{Node, Parts};
 use crate::prep::Prep;
@@ -219,7 +218,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let parts = Parts {
         agent,
         runner,
-        elector: Elector::new(lease_ops, ttl_ms, holding),
+        elector: elector::elector(lease_ops, ttl_ms, holding),
         election: Election::new(&cfg.node.ip, cfg.node.port),
         key,
         cluster: cfg.cluster.name.clone(),

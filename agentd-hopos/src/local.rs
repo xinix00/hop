@@ -1,10 +1,16 @@
-//! De verbinding van de leader met de agent op dezelfde node: in-proces, geen HTTP.
+//! De verbinding van de leader met zijn agents: in-proces voor die van deze node, de [`Relay`] voor de rest.
 //!
-//! In de standalone-cluster van fase 1 is de enige agent die van deze node.
-//! Wat in Go een ondertekende `POST /run` naar het eigen adres was, is hier
-//! een methode-aanroep op de [`Agent`] die de [`crate::Node`] bezit; de
+//! In de standalone-cluster is de enige agent die van deze node. Wat in Go
+//! een ondertekende `POST /run` naar het eigen adres was, is hier een
+//! methode-aanroep op de [`Agent`] die de [`crate::Node`] bezit; de
 //! vertaling van de uitkomst is die van de `/run`-handler in `api`, zodat de
 //! leader hetzelfde ziet als over de draad.
+//!
+//! In een cluster (`HOPOS_LOCK_URL` of `HOPOS_S3_*`) staan de andere agents
+//! op andere nodes. De leader-transport is synchroon, het net niet: een
+//! aanroep bij zo'n agent antwoordt uit de boeken van de [`Relay`] en gaat
+//! daarna over het LAN (zie [`crate::relay`]). Zonder relay (standalone)
+//! kent deze leader geen andere agent, en die is dan onbereikbaar.
 
 use alloc::vec::Vec;
 
@@ -12,11 +18,15 @@ use agent::{Agent as Node, Error as AgentError};
 use leader::{RunReply, Transport};
 use types::{Agent, Job, Nanos, Task, TryClone};
 
-/// De agent van deze node als [`Transport`] van de leader, geleend voor één aanroep.
+use crate::relay::Relay;
+
+/// De agent van deze node (en de relay naar de rest) als [`Transport`] van de leader, geleend voor één aanroep.
 pub(crate) struct Local<'a> {
     pub(crate) agent: &'a mut Node,
     pub(crate) now: Nanos,
     pub(crate) pool_largest: Option<u64>,
+    /// De boeken van de agents op andere nodes; `None` standalone.
+    pub(crate) relay: Option<&'a mut Relay>,
 }
 
 impl Local<'_> {
@@ -29,7 +39,10 @@ impl Local<'_> {
 impl Transport for Local<'_> {
     fn run(&mut self, agent: &Agent, job: &Job, replace: bool) -> RunReply {
         if !self.ours(agent) {
-            return RunReply::Unreachable;
+            return match self.relay.as_deref_mut() {
+                Some(r) => r.run(self.now, agent, job, replace),
+                None => RunReply::Unreachable,
+            };
         }
         let Ok(job) = job.try_clone() else {
             return RunReply::Rejected(500);
@@ -46,7 +59,10 @@ impl Transport for Local<'_> {
 
     fn stop_job(&mut self, agent: &Agent, job: &str) -> bool {
         if !self.ours(agent) {
-            return false;
+            return self
+                .relay
+                .as_deref_mut()
+                .is_some_and(|r| r.stop_job(agent, job));
         }
         self.agent.stop_job_tasks(job);
         true
@@ -55,18 +71,22 @@ impl Transport for Local<'_> {
     fn stop_task(&mut self, agent: &Agent, task_id: &str) {
         if self.ours(agent) {
             self.agent.stop_task(task_id);
+        } else if let Some(r) = self.relay.as_deref_mut() {
+            r.stop_task(agent, task_id);
         }
     }
 
     fn delete_job(&mut self, agent: &Agent, job: &str) {
         if self.ours(agent) {
             self.agent.delete_job(self.now, job);
+        } else if let Some(r) = self.relay.as_deref_mut() {
+            r.delete_job(agent, job);
         }
     }
 
     fn tasks(&mut self, agent: &Agent) -> Option<Vec<Task>> {
         if !self.ours(agent) {
-            return None;
+            return self.relay.as_deref().and_then(|r| r.tasks(agent));
         }
         let mut out = Vec::new();
         for t in self.agent.tasks() {

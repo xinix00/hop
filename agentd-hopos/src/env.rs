@@ -16,7 +16,7 @@
 //! | `HOPOS_PORT` | de agent-poort; de leader luistert op poort + 1000 | `8080` |
 //! | `HOPOS_CORES` | de app-cores waar Hop tegen plant | `1` |
 //! | `HOPOS_MEMORY` | het app-geheugen in bytes waar Hop tegen plant | 256 MiB |
-//! | `HOPOS_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_KEY`, `_SECRET`, `_PATHSTYLE` | de clusteropslag | geen: standalone |
+//! | `HOPOS_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_KEY`, `_SECRET`, `_PATHSTYLE` | de bucket van de node: de object-store van de apps, en met `HOPOS_LOCK_TYPE=s3` de lock van de cluster | geen |
 //! | `HOPOS_INIT_JOBS` | de init-jobs als één JSON-array (`hopos.init[]`) | [`INIT_JOBS_FILE`] als die er is |
 //!
 //! De sleutel wint: met `HOPOS_APIKEY` én `HOPOS_INSECURE=1` authenticeert
@@ -27,8 +27,9 @@
 //! en leest de bewoner [`INIT_JOBS_FILE`] in zijn volume. Ze worden alleen
 //! bij een schone boot gezaaid ([`crate::Node::seed_init_jobs`]).
 //!
-//! S3 wordt gelezen en gemeld, maar nog niet gebruikt: de clusterstaat op
-//! S3 is een volgende stap (`HOP_S3_SKIPPED`).
+//! De lock van de cluster (`HOPOS_LOCK_*`, `HOPOS_LEASE_TTL`,
+//! `HOPOS_ADVERTISE`) leest [`crate::lock`]; zonder lock is de node de
+//! standalone leader.
 //!
 //! Geheimen (`HOPOS_APIKEY`, `HOPOS_S3_SECRET`) komen nooit op het log: de
 //! `Debug` van [`BootConfig`] en [`S3Config`] toont alleen hun lengte.

@@ -24,7 +24,9 @@ use core::task::Poll;
 use core::time::Duration;
 
 use abi::hopabi::{self, Req, Resp};
-use abi::systemapi::{self, HEADER_LEN, Kind, PrivOp, SlotInfo, StartReq, StreamResp, StreamState};
+use abi::systemapi::{
+    self, HEADER_LEN, Kind, PrivOp, SlotInfo, StartReq, StreamResp, StreamState, store,
+};
 use applib::sys::{self, ConnError};
 
 /// De foutstatus van de kern.
@@ -78,6 +80,30 @@ pub struct KernState {
     pub yield_reads: bool,
     /// Hoe vaak een lees de core teruggaf.
     pub yields: u64,
+    /// Store-calls van apps die op Hop wachten (`NEXT_STORE`).
+    pub store_queue: VecDeque<FakeStore>,
+    /// Store-calls die Hop heeft, op ticket.
+    pub store_taken: BTreeMap<u64, FakeStore>,
+    /// Afgemelde store-calls: (ticket, status, maat, namen of tekst).
+    pub store_done: Vec<(u64, u16, u64, Vec<u8>)>,
+    /// Het volgende ticket.
+    pub next_ticket: u64,
+}
+
+/// Eén store-call van een app in de nep-kern. De bestanden van de app zijn
+/// de bestanden van de nep-hopfs ([`KernState::files`]), op pad.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FakeStore {
+    /// Het slot van de app.
+    pub slot: u32,
+    /// De op van de app (`OP_STORE_*`).
+    pub op: u8,
+    /// De jobnaam van het slot.
+    pub job: String,
+    /// De genormaliseerde objectnaam (`/a/b`).
+    pub key: String,
+    /// Het lokale pad.
+    pub path: String,
 }
 
 /// De nep-kern: deelbaar tussen de test en de verbindingen.
@@ -91,6 +117,15 @@ impl FakeKern {
             max_slots,
             ..KernState::default()
         })))
+    }
+
+    /// Zet een store-call van een app in de rij; geeft zijn ticket.
+    pub fn queue_store(&self, call: FakeStore) -> u64 {
+        let mut k = self.0.borrow_mut();
+        k.next_ticket += 1;
+        let t = k.next_ticket;
+        k.store_queue.push_back(call);
+        t
     }
 
     /// Een dialer naar deze kern.
@@ -351,6 +386,71 @@ impl FakeKern {
                 ok(0, b"")
             }
             Some(PrivOp::Flip) => err("flip not in the fake kernel"),
+            Some(PrivOp::NextStore) => {
+                let Some(c) = k.store_queue.pop_front() else {
+                    return ok(0, b"");
+                };
+                let ticket = k.next_ticket - k.store_queue.len() as u64;
+                let t = store::StoreTask {
+                    ticket,
+                    slot: c.slot,
+                    op: c.op,
+                    job: c.job.as_bytes(),
+                    key: c.key.as_bytes(),
+                    path: c.path.as_bytes(),
+                };
+                let mut d = alloc::vec![0u8; t.len()];
+                let n = t.encode(&mut d).unwrap_or(0);
+                k.store_taken.insert(ticket, c);
+                ok(1, d.get(..n).unwrap_or_default())
+            }
+            Some(PrivOp::StoreRead | PrivOp::StoreWrite) => {
+                let Some(c) = k.store_taken.get(&req.off).cloned() else {
+                    return answer(
+                        req.op,
+                        req.seq,
+                        hopabi::STATUS_NO_ENT,
+                        0,
+                        b"store call gone",
+                    );
+                };
+                if c.path != path {
+                    return answer(req.op, req.seq, hopabi::STATUS_DENIED, 0, b"not the path");
+                }
+                let at = usize::try_from(req.n).unwrap_or(usize::MAX);
+                if req.op == PrivOp::StoreRead.op() {
+                    let max = store::decode_read_len(req.data).unwrap_or(0) as usize;
+                    let Some(f) = k.files.get(path) else {
+                        return answer(req.op, req.seq, hopabi::STATUS_NO_ENT, 0, b"no such file");
+                    };
+                    let start = at.min(f.len());
+                    let end = start.saturating_add(max).min(f.len());
+                    return ok(f.len() as u64, f.get(start..end).unwrap_or_default());
+                }
+                let f = k.files.entry(String::from(path)).or_default();
+                f.resize(at.min(f.len()), 0);
+                if f.len() < at {
+                    f.resize(at, 0);
+                }
+                f.extend_from_slice(req.data);
+                ok(req.data.len() as u64, b"")
+            }
+            Some(PrivOp::StoreDone) => {
+                if k.store_taken.remove(&req.off).is_none() {
+                    return answer(
+                        req.op,
+                        req.seq,
+                        hopabi::STATUS_NO_ENT,
+                        0,
+                        b"store call gone",
+                    );
+                }
+                let Ok((h, rest)) = store::DoneHead::decode(req.data) else {
+                    return err("bad done head");
+                };
+                k.store_done.push((req.off, h.status, req.n, rest.to_vec()));
+                ok(0, b"")
+            }
             None => match req.op {
                 hopabi::OP_TRUNCATE => {
                     let f = k.files.entry(String::from(path)).or_default();

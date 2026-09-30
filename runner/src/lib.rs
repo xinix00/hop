@@ -38,6 +38,7 @@ mod hopos;
 #[cfg(feature = "std")]
 pub mod host;
 mod logs;
+mod store;
 mod system;
 
 use alloc::collections::BTreeMap;
@@ -48,7 +49,10 @@ use core::future::Future;
 pub use env::{attr_env_vars, env_key, port_env_vars};
 pub use hopos::{HOP_STOP_TIMEOUT_MS, HopRunner, MAX_CONCURRENT_DOWNLOADS};
 pub use logs::{LogPolicy, LogRing, LogStore};
-pub use system::{Slot, SlotApp, SlotState, SlotStatus, StartSpec, Streamed, SysError, SystemApi};
+pub use store::{StoreOp, StoreStatus, StoreTask};
+pub use system::{
+    NO_STORE_QUEUE, Slot, SlotApp, SlotState, SlotStatus, StartSpec, Streamed, SysError, SystemApi,
+};
 
 /// Een runner-fout.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -41,7 +41,13 @@ use types::{Driver, Job, Map, Nanos, Time};
 
 use crate::VERSION;
 use crate::env::BootConfig;
+use crate::forward::{Forward, Routed};
 use crate::local::Local;
+
+mod cluster;
+
+pub(crate) use cluster::refuse_forward;
+pub use cluster::{Cluster, ClusterParts};
 
 /// Hoe vaak de leader tikt (dode agents, settle, de vangnet-reconcile om de
 /// derde tik): 10 s, de cadans van de Go-leader.
@@ -164,6 +170,9 @@ pub struct Node<S, I> {
     next_leader_tick: Nanos,
     lines: Vec<String>,
     said: BTreeSet<&'static str>,
+    /// De cluster: verkiezing, lease en de agents op andere nodes; `None`
+    /// standalone (zie [`cluster`]).
+    cluster: Option<Cluster>,
 }
 
 impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
@@ -177,6 +186,15 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
     /// registratie nog wil, blijft in zijn rij staan tot de eerste
     /// [`Node::restore`], [`Node::handle`] of [`Node::tick`] het uitvoert.
     pub fn new(cfg: &BootConfig, sys: S, images: I, now: Nanos) -> Self {
+        let mut node = Self::build(cfg, sys, images, now);
+        node.register_self(now);
+        node
+    }
+
+    /// De node zonder registratie bij een leader: de standalone-leader
+    /// registreert de eigen agent meteen ([`Node::new`]), een geclusterde
+    /// node pas als de verkiezing hem de leiding geeft.
+    fn build(cfg: &BootConfig, sys: S, images: I, now: Nanos) -> Self {
         let endpoint = format!("http://{}:{}", cfg.node_ip, cfg.port);
         let own_leader = format!("{}:{}", cfg.node_ip, cfg.leader_port());
         let mut attributes = BTreeMap::new();
@@ -196,7 +214,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
         };
         let mut agent = Agent::new(settings);
         agent.set_leader_addr(&own_leader);
-        let mut node = Self {
+        Self {
             agent,
             leader: Leader::new(cfg.node_id.clone(), MemStore::new()),
             runner: HopRunner::new(sys, attributes, LogPolicy::default()),
@@ -212,9 +230,8 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             next_leader_tick: now.saturating_add(LEADER_TICK),
             lines: Vec::new(),
             said: BTreeSet::new(),
-        };
-        node.register_self(now);
-        node
+            cluster: None,
+        }
     }
 
     /// Meldt de eigen agent bij de eigen leader.
@@ -230,6 +247,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             agent: &mut self.agent,
             now,
             pool_largest: pool,
+            relay: self.cluster.as_mut().map(Cluster::relay_mut),
         };
         match self
             .leader
@@ -294,6 +312,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             agent: &mut self.agent,
             now,
             pool_largest: pool,
+            relay: self.cluster.as_mut().map(Cluster::relay_mut),
         };
         self.leader
             .seed_init_jobs(jobs, &mut net)
@@ -335,11 +354,26 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
     }
 
     /// Behandelt één verzoek op `port` en voert daarna de acties van de agent uit.
+    ///
+    /// Een verzoek voor een andere node (een doorgifte, zie
+    /// [`Node::handle_routed`]) kan hier niet: dat wordt een luide 502.
     pub async fn handle(&mut self, port: Port, req: &Request, now: Nanos) -> Reply
     where
         S: crate::flip::KernFlip,
     {
-        let mut reply = match port {
+        match self.handle_routed(port, req, now).await {
+            Routed::Reply(r) => r,
+            Routed::Forward(f) => Reply::Plain(refuse_forward(&f)),
+        }
+    }
+
+    /// Behandelt één verzoek op `port`: een antwoord, of een doorgifte naar
+    /// een andere node die de verbindingstaak uitvoert (`forward::serve`).
+    pub async fn handle_routed(&mut self, port: Port, req: &Request, now: Nanos) -> Routed
+    where
+        S: crate::flip::KernFlip,
+    {
+        let mut routed = match port {
             Port::Leader => self.leader_reply(req, now),
             Port::Agent => {
                 let pool = self.runner.pool_largest();
@@ -353,12 +387,12 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
                             self.lines.push(String::from(
                                 "hop: the kernel took the bundle and flips now HOP_FLIP_ACCEPTED",
                             ));
-                            Reply::Plain(resp)
+                            Routed::Reply(Reply::Plain(resp))
                         }
                         Err(e) => {
                             self.lines
                                 .push(format!("hop: kernel flip failed: {e} HOP_FLIP_FAIL"));
-                            Reply::Plain(Response::error(502, &e))
+                            Routed::Reply(Reply::Plain(Response::error(502, &e)))
                         }
                     }
                 } else {
@@ -366,15 +400,19 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
                 }
             }
         };
-        if port == Port::Agent {
+        if port == Port::Agent
+            && let Routed::Reply(reply) = &mut routed
+        {
             // De browser van het dashboard praat met deze poort: élk antwoord
             // draagt de CORS-koppen, ook een dat van de leader in-proces kwam
-            // (`/v1/...`) en de kop van een stroom.
+            // (`/v1/...`) en de kop van een stroom. Een doorgifte krijgt ze
+            // van de verbindingstaak (`forward::execute`).
             api::cors(req, reply.head_mut());
         }
         self.drain(now).await;
         self.collect_events();
-        reply
+        self.after_cluster(now);
+        routed
     }
 
     /// FLIP: haal de bundel, stop bij een koude flip eerst de eigen taken
@@ -411,6 +449,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             agent: &mut self.agent,
             now,
             pool_largest: pool,
+            relay: self.cluster.as_mut().map(Cluster::relay_mut),
         };
         let mut cluster =
             LeaderCluster::new(&mut self.leader, &mut net).with_events(&mut self.events);
@@ -422,14 +461,21 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
     /// De standalone-cluster heeft één agent, deze: de rondgang van
     /// `/v1/tasks` en de doorgifte naar een agent gaan in-proces. Een andere
     /// agent kent deze leader niet, en wie hem toch noemt, krijgt dat luid.
-    fn leader_reply(&mut self, req: &Request, now: Nanos) -> Reply {
+    fn leader_reply(&mut self, req: &Request, now: Nanos) -> Routed {
+        if let Some(r) = self.not_leading(req) {
+            return Routed::Reply(Reply::Plain(r));
+        }
         let (resp, effect) = self.leader_handle(req, now);
         match effect {
-            LeaderEffect::None => Reply::Plain(resp),
+            LeaderEffect::None => Routed::Reply(Reply::Plain(resp)),
             LeaderEffect::Tasks { agents, scope } => {
+                // Agents op andere nodes: de rondgang doet de verbindingstaak.
+                if let Some(f) = self.tasks_forward(&agents, &scope) {
+                    return Routed::Forward(f);
+                }
                 let mut results = Vec::new();
                 if results.try_reserve_exact(agents.len()).is_err() {
-                    return Reply::Plain(Response::empty(500));
+                    return Routed::Reply(Reply::Plain(Response::empty(500)));
                 }
                 for (id, _) in agents {
                     // Een andere agent kent deze leader niet: hij ontbreekt,
@@ -441,14 +487,25 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
                     };
                     results.push((id, tasks));
                 }
-                Reply::Plain(scope.reply(&results))
+                Routed::Reply(Reply::Plain(scope.reply(&results)))
             }
-            LeaderEffect::Agent { endpoint, path, .. } => {
+            LeaderEffect::Agent {
+                endpoint,
+                path,
+                stream,
+            } => {
                 if endpoint != self.agent.endpoint() {
-                    return Reply::Plain(Response::error(
+                    // Een agent op een andere node: de verbindingstaak geeft
+                    // het verzoek ondertekend door.
+                    if let Some(f) = self.agent_forward(&endpoint, &path, stream) {
+                        return self.admit_forward(f);
+                    }
+                    return Routed::Reply(Reply::Plain(Response::error(
                         502,
-                        &format!("hop on HopOS: proxy to agent {endpoint} is not wired yet"),
-                    ));
+                        &format!(
+                            "hop on HopOS: agent {endpoint} is not on this node, and a standalone leader has no other nodes"
+                        ),
+                    )));
                 }
                 // Dezelfde route op de eigen agent-API, ondertekend zoals een
                 // doorgifte over de draad dat zou zijn.
@@ -463,13 +520,13 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
                 let (resp, effect) = self.node_api.handle(&mut self.agent, now, pool, &inner);
                 self.effect(resp, effect, &inner, now)
             }
-            LeaderEffect::Events => self.admit(Reply::Stream {
+            LeaderEffect::Events => Routed::Reply(self.admit(Reply::Stream {
                 head: resp,
                 first: String::from(api::PING),
                 ask: Ask::Events {
                     seq: self.events.seq(),
                 },
-            }),
+            })),
         }
     }
 
@@ -515,6 +572,12 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
                 None => c.done = true,
             },
             Ask::Events { seq } => {
+                if !self.leads() {
+                    // Een ex-leider houdt geen abonnees vast; de lezer
+                    // verbindt met de nieuwe (zoals de daemon).
+                    c.done = true;
+                    return c;
+                }
                 self.collect_events();
                 c.seq = self.events.since(*seq, &mut c.text);
             }
@@ -530,13 +593,22 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
     }
 
     /// Voert een [`Effect`] uit, of weigert hem luid.
-    fn effect(&mut self, resp: Response, effect: Effect, req: &Request, now: Nanos) -> Reply {
+    fn effect(&mut self, resp: Response, effect: Effect, req: &Request, now: Nanos) -> Routed {
         match effect {
-            Effect::None => Reply::Plain(resp),
+            Effect::None => Routed::Reply(Reply::Plain(resp)),
             // De leader is deze node: geen proxy over het net, maar dezelfde
             // handler in-proces (dezelfde HMAC, dezelfde body).
             Effect::Proxy { ref leader, .. } if *leader == self.own_leader => {
                 self.leader_reply(req, now)
+            }
+            // De leader staat op een andere node: de verbindingstaak geeft
+            // het verzoek ongewijzigd door (`forward`).
+            Effect::Proxy { leader, stream } if self.cluster.is_some() => {
+                self.admit_forward(Forward::Leader {
+                    addr: leader,
+                    req: req.clone(),
+                    stream,
+                })
             }
             Effect::Logs {
                 ref task_id,
@@ -549,7 +621,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
                         .logs(now / MILLISECOND, task_id, stream)
                         .is_some()
                 {
-                    return self.admit(Reply::Stream {
+                    return Routed::Reply(self.admit(Reply::Stream {
                         head: resp,
                         first: String::new(),
                         ask: Ask::Logs {
@@ -557,17 +629,17 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
                             stream: which,
                             seq: 0,
                         },
-                    });
+                    }));
                 }
-                match self.runner.logs(now / MILLISECOND, task_id, stream) {
+                Routed::Reply(match self.runner.logs(now / MILLISECOND, task_id, stream) {
                     Some(ring) => Reply::Events {
                         head: resp,
                         lines: ring.tail().map(String::from).collect(),
                     },
                     None => Reply::Plain(refuse(&effect).unwrap_or(resp)),
-                }
+                })
             }
-            other => Reply::Plain(refuse(&other).unwrap_or(resp)),
+            other => Routed::Reply(Reply::Plain(refuse(&other).unwrap_or(resp))),
         }
     }
 
@@ -578,15 +650,20 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
         // temperatuur komt van de kern: die zet hem elke seconde op de
         // control-page (CTRL_TEMP, HopOS alpha.9); 0 is geen meting.
         let temp = applib::app().map_or(0, |a| i64::from(a.ctrl().temp_milli_c()));
-        self.leader
-            .heartbeat(self.agent.id(), VERSION, temp, Time(now));
-        if now >= self.next_leader_tick {
+        let leads = self.leads();
+        if leads {
+            self.leader
+                .heartbeat(self.agent.id(), VERSION, temp, Time(now));
+        }
+        if leads && now >= self.next_leader_tick {
             self.next_leader_tick = now.saturating_add(LEADER_TICK);
+            self.refresh_remote_tasks();
             let pool = self.runner.pool_largest();
             let mut net = Local {
                 agent: &mut self.agent,
                 now,
                 pool_largest: pool,
+                relay: self.cluster.as_mut().map(Cluster::relay_mut),
             };
             if let Err(e) = self.leader.tick(Time(now), &mut net) {
                 self.lines.push(format!("hop: leader tick: {e}"));
@@ -596,6 +673,7 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
         self.run_actions(now, actions).await;
         self.drain(now).await;
         self.runner.pump_logs(now / MILLISECOND).await;
+        self.cluster_tick(now);
         self.collect_events();
     }
 
@@ -651,12 +729,18 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
 
     /// Een taakgebeurtenis naar de eigen leader, zoals `POST /v1/notify`.
     fn notify(&mut self, now: Nanos, job: &str, event: Event) {
+        if !self.leads() {
+            // De leader staat op een andere node: `POST /v1/notify` daar.
+            self.notify_leader(job, event);
+            return;
+        }
         if event == Event::Unplaceable {
             let pool = self.runner.pool_largest();
             let mut net = Local {
                 agent: &mut self.agent,
                 now,
                 pool_largest: pool,
+                relay: self.cluster.as_mut().map(Cluster::relay_mut),
             };
             let id = String::from(net.agent.id());
             let _ = self.leader.mark_unplaced(&id, job, &mut net);

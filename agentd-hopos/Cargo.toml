@@ -27,7 +27,15 @@ api = { path = "../api" }
 runner = { path = "../runner" }
 hopos-runner = { path = "../hopos-runner" }
 hop-http = { path = "../hop-http" }
-applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.0-alpha.11" }
+applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.0-alpha.12" }
+# De bouwstenen van het handboek (§2): de rijen van de cluster tussen de
+# eigenaar en de taken die het net op gaan (`sync::mpsc::Mailbox`). Dezelfde
+# tag als applib, dat ze zelf ook gebruikt: één `sync` in het image.
+sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.0-alpha.12" }
+discovery = { path = "../discovery" }
+# De clusterlock op S3 (`HOPOS_S3_*`): de getekende verzoeken, over het
+# transport van de bewoner (leanhttps met de wortels, zoals de artifacts).
+leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.1" }
 leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.1" }
 # HTTPS voor artifacts (GitHub releases): leanhttp over leantls, met
 # ketenverificatie tegen de ingebakken Mozilla-wortels (`roots.der`).
@@ -42,4 +50,4 @@ workspace = true
 
 [dev-dependencies]
 hopos-runner = { path = "../hopos-runner", features = ["fake"] }
-abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.0-alpha.11" }
+abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.0-alpha.12" }

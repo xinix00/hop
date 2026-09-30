@@ -277,7 +277,11 @@ where
 /// schrijf het, slaap [`STREAM_POLL`], tot de eigenaar zegt dat het af is of
 /// een schrijf faalt (de lezer is weg). Om de [`KEEPALIVE_EVERY`] zonder
 /// bytes een [`api::KEEPALIVE`].
-async fn pump<C: Conn, S: Streams>(
+///
+/// Publiek voor een eigen [`serve`]-lus die naast de antwoorden van de
+/// eigenaar ook doorgiftes kent (de cluster van `agentd-hopos`): de stroom
+/// van de eigenaar blijft zo één implementatie.
+pub async fn pump<C: Conn, S: Streams>(
     ex: &mut Exchange<'_, C>,
     first: &Ask,
     streams: &mut S,

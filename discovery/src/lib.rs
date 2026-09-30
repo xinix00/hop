@@ -33,6 +33,7 @@ extern crate alloc;
 
 mod mem;
 mod store;
+pub mod wire;
 
 use alloc::string::String;
 use core::fmt;

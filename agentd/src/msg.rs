@@ -8,7 +8,7 @@
 
 use std::sync::mpsc::SyncSender;
 
-use agent::{LinkError, Outcome, Request as LinkRequest};
+use agent::{LeaseReply, LinkError, Outcome, Request as LinkRequest};
 use api::{Request, Response};
 use runner::host::{Prepared, TaskSpec};
 use types::Driver;
@@ -126,22 +126,6 @@ pub(crate) struct Chunk {
     pub(crate) seq: u64,
     /// Na deze bytes is de stroom af.
     pub(crate) done: bool,
-}
-
-/// Wat de lease-thread terugmeldt.
-#[derive(Debug)]
-pub(crate) enum LeaseReply {
-    /// De leider volgens de opslag, en of de opslag antwoordde.
-    Read {
-        /// Het adres van de leider, als er een levende lease is.
-        leader: Option<String>,
-        /// Of de opslag antwoordde.
-        ok: bool,
-    },
-    /// Een claim: `true` als wij de lease nu houden.
-    Claimed(bool),
-    /// Een vernieuwing: `(renewed, displaced)`.
-    Renewed(bool, bool),
 }
 
 /// Een bericht aan de eigenaar.

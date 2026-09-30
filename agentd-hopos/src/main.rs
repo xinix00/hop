@@ -2,7 +2,8 @@
 //!
 //! Bij start: de netstack (`appnet::up`), de config uit de env van het slot
 //! (`HOPOS_*`, zie `agentd_hopos::env`), de system-client naar de kern, en
-//! de [`Node`]: agent, leader (standalone, zoals de Go-kern in fase 1) en de
+//! de [`Node`]: agent, leader (standalone, of via de verkiezing in een
+//! cluster: `HOPOS_LOCK_*`, zie `agentd_hopos::lock`) en de
 //! HopOS-runner. Daarna drie soorten taken op de executor van de app-core:
 //!
 //! - de eigenaar: bezit de [`Node`], handelt de verzoeken uit de [`Hub`]
@@ -31,14 +32,19 @@
 //! `HOP_CLOCK_SYNCED`, `HOP_INIT_SEEDED`, en de weigeringen en degradaties
 //! `HOPOS_API_NO_AUTH`, `HOPOS_API_INSECURE`, `HOP_NET_FAIL`,
 //! `HOP_SNTP_FAIL`, `HOP_CLOCK_FAIL`, `HOP_TLS_ENTROPY_WEAK`,
-//! `HOP_INIT_FAIL`, `HOP_S3_SKIPPED`.
+//! `HOP_INIT_FAIL`. In een cluster ook `HOP_CLUSTER`, `HOP_CLUSTER_JOIN`,
+//! `HOP_LEADER_LOADING`, `HOP_STATE_LOADED`, `HOP_LEADER_STOPPED`, en de
+//! weigeringen `HOP_LOCK_BAD`, `HOP_CLUSTER_NO_CLOCK`, `HOP_LEASE_STORE`,
+//! `HOP_LINK_FAIL`, `HOP_RELAY_REFUSED`, `HOP_RELAY_FULL`,
+//! `HOP_STATE_SAVE_FAIL`.
 //!
 //! Canoniek gelinkt (applib/link.ld via build.rs), zoals appspike.
 //!
 //! Op QEMU: `tools/qemu-test-hop.sh` in de HopOS-repo boot de kern met deze
 //! ELF in slot 1 (env, token, wandklok, poorten 8080 en 9080 doorgezet),
 //! stuurt van buiten een jobspec en eist appspike in slot 2 (29-09 groen).
-//! Wat daar nog niet is: health probes en S3. Zonder DNS-server in de env
+//! Wat daar nog niet is: health probes. De cluster over het LAN toetst
+//! `tools/qemu-test-cluster.sh` in deze repo. Zonder DNS-server in de env
 //! en zonder internet faalt de SNTP-stap met één regel (`HOP_SNTP_FAIL`) en
 //! draait Hop door; `http://` naar een adres werkt dan gewoon.
 
@@ -56,19 +62,25 @@ use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use core::task::Poll;
 use core::time::Duration;
 
+use agentd_hopos::client::{Client, Idle};
 use agentd_hopos::entropy::{HARVEST_ROUNDS, Pool};
 use agentd_hopos::env::INIT_JOBS_FILE;
+use agentd_hopos::forward::{self, Routed, STREAM_IDLE};
+use agentd_hopos::lock::{self, ClusterConfig};
+use agentd_hopos::mail::{DispatchQueue, Inbox, LeaseQueue, LinkQueue, Mail, Nap, StateQueue};
 use agentd_hopos::sntp::{self, NtpLink, PACKET};
 use agentd_hopos::{
-    Answer, BootConfig, Clock, Connect, Handoff, HttpImages, Hub, Images, Node, Port, Question,
-    Resolve,
+    Answer, BootConfig, Clock, ClusterParts, Connect, Handoff, HttpImages, Hub, Images, Node, Port,
+    Question, Resolve,
 };
 use applib::appnet::{self, Endpoint, Net, NetError, TcpListener, TcpStream};
 use applib::rt::Exec;
 use applib::{App, EXEC, log};
+use discovery::Discovery;
 use hop_http::{Ask, Chunk, Streams, TcpConn};
 use hopos_runner::KernSys;
 use runner::SystemApi;
+use sync::mpsc::Mailbox;
 
 applib::main!(resident);
 
@@ -119,6 +131,79 @@ const INIT_FILE_MAX: usize = 64 << 10;
 /// vertrouwd genoeg voor een certificaatdatum. Eén schrijver (de
 /// kloktaak), gelezen door de downloader; een vlag, geen protocol.
 static CLOCK_SYNCED: AtomicBool = AtomicBool::new(false);
+
+/// De rijen van de cluster (zie `agentd_hopos::mail`): statisch, want de
+/// taken leven zo lang als de bewoner. Standalone blijven ze leeg.
+static LEASE_Q: LeaseQueue = Mailbox::new();
+/// De rij naar de link-taak.
+static LINK_Q: LinkQueue = Mailbox::new();
+/// De rij naar de staat-taak.
+static STATE_Q: StateQueue = Mailbox::new();
+/// De rij naar de dispatch-taak.
+static DISPATCH_Q: DispatchQueue = Mailbox::new();
+/// De brievenbus van de eigenaar.
+static INBOX: Inbox = Mailbox::new();
+
+/// Hoe lang een aanroep van de cluster (lease, staat, link, dispatch) na
+/// zijn kop mag zwijgen: een lease of snapshot is klein.
+const CLUSTER_IDLE: Duration = Duration::from_secs(20);
+
+/// Nu in milliseconden op de wandklok van de kern: de lease vergelijkt
+/// tijden van verschillende nodes. Zonder wandklok de monotone klok (en de
+/// bewoner zegt `HOP_NO_CLOCK`).
+fn wall_ms() -> u64 {
+    applib::app()
+        .and_then(App::wall_ns)
+        .unwrap_or_else(applib::clock::now_ns)
+        / 1_000_000
+}
+
+/// Nu in Unix-seconden: de klok van de S3-handtekening.
+fn wall_secs() -> u64 {
+    wall_ms() / 1000
+}
+
+/// Of SNTP in deze boot lukte: pas dan doet een geclusterde node mee.
+fn clock_ok() -> bool {
+    CLOCK_SYNCED.load(Relaxed)
+}
+
+/// Nu in Unix-seconden, alleen na SNTP: de datum van een certificaatketen.
+fn trusted_secs() -> Option<u64> {
+    CLOCK_SYNCED.load(Relaxed).then(wall_secs)
+}
+
+/// TCP-verbindingen van de cluster: een aanroep die na zijn kop zwijgt,
+/// wordt na `idle` gesloten (`agentd_hopos::client::Idle`).
+#[derive(Copy, Clone)]
+struct ClusterConnect {
+    net: &'static Net,
+    exec: &'static Exec,
+    idle: Duration,
+}
+
+impl Connect for ClusterConnect {
+    type Conn = Idle<TcpConn>;
+
+    async fn connect(&mut self, ip: [u8; 4], port: u16) -> Result<Self::Conn, String> {
+        let s = self
+            .net
+            .tcp_connect_timeout(ip, port, DIAL_TIMEOUT)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(Idle::new(TcpConn::new(s, self.exec), self.idle))
+    }
+}
+
+/// Slapen op het timerwiel van de app-core, voor de taken van de cluster.
+#[derive(Copy, Clone)]
+struct ExecNap(&'static Exec);
+
+impl Nap for ExecNap {
+    async fn nap(&self, d: Duration) {
+        self.0.after(d).await;
+    }
+}
 
 /// TCP-verbindingen naar artifact-servers over de netstack van het slot.
 #[derive(Copy, Clone)]
@@ -180,9 +265,10 @@ impl Clock for SlotClock {
     }
 }
 
-/// SNTP over een UDP-socket van het slot.
+/// SNTP over een UDP-socket van het slot, naar `port` van de server.
 struct UdpLink {
     net: &'static Net,
+    port: u16,
 }
 
 impl NtpLink for UdpLink {
@@ -196,7 +282,7 @@ impl NtpLink for UdpLink {
         sock.set_timeout(Some(NTP_TIMEOUT));
         let to = Endpoint {
             ip: server,
-            port: sntp::PORT,
+            port: self.port,
         };
         sock.send_to(to, req)
             .await
@@ -222,15 +308,15 @@ impl NtpLink for UdpLink {
 /// Een eigen system-verbinding per synchronisatie, die daarna weer dichtgaat:
 /// de kern laat een slot twee verbindingen toe, en de eigenaar-taak houdt
 /// de eerste; een uur lang een tweede openhouden voor één call is zonde.
-async fn clock_task(net: &'static Net, exec: &'static Exec) {
+async fn clock_task(net: &'static Net, exec: &'static Exec, server: String, port: u16) {
     let mut fails: u32 = 0;
     let mut seq: u64 = 0;
     loop {
-        let mut link = UdpLink { net };
+        let mut link = UdpLink { net, port };
         let got = sntp::sync(
             &mut SlotResolver,
             &mut link,
-            sntp::SERVER,
+            &server,
             || exec.now(),
             || {
                 seq = seq.wrapping_add(1);
@@ -247,8 +333,7 @@ async fn clock_task(net: &'static Net, exec: &'static Exec) {
                         CLOCK_SYNCED.store(true, Relaxed);
                         fails = 0;
                         log!(
-                            "hop: clock set from {} (stratum {}, delay {} us) to {} s HOP_CLOCK_SYNCED",
-                            sntp::SERVER,
+                            "hop: clock set from {server} (stratum {}, delay {} us) to {} s HOP_CLOCK_SYNCED",
                             sample.stratum,
                             sample.delay_ns / 1000,
                             unix_ns / 1_000_000_000
@@ -265,14 +350,107 @@ async fn clock_task(net: &'static Net, exec: &'static Exec) {
                 fails = fails.saturating_add(1);
                 if fails <= NTP_LOUD || fails.is_multiple_of(12) {
                     log!(
-                        "hop: SNTP {} failed ({fails}x): {e}; the wall clock is not synced, https downloads wait for it HOP_SNTP_FAIL",
-                        sntp::SERVER
+                        "hop: SNTP {server}:{port} failed ({fails}x): {e}; the wall clock is not synced, https downloads wait for it HOP_SNTP_FAIL"
                     );
                 }
                 NTP_RETRY
             }
         };
         exec.after(wait).await;
+    }
+}
+
+/// De object-store van de apps (`agentd_hopos::objstore`): haalt de
+/// store-calls van de apps op bij de kern (`NEXT_STORE`, een lange wacht),
+/// doet de S3-kant en meldt af. Een eigen system-verbinding, blijvend: de
+/// kern geeft het slot van Hop er één meer dan een app (`MAX_HOP_CONNS`).
+/// Zonder `HOPOS_S3_*` weigert hij elke call luid, zodat een app hoort
+/// waarom zijn pull faalt.
+async fn store_task(
+    app: &'static App,
+    net: &'static Net,
+    exec: &'static Exec,
+    s3: Option<agentd_hopos::env::S3Config>,
+    cluster: String,
+) {
+    use agentd_hopos::objstore::{Service, bucket};
+    let bucket = s3.map(|c| {
+        let cfg = bucket::Config {
+            endpoint: c.endpoint,
+            bucket: c.bucket,
+            region: c.region,
+            key: c.key,
+            secret: c.secret,
+            path_style: c.path_style,
+        };
+        // Een eigen pool: de handshakes van de store delen geen staat met
+        // die van de downloader (de waarschuwing over de bron gaf entropy()).
+        let mut pool = Pool::new(&app.slot().to_le_bytes());
+        pool.stir(&exec.now().to_le_bytes());
+        pool.harvest(applib::clock::now_ns, HARVEST_ROUNDS);
+        let b = bucket::S3Bucket::new(
+            &cfg,
+            SlotConnect { net, exec },
+            SlotResolver,
+            pool,
+            wall_secs,
+            trusted_secs,
+        );
+        if b.is_plain_http() {
+            log!(
+                "hop: object store {} is plain http: requests are signed but readable on the way; use https outside a test HOP_STORE_PLAIN_HTTP",
+                cfg.endpoint
+            );
+        }
+        log!(
+            "hop: object store for apps: {} bucket {} under apps/{cluster}/ HOP_STORE_UP",
+            cfg.endpoint,
+            cfg.bucket
+        );
+        b
+    });
+    if bucket.is_none() {
+        log!(
+            "hop: no object store configured (hopos.s3.*); app store calls are refused HOP_STORE_NONE"
+        );
+    }
+    let mut svc = Service::new(bucket, &cluster);
+    let mut sys = KernSys::new(net.system_client(), 1);
+    let mut refused: u32 = 0;
+    loop {
+        match svc.serve_one(&mut sys).await {
+            // Een pull van iets dat er niet is, is een vraag, geen fout.
+            Ok(Some(o))
+                if !matches!(
+                    o.status,
+                    runner::StoreStatus::Ok | runner::StoreStatus::NotFound
+                ) =>
+            {
+                log!(
+                    "hop: store {} {} for slot {}: {} HOP_STORE_FAIL",
+                    o.task.op.name(),
+                    o.task.key,
+                    o.task.slot.0,
+                    o.why
+                )
+            }
+            Ok(Some(o)) if !o.delivered => log!(
+                "hop: store {} {} for slot {}: the task was gone, result dropped HOP_STORE_GONE",
+                o.task.op.name(),
+                o.task.key,
+                o.task.slot.0
+            ),
+            Ok(_) => refused = 0,
+            Err(e) => {
+                // Een kern zonder rij of zonder verbinding: luid, de eerste
+                // paar keer, dan eens per minuut.
+                refused = refused.saturating_add(1);
+                if refused <= 3 || refused.is_multiple_of(60) {
+                    log!("hop: NEXT_STORE failed ({refused}x): {e} HOP_STORE_KERNEL");
+                }
+                exec.after(Duration::from_secs(1)).await;
+            }
+        }
     }
 }
 
@@ -288,6 +466,119 @@ fn entropy(app: &App, exec: &'static Exec) -> Pool {
         "hop: TLS randomness from timer jitter only ({HARVEST_ROUNDS} samples): the slot has no hardware RNG yet HOP_TLS_ENTROPY_WEAK"
     );
     pool
+}
+
+/// Een eigen pool voor een client van de cluster (`tag` maakt hem anders
+/// dan die van de downloader); dezelfde bron, zonder de regel opnieuw.
+fn quiet_pool(app: &App, exec: &'static Exec, tag: u8) -> Pool {
+    let mut seed = Vec::new();
+    seed.push(tag);
+    seed.extend_from_slice(&app.slot().to_le_bytes());
+    seed.extend_from_slice(&exec.now().to_le_bytes());
+    let mut pool = Pool::new(&seed);
+    pool.harvest(applib::clock::now_ns, HARVEST_ROUNDS);
+    pool
+}
+
+/// Een HTTP-client van de cluster over de netstack van het slot.
+fn cluster_client(
+    app: &App,
+    net: &'static Net,
+    exec: &'static Exec,
+    tag: u8,
+    idle: Duration,
+) -> Client<ClusterConnect, SlotResolver> {
+    Client::new(
+        ClusterConnect { net, exec, idle },
+        SlotResolver,
+        quiet_pool(app, exec, tag),
+        trusted_secs,
+    )
+}
+
+/// Start de cluster: de boot-claim, en de taken van lease, staat, link en
+/// dispatch. Geeft de onderdelen voor [`Node::new_clustered`].
+async fn start_cluster(
+    app: &'static App,
+    net: &'static Net,
+    exec: &'static Exec,
+    cfg: &BootConfig,
+    cc: ClusterConfig,
+    init_jobs: Option<String>,
+) -> Result<ClusterParts, String> {
+    let owner = format!("{}:{}", cfg.node_ip, cfg.leader_port());
+    let disc = Discovery::new(owner, cc.ttl_ms);
+    // De boot-claim doet de node zelf zodra de klok gezet is (een lease is
+    // een tijd op de wandklok), via de lease-taak: `Node::cluster_boot`.
+    let lease = lock::open_lease(
+        &cc,
+        cluster_client(app, net, exec, 1, CLUSTER_IDLE),
+        wall_secs,
+    );
+    let state = lock::open_state(
+        &cc,
+        cluster_client(app, net, exec, 2, CLUSTER_IDLE),
+        wall_secs,
+    );
+    log!(
+        "hop: cluster state in {} HOP_STATE_STORE",
+        lock::StateBackend::describe(&state)
+    );
+    let nap = ExecNap(exec);
+    let key = cfg.api_key.clone();
+    exec.spawn(agentd_hopos::lease::lease_task(
+        disc, lease, &LEASE_Q, &INBOX, wall_ms, nap,
+    ))
+    .map_err(|e| format!("lease task: {e}"))?;
+    exec.spawn(agentd_hopos::lease::state_task(
+        state, &STATE_Q, &INBOX, nap,
+    ))
+    .map_err(|e| format!("state task: {e}"))?;
+    exec.spawn(agentd_hopos::link::link_task(
+        cluster_client(app, net, exec, 3, CLUSTER_IDLE),
+        key.clone(),
+        &LINK_Q,
+        &INBOX,
+        nap,
+    ))
+    .map_err(|e| format!("link task: {e}"))?;
+    exec.spawn(agentd_hopos::relay::dispatch_task(
+        cluster_client(app, net, exec, 4, CLUSTER_IDLE),
+        key,
+        &DISPATCH_Q,
+        &INBOX,
+        nap,
+    ))
+    .map_err(|e| format!("dispatch task: {e}"))?;
+    Ok(ClusterParts {
+        cfg: cc,
+        clock_ok,
+        lease: &LEASE_Q,
+        link: &LINK_Q,
+        state: &STATE_Q,
+        dispatch: &DISPATCH_Q,
+        wall_ms,
+        init_jobs,
+        node_dead: config::Config::default().timeouts.node_dead_threshold,
+    })
+}
+
+/// Wacht op een verzoek in de bus, een bericht van de cluster, of de tik;
+/// het bericht als dat het eerst kwam.
+async fn wake(hub: &Hub, inbox: &Inbox, tick: impl Future<Output = ()>) -> Option<Mail> {
+    let mut a = pin!(hub.wait());
+    let mut b = pin!(inbox.recv());
+    let mut c = pin!(tick);
+    poll_fn(|cx| {
+        if let Poll::Ready(m) = b.as_mut().poll(cx) {
+            return Poll::Ready(Some(m));
+        }
+        if a.as_mut().poll(cx).is_ready() || c.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 /// De init-jobs van deze boot: uit de env, of anders uit
@@ -356,20 +647,6 @@ where
     }
 }
 
-/// Wacht op `a` of `b`, wat het eerst klaar is.
-async fn either(a: impl Future<Output = ()>, b: impl Future<Output = ()>) {
-    let mut a = pin!(a);
-    let mut b = pin!(b);
-    poll_fn(|cx| {
-        if a.as_mut().poll(cx).is_ready() || b.as_mut().poll(cx).is_ready() {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    })
-    .await;
-}
-
 /// De acceptor van één poort: elke verbinding als waarde naar een vrije werker.
 ///
 /// De listener is al gebonden vóór de spawn: zodra `HOP_UP` op het log
@@ -424,7 +701,9 @@ impl Streams for HubStreams {
 }
 
 /// Eén werker: wacht op een verbinding, leanhttp, elk verzoek als bericht
-/// naar de eigenaar met vak `slot` in de bus.
+/// naar de eigenaar met vak `slot` in de bus. Een doorgifte naar een andere
+/// node (de leader, of een agent als deze node leidt) voert de werker zelf
+/// uit met zijn eigen client (`agentd_hopos::forward`).
 async fn work(
     pool: &'static Handoff<TcpStream>,
     i: usize,
@@ -432,6 +711,7 @@ async fn work(
     hub: &'static Hub,
     slot: usize,
     port: Port,
+    mut client: Client<ClusterConnect, SlotResolver>,
 ) {
     let mut streams = HubStreams { hub, exec, slot };
     loop {
@@ -439,10 +719,12 @@ async fn work(
         let conn = TcpConn::new(stream, exec).with_read_cap(READ_CAP);
         // Een verbinding die eindigt met een termijn of een reset is gewoon
         // een client die wegging; dat is geen logregel waard.
-        let _ = hop_http::serve(
+        let _ = forward::serve(
             conn,
-            async |req| hub.ask(slot, port, req).await,
+            async |req| hub.ask_routed(slot, port, req).await,
             &mut streams,
+            &mut client,
+            port,
         )
         .await;
         pool.free(i);
@@ -488,14 +770,22 @@ async fn resident(app: &'static App) {
     if cfg.insecure_ignored {
         log!("hop: HOPOS_INSECURE=1 ignored: HOPOS_APIKEY is set, the API authenticates");
     }
-    if let Some(s3) = &cfg.s3 {
-        // Endpoint en bucket zijn geen geheimen; sleutel en geheim wel.
-        log!(
-            "hop: S3 configured ({} bucket {}) but cluster state on S3 is not wired yet; running standalone HOP_S3_SKIPPED",
-            s3.endpoint,
-            s3.bucket
-        );
-    }
+    // De lock van de cluster (`HOPOS_LOCK_URL`, of `HOPOS_LOCK_TYPE=s3`); zonder
+    // blijft de node de standalone leader. Een lock die niet klopt, is een
+    // weigering zoals een ontbrekende sleutel: een node die stil standalone
+    // draait naast zijn cluster, is een tweede leader.
+    let cluster_cfg = match ClusterConfig::from_env(
+        |k| app.env(k).map(String::from),
+        &cfg.cluster,
+        cfg.s3.as_ref(),
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            log!("hop: REFUSING to start agent/leader: {e} HOP_LOCK_BAD");
+            core::future::pending::<()>().await;
+            return;
+        }
+    };
     if cfg.memory_defaulted {
         log!(
             "hop: HOPOS_MEMORY not set; planning against {} bytes HOP_MEMORY_DEFAULT",
@@ -506,8 +796,21 @@ async fn resident(app: &'static App) {
         log!("hop: no wall clock from the kernel; task times count from boot HOP_NO_CLOCK");
     }
 
-    if let Err(e) = exec.spawn(clock_task(net, exec)) {
+    // De tijdserver: `HOPOS_NTP` (`host` of `host:poort`), anders pool.ntp.org.
+    let (ntp_host, ntp_port) = sntp::server_from(app.env(sntp::ENV_NTP));
+    if let Err(e) = exec.spawn(clock_task(net, exec, ntp_host, ntp_port)) {
         log!("hop: cannot spawn the clock task: {e}; no SNTP, https refused HOP_SNTP_FAIL");
+    }
+    if let Err(e) = exec.spawn(store_task(
+        app,
+        net,
+        exec,
+        cfg.s3.clone(),
+        cfg.cluster.clone(),
+    )) {
+        log!(
+            "hop: cannot spawn the store task: {e}; app store calls wait and fail HOP_STORE_KERNEL"
+        );
     }
 
     let sys = KernSys::new(net.system_client(), cfg.cores);
@@ -520,7 +823,32 @@ async fn resident(app: &'static App) {
     if images.root_count() == 0 {
         log!("hop: the built-in root certificates did not parse; https refused HOP_TLS_NO_ROOTS");
     }
-    let mut node = Node::new(&cfg, sys, images, now(app, exec));
+    // Het adres zoals de andere nodes deze node zien (achter een NAT anders
+    // dan het slot-adres); de listeners blijven op de poorten van `cfg`.
+    let seen = match lock::advertised(&cfg, |k| app.env(k).map(String::from)) {
+        Ok(c) => c,
+        Err(e) => {
+            log!("hop: REFUSING to start agent/leader: {e} HOP_LOCK_BAD");
+            core::future::pending::<()>().await;
+            return;
+        }
+    };
+    let clustered = cluster_cfg.is_some();
+    let mut node = match cluster_cfg {
+        None => Node::new(&seen, sys, images, now(app, exec)),
+        Some(cc) => {
+            // Geclusterd: de init-jobs zaait wie leider wordt op een schone
+            // clusterstaat, niet de boot van deze node.
+            let specs = init_specs(&cfg, net).await;
+            match start_cluster(app, net, exec, &seen, cc, specs).await {
+                Ok(parts) => Node::new_clustered(&seen, sys, images, now(app, exec), parts),
+                Err(e) => {
+                    log!("hop: cannot start the cluster: {e} HOP_SPAWN_FAIL");
+                    return;
+                }
+            }
+        }
+    };
     // Schoon is: niets overgenomen en niets fout gelezen. Een staat die niet
     // te lezen is, is geen lege staat; dan geen zaad (Go: nooit zaaien op
     // een opslagfout).
@@ -536,7 +864,15 @@ async fn resident(app: &'static App) {
         }
     };
     flush(&mut node);
-    if clean && let Some(specs) = init_specs(&cfg, net).await {
+    if clustered {
+        // De boot-claim: raak, dan leidt deze node nu (de staat laadt eerst).
+        node.cluster_boot(now(app, exec));
+        flush(&mut node);
+    }
+    if clean
+        && !clustered
+        && let Some(specs) = init_specs(&cfg, net).await
+    {
         if let Err(e) = node.seed_init_jobs(&specs, now(app, exec)).await {
             log!("hop: init jobs not seeded: {e} HOP_INIT_FAIL");
         }
@@ -563,7 +899,9 @@ async fn resident(app: &'static App) {
             if spawned.is_err() {
                 break;
             }
-            spawned = exec.spawn(work(pool, i, exec, hub, first_slot + i, port));
+            let tag = u8::try_from(16 + first_slot + i).unwrap_or(u8::MAX);
+            let client = cluster_client(app, net, exec, tag, STREAM_IDLE);
+            spawned = exec.spawn(work(pool, i, exec, hub, first_slot + i, port, client));
         }
         if let Err(e) = spawned {
             log!("hop: cannot spawn the listeners: {e} HOP_SPAWN_FAIL");
@@ -587,8 +925,11 @@ async fn resident(app: &'static App) {
         while let Some((slot, q)) = hub.next() {
             match q {
                 Question::Http(port, req) => {
-                    let reply = node.handle(port, &req, now(app, exec)).await;
-                    hub.answer(slot, Answer::Reply(reply));
+                    let answer = match node.handle_routed(port, &req, now(app, exec)).await {
+                        Routed::Reply(r) => Answer::Reply(r),
+                        Routed::Forward(f) => Answer::Forward(f),
+                    };
+                    hub.answer(slot, answer);
                 }
                 Question::Poll(ask) => {
                     let chunk = node.poll(&ask, now(app, exec));
@@ -598,6 +939,12 @@ async fn resident(app: &'static App) {
             }
             flush(&mut node);
         }
+        // De antwoorden van de taken van de cluster (lease, link, staat,
+        // dispatch); standalone blijft de inbox leeg.
+        while let Some(m) = INBOX.try_recv() {
+            node.on_mail(m, now(app, exec));
+            flush(&mut node);
+        }
         let t = now(app, exec);
         if t >= next_tick {
             node.tick(t).await;
@@ -605,6 +952,9 @@ async fn resident(app: &'static App) {
             flush(&mut node);
         }
         let wait = Duration::from_nanos(next_tick.saturating_sub(now(app, exec)));
-        either(hub.wait(), exec.after(wait)).await;
+        if let Some(m) = wake(hub, &INBOX, exec.after(wait)).await {
+            node.on_mail(m, now(app, exec));
+            flush(&mut node);
+        }
     }
 }

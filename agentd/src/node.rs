@@ -261,7 +261,7 @@ impl Node {
     }
 
     fn flush_notes(&mut self) {
-        for n in self.elector.notes.drain(..) {
+        for n in self.elector.take_notes() {
             eprintln!("{n}");
         }
     }

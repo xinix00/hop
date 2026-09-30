@@ -11,6 +11,11 @@ use alloc::string::String;
 use core::fmt;
 use core::future::Future;
 
+use crate::store::{StoreStatus, StoreTask};
+
+/// De weigering van een kern (of nep) zonder store-rij.
+pub const NO_STORE_QUEUE: &str = "no object store on this node (the kernel has no store queue)";
+
 /// Een kooi op de node (een slot-index, 1 of hoger); geen core-nummer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Slot(pub u32);
@@ -248,6 +253,61 @@ pub trait SystemApi {
 
     /// `SET_CLOCK`: zet de klok van de node (Unix-nanoseconden).
     fn set_clock(&mut self, unix_ns: u64) -> impl Future<Output = Result<(), SysError>>;
+
+    /// `NEXT_STORE`: de volgende store-opdracht van een app, of `None` als
+    /// er binnen `wait_ms` niets kwam (de kern kapt de wacht af op 5 s).
+    ///
+    /// De standaard is een kern zonder store-rij: een luide weigering. De
+    /// store-kant heeft een eigen verbinding nodig (hij wacht lang), dus hij
+    /// hoort niet bij de eigenaar-taak maar bij een eigen taak met een eigen
+    /// implementatie.
+    fn next_store(
+        &mut self,
+        wait_ms: u64,
+    ) -> impl Future<Output = Result<Option<StoreTask>, SysError>> {
+        let _ = wait_ms;
+        async { Err(SysError::Refused(String::from(NO_STORE_QUEUE))) }
+    }
+
+    /// `STORE_READ`: een stuk van het bestand van `task` (een push) vanaf
+    /// `off` in `dst`; geeft de maat van het hele bestand en het aantal
+    /// gelezen bytes.
+    fn store_read(
+        &mut self,
+        task: &StoreTask,
+        off: u64,
+        dst: &mut [u8],
+    ) -> impl Future<Output = Result<(u64, usize), SysError>> {
+        let _ = (task, off, dst);
+        async { Err(SysError::Refused(String::from(NO_STORE_QUEUE))) }
+    }
+
+    /// `STORE_WRITE`: `data` op `off` in het bestand van `task` (een pull);
+    /// op offset 0 kort de kern het bestand eerst in tot nul (vervangend).
+    fn store_write(
+        &mut self,
+        task: &StoreTask,
+        off: u64,
+        data: &[u8],
+    ) -> impl Future<Output = Result<(), SysError>> {
+        let _ = (task, off, data);
+        async { Err(SysError::Refused(String::from(NO_STORE_QUEUE))) }
+    }
+
+    /// `STORE_DONE`: de uitkomst van opdracht `ticket` naar de wachtende
+    /// app: de maat (pull, push: bytes; list: het aantal namen) en de namen
+    /// (list) of de fouttekst. Een fout betekent meestal dat de app al weg
+    /// is; de opdracht is dan weg.
+    fn store_done(
+        &mut self,
+        ticket: u64,
+        status: StoreStatus,
+        size: u64,
+        payload: &[u8],
+    ) -> impl Future<Output = Result<(), SysError>> {
+        let _ = (ticket, status, size, payload);
+        async { Err(SysError::Refused(String::from(NO_STORE_QUEUE))) }
+    }
 
     /// De grootste partitie die de node nu nog in één stuk kan plaatsen; `None` als hij het niet weet.
     ///

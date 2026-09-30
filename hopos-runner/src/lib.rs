@@ -4,7 +4,7 @@
 //! ([`runner::HopRunner`]) is sans-I/O en roept de kern via de trait
 //! [`runner::SystemApi`]; deze crate is de rand die daar bytes van maakt: een
 //! `Call`-frame met een `hopabi::Req` en de juiste opcode uit
-//! [`abi::systemapi::PrivOp`] (0x40 tot en met 0x45), en het antwoord terug
+//! [`abi::systemapi::PrivOp`] (0x40 tot en met 0x4A), en het antwoord terug
 //! naar de typen van de runner ([`abi::systemapi::StreamResp`],
 //! [`abi::systemapi::SlotInfo`], de logregel).
 //!
@@ -53,6 +53,7 @@ use abi::systemapi::{self, CoreClass, PrivOp, SlotInfo, StartReq, StreamResp, St
 use applib::sys;
 
 mod start_mounts;
+mod store;
 
 use runner::{Slot, SlotApp, SlotState, SlotStatus, StartSpec, Streamed, SysError, SystemApi};
 
@@ -426,6 +427,38 @@ impl<C: Call> SystemApi for KernSys<C> {
             Ok((resp, n)) if resp.size == 1 => Some(n),
             _ => None,
         }
+    }
+
+    async fn next_store(&mut self, wait_ms: u64) -> Result<Option<runner::StoreTask>, SysError> {
+        self.wire_next_store(wait_ms).await
+    }
+
+    async fn store_read(
+        &mut self,
+        task: &runner::StoreTask,
+        off: u64,
+        dst: &mut [u8],
+    ) -> Result<(u64, usize), SysError> {
+        self.wire_store_read(task, off, dst).await
+    }
+
+    async fn store_write(
+        &mut self,
+        task: &runner::StoreTask,
+        off: u64,
+        data: &[u8],
+    ) -> Result<(), SysError> {
+        self.wire_store_write(task, off, data).await
+    }
+
+    async fn store_done(
+        &mut self,
+        ticket: u64,
+        status: runner::StoreStatus,
+        size: u64,
+        payload: &[u8],
+    ) -> Result<(), SysError> {
+        self.wire_store_done(ticket, status, size, payload).await
     }
 
     async fn set_clock(&mut self, unix_ns: u64) -> Result<(), SysError> {

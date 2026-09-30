@@ -352,3 +352,63 @@ fn stop_frame_bytes_on_the_wire() {
     assert_eq!(u64::from_le_bytes(f[28..36].try_into().unwrap()), 3000);
     assert_eq!(st.dials, 1, "een blijvende verbinding");
 }
+
+/// De store-ops op de draad: de opdracht uit de rij (job van het slot, het
+/// pad letterlijk terug), een lees met de maat van het hele bestand, een
+/// schrijf, en de afmelding met de status en de namen in `DoneHead`.
+#[test]
+fn store_ops_speak_the_wire_of_abi() {
+    use crate::fake::FakeStore;
+    use runner::{StoreOp, StoreStatus};
+    let (mut s, k) = sys(4);
+    assert_eq!(bl(s.next_store(0)).unwrap(), None, "an empty queue");
+    k.0.borrow_mut()
+        .files
+        .insert(String::from("/data/state.json"), b"hallo".to_vec());
+    let push = k.queue_store(FakeStore {
+        slot: 2,
+        op: hopabi::OP_STORE_PUSH,
+        job: String::from("demo"),
+        key: String::from("/data/state.json"),
+        path: String::from("/data/state.json"),
+    });
+    let t = bl(s.next_store(4_000)).unwrap().unwrap();
+    assert_eq!(
+        (t.ticket, t.slot.0, t.op, t.job.as_str(), t.key.as_str()),
+        (push, 2, StoreOp::Push, "demo", "/data/state.json")
+    );
+    let mut buf = [0u8; 3];
+    assert_eq!(bl(s.store_read(&t, 0, &mut buf)).unwrap(), (5, 3));
+    assert_eq!(&buf, b"hal");
+    assert_eq!(bl(s.store_read(&t, 3, &mut buf)).unwrap(), (5, 2));
+    bl(s.store_done(t.ticket, StoreStatus::Ok, 5, b"")).unwrap();
+    // Twee keer afmelden: de tweede keer is de opdracht weg.
+    assert!(bl(s.store_done(t.ticket, StoreStatus::Ok, 5, b"")).is_err());
+    let pull = k.queue_store(FakeStore {
+        slot: 2,
+        op: hopabi::OP_STORE_PULL,
+        job: String::from("demo"),
+        key: String::from("/data/state.json"),
+        path: String::from("/elders.json"),
+    });
+    let t = bl(s.next_store(0)).unwrap().unwrap();
+    assert_eq!(
+        (t.ticket, t.op, t.path.as_str()),
+        (pull, StoreOp::Pull, "/elders.json")
+    );
+    bl(s.store_write(&t, 0, b"hallo")).unwrap();
+    bl(s.store_done(t.ticket, StoreStatus::NotFound, 0, b"no such object")).unwrap();
+    let k = k.0.borrow();
+    assert_eq!(k.files["/elders.json"], b"hallo");
+    assert_eq!(k.store_done[0], (push, hopabi::STATUS_OK, 5, alloc::vec![]));
+    assert_eq!(
+        k.store_done[1],
+        (pull, hopabi::STATUS_NO_ENT, 0, b"no such object".to_vec())
+    );
+    // De opcodes van abi, in volgorde.
+    let store_ops: alloc::vec::Vec<u8> = k.ops.iter().copied().filter(|&o| o >= 0x47).collect();
+    assert_eq!(
+        store_ops,
+        [0x47, 0x47, 0x48, 0x48, 0x4A, 0x4A, 0x47, 0x49, 0x4A]
+    );
+}

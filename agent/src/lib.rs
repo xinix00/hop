@@ -34,6 +34,7 @@ extern crate alloc;
 
 mod action;
 mod election;
+mod elector;
 mod handoff;
 mod health;
 mod ids;
@@ -44,6 +45,7 @@ use core::fmt;
 
 pub use action::{Action, Event, Outcome, Probe, StartError, StartOk, Status};
 pub use election::{Discoverer, Election, LinkError, Request};
+pub use elector::{Elector, LeaseOp, LeaseOps, LeaseReply};
 pub use handoff::{HANDOFF_VERSION, Store, StoreError};
 pub use node::{Agent, Capacity};
 pub use settings::Settings;

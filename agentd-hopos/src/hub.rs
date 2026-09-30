@@ -31,6 +31,7 @@ use api::Request;
 use hop_http::{Ask, Chunk, Reply};
 
 use crate::Port;
+use crate::forward::{Forward, Routed};
 
 /// Wat een verbindingstaak de eigenaar vraagt.
 #[derive(Debug, PartialEq, Eq)]
@@ -48,6 +49,9 @@ pub enum Question {
 pub enum Answer {
     /// Op een [`Question::Http`].
     Reply(Reply),
+    /// Op een [`Question::Http`]: een doorgifte naar een andere node, die de
+    /// verbindingstaak zelf uitvoert (`forward::serve`).
+    Forward(Forward),
     /// Op een [`Question::Poll`].
     Chunk(Chunk),
 }
@@ -80,11 +84,23 @@ impl Hub {
 
     /// Stuurt `req` van verbindingstaak `slot` naar de eigenaar en wacht op het antwoord.
     pub async fn ask(&self, slot: usize, port: Port, req: Request) -> Reply {
+        match self.ask_routed(slot, port, req).await {
+            Routed::Reply(r) => r,
+            Routed::Forward(f) => Reply::Plain(crate::node::refuse_forward(&f)),
+        }
+    }
+
+    /// Als [`Hub::ask`], met een doorgifte als mogelijk antwoord.
+    pub async fn ask_routed(&self, slot: usize, port: Port, req: Request) -> Routed {
         match self.question(slot, Question::Http(port, req)).await {
-            Answer::Reply(r) => r,
+            Answer::Reply(r) => Routed::Reply(r),
+            Answer::Forward(f) => Routed::Forward(f),
             // Een eigenaar die op een verzoek een hap zet, is een fout in
             // de eigenaar; de verbinding krijgt een luide 500.
-            Answer::Chunk(_) => Reply::Plain(api::Response::error(500, "owner answered a chunk")),
+            Answer::Chunk(_) => Routed::Reply(Reply::Plain(api::Response::error(
+                500,
+                "owner answered a chunk",
+            ))),
         }
     }
 
@@ -92,7 +108,7 @@ impl Hub {
     pub async fn poll(&self, slot: usize, ask: Ask) -> Chunk {
         match self.question(slot, Question::Poll(ask)).await {
             Answer::Chunk(c) => c,
-            Answer::Reply(_) => Chunk {
+            Answer::Reply(_) | Answer::Forward(_) => Chunk {
                 done: true,
                 ..Chunk::default()
             },

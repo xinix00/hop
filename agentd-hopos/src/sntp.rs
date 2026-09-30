@@ -9,7 +9,7 @@
 //! `pool.ntp.org`, OLD/metal/cmd/hopos/main.go).
 //!
 //! Dit module bezit het pakket en zijn strenge lezing ([`request`],
-//! [`parse`]) en één synchronisatie ([`sync`]): naam opzoeken, vragen,
+//! [`parse`]) en één synchronisatie ([`sync()`]): naam opzoeken, vragen,
 //! lezen. Het versturen doet een [`NtpLink`] (in de binary een UDP-socket
 //! van applib, in de tests een nep-server), het opzoeken een [`Resolve`].
 //!
@@ -34,6 +34,27 @@ pub const PACKET: usize = 48;
 
 /// De server van de node, zoals in Go.
 pub const SERVER: &str = "pool.ntp.org";
+
+/// De env-sleutel voor een eigen server (`hopos.ntp`): `host` of
+/// `host:poort`. Een LAN zonder internet, of QEMU achter slirp, heeft zijn
+/// eigen tijdserver; een geclusterde node doet pas mee met een gezette klok.
+pub const ENV_NTP: &str = "HOPOS_NTP";
+
+/// De server en poort uit de waarde van [`ENV_NTP`]; zonder (of leeg)
+/// [`SERVER`] op [`PORT`]. Een poort die geen getal is, maakt het geheel een
+/// naam: de resolver zegt dan luid dat die niet bestaat.
+pub fn server_from(v: Option<&str>) -> (String, u16) {
+    let Some(v) = v.map(str::trim).filter(|v| !v.is_empty()) else {
+        return (String::from(SERVER), PORT);
+    };
+    match v.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => match port.parse::<u16>() {
+            Ok(p) if p > 0 => (String::from(host), p),
+            _ => (String::from(v), PORT),
+        },
+        _ => (String::from(v), PORT),
+    }
+}
 
 /// Hoe vaak één synchronisatie vraagt voor ze opgeeft (Go: drie keer).
 pub const ATTEMPTS: usize = 3;
