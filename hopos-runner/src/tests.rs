@@ -31,7 +31,7 @@ fn sys(max_slots: usize) -> (Sys, FakeKern) {
     (KernSys::new(k.client(), 4), k)
 }
 
-fn spec(size: u64) -> StartSpec {
+pub(crate) fn spec(size: u64) -> StartSpec {
     let mut env = BTreeMap::new();
     env.insert(String::from("ER_PORT_HTTP"), String::from("8000"));
     StartSpec {
@@ -49,6 +49,33 @@ fn spec(size: u64) -> StartSpec {
 }
 
 const ELF: &[u8] = b"\x7fELF-an-app-image";
+
+#[test]
+fn volumes_travel_in_the_start_and_the_kern_decodes_them() {
+    let (mut s, k) = sys(4);
+    let mut sp = spec(ELF.len() as u64);
+    sp.mounts
+        .insert(String::from("/volumes/media"), String::from("/media"));
+    sp.mounts
+        .insert(String::from("/volumes/demo"), String::from("data"));
+    let slot = bl(s.start_slot(&sp)).unwrap();
+    let got = k.0.borrow().slots[&u64::from(slot.0)].mounts.clone();
+    assert_eq!(
+        got,
+        [
+            (String::from("data"), String::from("/volumes/demo")),
+            (String::from("/media"), String::from("/volumes/media")),
+        ]
+    );
+    // Te veel volumes gaan niet de draad op, en er wordt niets geclaimd.
+    for i in 0..systemapi::MAX_START_MOUNTS {
+        sp.mounts
+            .insert(alloc::format!("/volumes/{i}"), alloc::format!("/v/{i}"));
+    }
+    let before = k.0.borrow().ops.len();
+    assert!(bl(s.start_slot(&sp)).is_err());
+    assert_eq!(k.0.borrow().ops.len(), before);
+}
 
 #[test]
 fn start_slot_is_op_0x40_with_the_start_head_of_abi() {
@@ -98,6 +125,7 @@ fn start_payload_bytes_roundtrip_through_abi() {
         env: &env,
         ports: b"",
         job: b"web",
+        ..Default::default()
     };
     let mut buf = [0u8; 256];
     let n = req.encode(&mut buf, 3).unwrap();
@@ -125,6 +153,7 @@ fn start_ports_use_the_wire_form_of_abi() {
         env: &env,
         ports: &blob[..n],
         job: b"web",
+        ..Default::default()
     };
     let mut buf = [0u8; 256];
     let len = req.encode(&mut buf, 3).unwrap();

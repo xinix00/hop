@@ -102,7 +102,8 @@ impl SlotStatus {
 /// `image_size`, `cores`, `pool_cores`, `core_class`, `sharegroup`, de env
 /// als `key=val\n`-blob, de poorten (elk nummer één keer; de kern zet ze
 /// van de uplink door naar het slot en trekt ze bij de stop in) en `job`.
-/// `mounts` gaan nog niet mee: dat is de naad van rpc/mounts (PORT.md §7).
+/// `mounts` gaan mee sinds de ABI van HopOS alpha.11: de kern zet ze in de
+/// mount-tabel van de levensduur (gedeelde map onder het lokale pad).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartSpec {
     /// De maat van het image in bytes; verplicht: de plaatsing valideert ertegen.

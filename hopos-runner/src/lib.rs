@@ -51,6 +51,9 @@ use core::time::Duration;
 use abi::hopabi;
 use abi::systemapi::{self, CoreClass, PrivOp, SlotInfo, StartReq, StreamResp, StreamState};
 use applib::sys;
+
+mod start_mounts;
+
 use runner::{Slot, SlotApp, SlotState, SlotStatus, StartSpec, Streamed, SysError, SystemApi};
 
 /// Het pad van de agent-staat in de eigen map van Hop op hopfs.
@@ -258,6 +261,7 @@ impl<C: Call> SystemApi for KernSys<C> {
     }
 
     async fn start_slot(&mut self, spec: &StartSpec) -> Result<Slot, SysError> {
+        let mounts = start_mounts::blob(spec)?;
         let env = env_blob(&spec.env);
         let too_big =
             |what: &str| SysError::Refused(alloc::format!("{what} does not fit the start request"));
@@ -269,7 +273,7 @@ impl<C: Call> SystemApi for KernSys<C> {
                 systemapi::MAX_START_PORTS
             ))
         })?;
-        let req = StartReq {
+        let mut req = StartReq {
             memory_limit: spec.mem_limit,
             image_size: spec.image_size,
             cores: u16::try_from(spec.cores).map_err(|_| too_big("cores"))?,
@@ -279,7 +283,9 @@ impl<C: Call> SystemApi for KernSys<C> {
             env: &env,
             ports: port_bytes.get(..port_len).unwrap_or_default(),
             job: spec.job.as_bytes(),
+            ..Default::default()
         };
+        start_mounts::attach(&mut req, &mounts);
         // De helper van abi schrijft de hele payload (kop, jobnaam, StartHead,
         // groep, env, poorten); de client schrijft kop en pad zelf, dus hier
         // alleen het deel erachter. Zo is er één plek die de StartHead-bytes
@@ -287,7 +293,7 @@ impl<C: Call> SystemApi for KernSys<C> {
         let skip = hopabi::HDR_LEN + spec.job.len();
         let mut buf = alloc::vec![
             0u8;
-            skip + systemapi::START_HEAD_LEN + req.group.len() + env.len() + port_len
+            skip + systemapi::START_HEAD_LEN + req.group.len() + env.len() + port_len + mounts.len()
         ];
         let n = req
             .encode(&mut buf, 0)

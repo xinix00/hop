@@ -39,6 +39,8 @@ pub struct FakeSlot {
     pub env: Vec<u8>,
     /// De gepubliceerde poorten uit de start.
     pub ports: Vec<u16>,
+    /// De volumes uit de start, `(lokaal, gedeeld)` zoals de kern ze leest.
+    pub mounts: Vec<(String, String)>,
     /// De partitiemaat.
     pub memory_limit: u64,
     /// De aangekondigde image-maat.
@@ -222,6 +224,20 @@ fn answer(op: u8, seq: u32, status: u16, size: u64, data: &[u8]) -> Vec<u8> {
     f
 }
 
+/// De volumes van een start, gelezen met de decoder van abi.
+fn fake_mounts(s: &StartReq<'_>) -> Result<Vec<(String, String)>, abi::Error> {
+    systemapi::Mounts::new(s.mounts)
+        .map(|m| {
+            m.map(|m| {
+                (
+                    String::from_utf8_lossy(m.local).into_owned(),
+                    String::from_utf8_lossy(m.shared).into_owned(),
+                )
+            })
+        })
+        .collect()
+}
+
 impl FakeKern {
     /// Beantwoordt één call zoals `kern::system` hem zou beantwoorden.
     fn handle(&self, req: &Req<'_>) -> Vec<u8> {
@@ -245,10 +261,14 @@ impl FakeKern {
                 while k.slots.contains_key(&slot) {
                     slot += 1;
                 }
+                let Ok(mounts) = fake_mounts(&s) else {
+                    return err("bad start mounts");
+                };
                 let fresh = FakeSlot {
                     job: String::from_utf8_lossy(s.job).into_owned(),
                     env: s.env.to_vec(),
                     ports: s.ports().collect(),
+                    mounts,
                     memory_limit: s.memory_limit,
                     size: s.image_size,
                     ..FakeSlot::default()
