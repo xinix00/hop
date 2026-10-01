@@ -38,7 +38,6 @@ mod capnp;
 mod config;
 mod edge;
 mod edgeproto;
-mod entropy;
 mod ingress;
 mod json;
 mod origin;
@@ -97,10 +96,6 @@ async fn cloudflared(app: &'static App) {
         cfg.table_from
     );
     RULES.borrow().describe(|l| log!("cloudflared-lean:   {l}"));
-    log!(
-        "cloudflared-lean: TLS randomness from timer jitter only ({} samples): the slot has no hardware RNG yet HOPOS_CFTUNNEL_ENTROPY_WEAK",
-        entropy::HARVEST_ROUNDS
-    );
 
     // Eén keer bij de start, en voor de levensduur van de app: de taken lenen
     // het, niemand schrijft het nog.

@@ -4,7 +4,9 @@
 //! Bezit de CA's (`cfroots.pem`, dezelfde drie die cloudflared inbakt), de
 //! dial naar één edge-adres met de handshake binnen een termijn, en de
 //! adapter die een leanhttps-verbinding de vorm geeft die leanh2 leest. Niet
-//! wat er daarna over de verbinding gaat (`crate::tunnel`).
+//! wat er daarna over de verbinding gaat (`crate::tunnel`), en niet de
+//! willekeur zelf: die is van `applib::rand`, [`Rand`] geeft hem alleen de
+//! vorm van lean.
 //!
 //! Drie dingen die het protocol anders doet dan je zou denken, gemeten door
 //! de Go-voorganger tegen `region1.v2.argotunnel.com:7844` (19-08) en
@@ -27,6 +29,7 @@ use core::task::{Context, Poll};
 use core::time::Duration;
 
 use applib::appnet::TcpStream;
+use applib::rand::Rng;
 use applib::rt::Exec;
 use applib::tcp::TcpConn;
 use leanhttp::{Close, Dial, IoError, Target};
@@ -35,7 +38,6 @@ use leantls::{ChainVerifier, Roots, Trust};
 use sync::{Either, select};
 
 use crate::b64;
-use crate::entropy::Pool;
 
 /// Waar origintunneld luistert.
 pub(crate) const PORT: u16 = 7844;
@@ -105,6 +107,24 @@ pub(crate) fn roots() -> Result<Roots<'static>, RootsError> {
     Roots::from_concatenated_der(der).map_err(RootsError::Tls)
 }
 
+/// De willekeur van één verbindingstaak: een [`Rng`] van applib (het zaad
+/// van de kern, gemengd met jitter) in de twee vormen die lean vraagt, de 96
+/// bytes van een handshake en een `leanrand::Source` voor de spreiding.
+pub(crate) struct Rand(pub(crate) Rng);
+
+impl Rand {
+    /// Een `leantls::Entropy` voor één handshake.
+    fn entropy(&mut self) -> leantls::Entropy {
+        leantls::Entropy::new(self.0.array())
+    }
+}
+
+impl leanrand::Source for Rand {
+    fn fill(&mut self, buf: &mut [u8]) {
+        self.0.fill(buf);
+    }
+}
+
 /// Kale TCP naar één vast adres; de host uit de URL is alleen de SNI-naam.
 struct Tcp {
     /// Het adres van de edge.
@@ -152,10 +172,10 @@ pub(crate) async fn dial(
     ip: [u8; 4],
     roots: Roots<'static>,
     now_unix: u64,
-    pool: &mut Pool,
+    rand: &mut Rand,
 ) -> Result<EdgeIo, DialError> {
     let verifier = ChainVerifier::new(roots, now_unix);
-    let mut tls = TlsDial::new(Tcp { ip, exec }, Trust::Chain(&verifier), || pool.entropy());
+    let mut tls = TlsDial::new(Tcp { ip, exec }, Trust::Chain(&verifier), || rand.entropy());
     let target = Target {
         https: true,
         host: SERVER_NAME,

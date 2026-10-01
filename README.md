@@ -68,7 +68,7 @@ op het LAN zijn eigen adres.
 | `HOPOS_CFTUNNEL_RETRY index=<i> up=<n>` | een verbinding viel of kwam niet op, met de reden en de wachttijd |
 | `HOPOS_CFTUNNEL_GIVEUP index=<i>` | de edge zei "niet opnieuw" (een ingetrokken of verkeerd token) |
 | `HOPOS_CFTUNNEL_FAIL <reden>` | de app stopt: de env is onbruikbaar, of de edge weigerde elke verbinding met "niet opnieuw" |
-| `HOPOS_CFTUNNEL_ENTROPY_WEAK` | eenmalig: de willekeur van TLS komt uit timer-jitter, het slot heeft nog geen hardware-RNG |
+| `HOPOS_APP_RNG source=<bron>` | eenmalig, van applib: waar de willekeur van TLS vandaan komt (`hardware` of `jitter`, het zaad van de kern gemengd met eigen jitter); `HOPOS_APP_RNG_NONE` als de kern geen zaad legt |
 
 ## Bouwen en toetsen
 
@@ -82,7 +82,7 @@ rust-objcopy --strip-debug target/aarch64-unknown-none-softfloat/release/cloudfl
 De host-toetsen leggen de protocollagen vast: de registratieberichten en de
 antwoorden byte voor byte tegen wat de Go-voorganger maakte, het token en de
 Cap'n Proto-rondgang uit de Go-toetsen, de ingress-regels uit de Go-toetsen,
-de kopbundel tegen Go, SHA-256 tegen FIPS 180-2, en de drie CA's door leantls.
+de kopbundel tegen Go, en de drie CA's door leantls.
 
 ## Op de O6N
 

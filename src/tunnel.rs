@@ -39,8 +39,9 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
 
 use applib::appnet::{self, NetError};
+use applib::rand::Rng;
 use applib::rt::Exec;
-use applib::{App, clock, log};
+use applib::{App, log};
 use leanh2::{GoAway, Handler, Request, Response, ServeError};
 use leanhttp::IoError;
 use leantls::Roots;
@@ -48,9 +49,8 @@ use sync::{Either, Local, LocalCell, Signal, select};
 
 use crate::capnp;
 use crate::config::MAX_CONNECTIONS;
-use crate::edge::{self, DialError};
+use crate::edge::{self, DialError, Rand};
 use crate::edgeproto::{self, Bundle, Source};
-use crate::entropy::{HARVEST_ROUNDS, Pool};
 use crate::ingress::{self, Table, Update};
 use crate::json;
 use crate::origin;
@@ -242,7 +242,9 @@ impl fmt::Display for Why {
 /// meer heeft. Eén taak per index; de indexen samen zijn de vaste pool.
 pub(crate) async fn keep_connected(sh: &'static Shared, index: u8) {
     LIVE.fetch_add(1, Relaxed);
-    let mut pool = pool_for(sh, index);
+    // Een eigen staat per taak, met de index erin.
+    let mut rand = Rand(Rng::open(sh.app));
+    rand.0.stir(&[index]);
     let mut backoff = BACKOFF_MIN;
     let edges = sh.edges.len().max(1);
     for attempt in 0usize.. {
@@ -252,7 +254,7 @@ pub(crate) async fn keep_connected(sh: &'static Shared, index: u8) {
             .edges
             .get((usize::from(index) + attempt) % edges)
             .map_or("", String::as_str);
-        let (was_up, why) = connect_once(sh, index, name, &mut pool).await;
+        let (was_up, why) = connect_once(sh, index, name, &mut rand).await;
         if was_up {
             backoff = BACKOFF_MIN;
         }
@@ -272,7 +274,7 @@ pub(crate) async fn keep_connected(sh: &'static Shared, index: u8) {
                 backoff = r.retry_after.min(BACKOFF_MAX * 10);
             }
         }
-        let wait = leanrand::jitter(&mut pool, backoff);
+        let wait = leanrand::jitter(&mut rand, backoff);
         log!(
             "cloudflared-lean: connection {index} lost: {why}; retrying in {} ms HOPOS_CFTUNNEL_RETRY index={index} up={}",
             wait.as_millis(),
@@ -283,22 +285,9 @@ pub(crate) async fn keep_connected(sh: &'static Shared, index: u8) {
     }
 }
 
-/// De willekeur van één verbindingstaak: het slot, de index, de wandklok en
-/// de jitter van de teller.
-fn pool_for(sh: &Shared, index: u8) -> Pool {
-    let mut seed = [0u8; 25];
-    seed[..8].copy_from_slice(&sh.app.slot().to_le_bytes());
-    seed[8..16].copy_from_slice(&sh.app.wall_ns().unwrap_or(0).to_le_bytes());
-    seed[16..24].copy_from_slice(&sh.exec.now().to_le_bytes());
-    seed[24] = index;
-    let mut pool = Pool::new(&seed);
-    pool.harvest(clock::now_ns, HARVEST_ROUNDS);
-    pool
-}
-
 /// Eén verbinding van begin tot eind; geeft of hij geregistreerd was en
 /// waarom hij eindigde.
-async fn connect_once(sh: &'static Shared, index: u8, name: &str, pool: &mut Pool) -> (bool, Why) {
+async fn connect_once(sh: &'static Shared, index: u8, name: &str, rand: &mut Rand) -> (bool, Why) {
     let ip = match appnet::resolve(name).await {
         Ok(ip) => ip,
         Err(e) => return (false, Why::Resolve(e)),
@@ -306,13 +295,10 @@ async fn connect_once(sh: &'static Shared, index: u8, name: &str, pool: &mut Poo
     let Some(wall) = sh.app.wall_ns() else {
         return (false, Why::NoClock);
     };
-    pool.stir(&sh.exec.now().to_le_bytes());
-    let io = match edge::dial(sh.exec, ip, sh.roots, wall / 1_000_000_000, pool).await {
+    let io = match edge::dial(sh.exec, ip, sh.roots, wall / 1_000_000_000, rand).await {
         Ok(io) => io,
         Err(e) => return (false, Why::Dial(e)),
     };
-    // De tijd van de handshake is een gebeurtenis van buiten.
-    pool.stir(&sh.exec.now().to_le_bytes());
 
     let s = slot(index);
     s.registered.set(false);
