@@ -1,22 +1,28 @@
-//! De willekeur van een TLS-handshake, uit timer-jitter.
+//! De willekeur van een TLS-handshake: het zaad van de kern plus
+//! timer-jitter.
 //!
 //! Een handshake verbruikt 96 bytes willekeur (`leantls::Entropy`): de
 //! X25519-sleutel en twee willekeurige velden. Wie die bytes kan
 //! voorspellen, kan een verbinding meelezen en een artifact onderweg
-//! vervangen, ondanks de ketenverificatie. De app heeft geen eigen bron:
-//! de slot-kooi geeft geen RNG door, de cores van QEMU virt en de Pi's
-//! hebben geen `RNDR`, en de kern biedt nog geen random-op.
+//! vervangen, ondanks de ketenverificatie.
 //!
-//! Dus verzamelen we wat er is: de onderste bits van de teller rond werk
-//! waarvan de duur schommelt (cache, DRAM-refresh, de emulator), en de
-//! tijd van gebeurtenissen van buiten (een download, een tik). Alles gaat
-//! door SHA-256 in een staat van 32 bytes; elke trekking hasht staat en
-//! teller naar 96 bytes en ratelt de staat daarna door, zodat een
-//! uitgelekte trekking geen eerdere of latere verraadt.
+//! De bron: de kern legt 32 bytes uit zijn eigen DRBG op de control-page
+//! van het slot (`CTRL_RNG_SEED`, HopOS v3 sinds 30-09), gezaaid uit de
+//! TRNG van het board (de RNG200 van de Pi's, de RKRNG van de Radxa, RNDR
+//! op de O6N, de SMCCC TRNG op de Altra) of, zonder TRNG, uit jitter.
+//! `applib::rand` haalt dat zaad door een eigen DRBG; main.rs mengt 32
+//! bytes daarvan in deze pool (`kernel_seed`).
 //!
-//! Dit is zwakker dan een hardware-RNG en dat staat op de console
-//! (`HOP_TLS_ENTROPY_WEAK`). De echte bron is een random-op van de kern
-//! over de board-RNG; tot die er is, is dit de best beschikbare.
+//! Daarnaast verzamelen we wat er lokaal is: de onderste bits van de
+//! teller rond werk waarvan de duur schommelt (cache, DRAM-refresh, de
+//! emulator), en de tijd van gebeurtenissen van buiten (een download, een
+//! tik). Alles gaat door SHA-256 in een staat van 32 bytes; elke trekking
+//! hasht staat en teller naar 96 bytes en ratelt de staat daarna door,
+//! zodat een uitgelekte trekking geen eerdere of latere verraadt.
+//!
+//! De console zegt welke het werd: `HOP_TLS_ENTROPY_HW` met een
+//! hardware-zaad, `HOP_TLS_ENTROPY_WEAK` als het zaad van de kern zelf uit
+//! jitter kwam of er geen zaad lag (een oudere kern).
 
 use auth::Sha256;
 

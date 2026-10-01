@@ -688,6 +688,20 @@ fn adopt_running_restores_logs() {
 }
 
 #[test]
+fn sweep_strays_stops_only_the_residents_nobody_owns() {
+    let mut r = runner(4, &[]);
+    r.system_mut().live(2);
+    r.system_mut().live(3);
+    r.system_mut().live(4);
+    r.adopt_running(&[("kept".into(), Slot(2))]);
+    assert_eq!(bl(r.sweep_strays()), [Slot(3), Slot(4)]);
+    assert_eq!(r.system().stops, [3, 4]);
+    assert!(r.system().slot(2).core_on);
+    // Een tweede ronde vindt niets meer.
+    assert!(bl(r.sweep_strays()).is_empty());
+}
+
+#[test]
 fn log_broadcaster_write() {
     let mut ring = LogRing::new(3);
     ring.write("a");

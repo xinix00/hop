@@ -13,10 +13,11 @@
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use crate::env::{attr_env_vars, port_env_vars};
 use crate::logs::{LogPolicy, LogRing, LogStore};
-use crate::system::{Slot, SlotApp, StartSpec, Streamed, SysError, SystemApi};
+use crate::system::{Slot, SlotApp, SlotState, StartSpec, Streamed, SysError, SystemApi};
 use crate::{Error, Result, RunState, Runner, StartRequest, Started, Stream, TaskRef};
 
 /// Het coöperatieve venster voordat een stop escaleert naar de stage-2-intrekking.
@@ -142,6 +143,35 @@ impl<S: SystemApi> HopRunner<S> {
             );
             self.logs.open(id);
         }
+    }
+
+    /// Stopt de bewoners die van niemand zijn en geeft hun slots.
+    ///
+    /// Na een herstart van Hop draaien de apps door, en wie niet in de
+    /// bewaarde staat stond (een job die rond de herstart verwijderd werd,
+    /// een record dat de leader kwijt is) houdt zijn slot tot de volgende
+    /// koude boot: de kern kiest het laagste vrije slot en kent geen
+    /// eigenaar. GEMETEN 01-10 op de Pi 4: twee uitgemeten benches in slot 3
+    /// en 4 die Hop niet kende; elke plaatsing en elke flip liep daarna op
+    /// "slot 5 out of range 1..4". Een node heeft één Hop, dus een bewoner
+    /// die hij na [`adopt_running`](Self::adopt_running) niet kent, is van
+    /// niemand. Alleen de slots boven het eigen (1); een stop die de kern
+    /// niet bevestigt, blijft zijn quarantaine (hij wordt niet hergebruikt).
+    pub async fn sweep_strays(&mut self) -> Vec<Slot> {
+        let mut stopped = Vec::new();
+        for i in 2..=self.sys.num_cores().max(2) {
+            let slot = Slot(i);
+            if self.in_use.contains_key(&slot) {
+                continue;
+            }
+            if self.sys.slot_status(slot).await.state != SlotState::Running {
+                continue;
+            }
+            if self.sys.stop_slot(slot, HOP_STOP_TIMEOUT_MS).await.is_ok() {
+                stopped.push(slot);
+            }
+        }
+        stopped
     }
 
     /// CPU (procent van de eigen cores) en werkelijk geheugen, zoals de app ze meldt.

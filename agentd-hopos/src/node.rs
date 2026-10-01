@@ -282,6 +282,12 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
             })
             .collect();
         self.runner.adopt_running(&slots);
+        for slot in self.runner.sweep_strays().await {
+            self.lines.push(format!(
+                "hop: stray resident in slot {} stopped: not in the saved state HOP_STRAY_STOPPED slot={}",
+                slot.0, slot.0
+            ));
+        }
         self.drain(now).await;
         Ok(slots.len())
     }

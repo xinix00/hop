@@ -31,7 +31,7 @@
 //! Markers op het log: `HOP_UP`, `HOP_LEADER`, `HOP_JOB_PLACED slot=N`,
 //! `HOP_CLOCK_SYNCED`, `HOP_INIT_SEEDED`, en de weigeringen en degradaties
 //! `HOPOS_API_NO_AUTH`, `HOPOS_API_INSECURE`, `HOP_NET_FAIL`,
-//! `HOP_SNTP_FAIL`, `HOP_CLOCK_FAIL`, `HOP_TLS_ENTROPY_WEAK`,
+//! `HOP_SNTP_FAIL`, `HOP_CLOCK_FAIL`, `HOP_TLS_ENTROPY_WEAK`, `HOP_TLS_ENTROPY_HW`,
 //! `HOP_INIT_FAIL`. In een cluster ook `HOP_CLUSTER`, `HOP_CLUSTER_JOIN`,
 //! `HOP_LEADER_LOADING`, `HOP_STATE_LOADED`, `HOP_LEADER_STOPPED`, en de
 //! weigeringen `HOP_LOCK_BAD`, `HOP_CLUSTER_NO_CLOCK`, `HOP_LEASE_STORE`,
@@ -74,6 +74,7 @@ use agentd_hopos::{
     Question, Resolve,
 };
 use applib::appnet::{self, Endpoint, Net, NetError, TcpListener, TcpStream};
+use applib::rand::{Origin, Rng};
 use applib::rt::Exec;
 use applib::{App, EXEC, log};
 use discovery::Discovery;
@@ -388,6 +389,7 @@ async fn store_task(
         let mut pool = Pool::new(&app.slot().to_le_bytes());
         pool.stir(&exec.now().to_le_bytes());
         pool.harvest(applib::clock::now_ns, HARVEST_ROUNDS);
+        kernel_seed(app, &mut pool);
         let b = bucket::S3Bucket::new(
             &cfg,
             SlotConnect { net, exec },
@@ -454,7 +456,10 @@ async fn store_task(
     }
 }
 
-/// De willekeur voor TLS: het slot, de klok, en de jitter van de teller.
+/// De willekeur voor TLS: het slot, de klok, de jitter van de teller, en
+/// het zaad dat de kern op de control-page legt (`applib::rand`). Eén
+/// regel over de bron: `HOP_TLS_ENTROPY_HW` als dat zaad uit een
+/// hardware-RNG komt, anders `HOP_TLS_ENTROPY_WEAK` met de reden.
 fn entropy(app: &App, exec: &'static Exec) -> Pool {
     let mut seed = Vec::new();
     seed.extend_from_slice(&app.slot().to_le_bytes());
@@ -462,10 +467,28 @@ fn entropy(app: &App, exec: &'static Exec) -> Pool {
     seed.extend_from_slice(&exec.now().to_le_bytes());
     let mut pool = Pool::new(&seed);
     pool.harvest(applib::clock::now_ns, HARVEST_ROUNDS);
-    log!(
-        "hop: TLS randomness from timer jitter only ({HARVEST_ROUNDS} samples): the slot has no hardware RNG yet HOP_TLS_ENTROPY_WEAK"
-    );
+    match kernel_seed(app, &mut pool) {
+        o if o.is_hardware() => log!(
+            "hop: TLS randomness from the kernel seed ({o}, hardware) mixed with timer jitter ({HARVEST_ROUNDS} samples) HOP_TLS_ENTROPY_HW source={o}"
+        ),
+        Origin::None => log!(
+            "hop: TLS randomness from timer jitter only ({HARVEST_ROUNDS} samples): the kernel put no seed on the control page (an older kernel) HOP_TLS_ENTROPY_WEAK"
+        ),
+        o => log!(
+            "hop: TLS randomness from the kernel seed and timer jitter ({HARVEST_ROUNDS} samples), but the kernel seeds itself from {o}: this node has no hardware RNG HOP_TLS_ENTROPY_WEAK"
+        ),
+    }
     pool
+}
+
+/// Mengt 32 bytes uit de DRBG van applib (het zaad van de kern plus
+/// jitter) in `pool` en geeft de bron van dat zaad.
+fn kernel_seed(app: &App, pool: &mut Pool) -> Origin {
+    let mut rng = Rng::open(app);
+    let mut b = rng.array::<32>();
+    pool.stir(&b);
+    b.fill(0);
+    rng.origin()
 }
 
 /// Een eigen pool voor een client van de cluster (`tag` maakt hem anders
@@ -477,6 +500,7 @@ fn quiet_pool(app: &App, exec: &'static Exec, tag: u8) -> Pool {
     seed.extend_from_slice(&exec.now().to_le_bytes());
     let mut pool = Pool::new(&seed);
     pool.harvest(applib::clock::now_ns, HARVEST_ROUNDS);
+    kernel_seed(app, &mut pool);
     pool
 }
 
