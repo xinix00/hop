@@ -35,15 +35,15 @@ sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.0-alpha.18" }
 discovery = { path = "../discovery" }
 # De clusterlock op S3 (`HOPOS_S3_*`): de getekende verzoeken, over het
 # transport van de bewoner (leanhttps met de wortels, zoals de artifacts).
-leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.2" }
-leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.2" }
+leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.3" }
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.3" }
 # HTTPS voor artifacts (GitHub releases): leanhttp over leantls, met
 # ketenverificatie tegen de ingebakken Mozilla-wortels (`roots.der`).
-leanhttps = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.2" }
-leantls = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.2" }
+leanhttps = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.3" }
+leantls = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.3" }
 # Cookies voor artifact-servers die er een zetten tussen twee redirects;
 # op dezelfde tag, zodat de lean-crates één bron delen.
-leancookie = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.2" }
+leancookie = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.3" }
 
 [lints]
 workspace = true
