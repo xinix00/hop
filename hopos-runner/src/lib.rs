@@ -93,6 +93,9 @@ pub struct KernSys<C> {
     cores: u32,
     offsets: BTreeMap<Slot, u64>,
     last: BTreeMap<Slot, SlotStatus>,
+    /// De vorige meetlat-stand per slot (idle-ns, wekken, kernklok): het
+    /// cpu-procent is het verschil tussen twee standen (docs/apps.md).
+    samples: BTreeMap<Slot, (u64, u64, u64)>,
 }
 
 impl<C: Call> KernSys<C> {
@@ -103,6 +106,7 @@ impl<C: Call> KernSys<C> {
             cores,
             offsets: BTreeMap::new(),
             last: BTreeMap::new(),
+            samples: BTreeMap::new(),
         }
     }
 
@@ -228,6 +232,37 @@ fn slot_app(raw: u64) -> SlotApp {
 }
 
 /// Een [`SlotInfo`] van de draad als [`SlotStatus`] van de runner.
+impl<C> KernSys<C> {
+    /// Het cpu-procent van een draaiend slot uit twee standen van de meetlat
+    /// van de app (`CTRL_IDLE` als ns, kernklok): bezet = 100 - idle over
+    /// het interval, gedeeld over zijn cores. Korter dan een seconde na de
+    /// vorige stand blijft het vorige getal staan; de eerste stand geeft
+    /// nog niets.
+    fn cpu_pct(&mut self, slot: Slot, i: &SlotInfo) -> Option<u8> {
+        if i.slot_state() != Some(systemapi::SlotState::Running) || i.at_ns == 0 {
+            self.samples.remove(&slot);
+            return None;
+        }
+        let prev = self.samples.get(&slot).copied();
+        let last = self.last.get(&slot).and_then(|s| s.cpu_pct);
+        let Some((idle0, _, at0)) = prev else {
+            self.samples.insert(slot, (i.idle_ns, i.wakes, i.at_ns));
+            return None;
+        };
+        let dt = i.at_ns.saturating_sub(at0);
+        if dt < 1_000_000_000 {
+            return last;
+        }
+        self.samples.insert(slot, (i.idle_ns, i.wakes, i.at_ns));
+        let idle = u128::from(i.idle_ns.wrapping_sub(idle0));
+        let span = u128::from(dt) * u128::from(i.cores.max(1));
+        let idle_pct = (idle * 100 / span).min(100);
+        u8::try_from(100 - idle_pct).ok()
+    }
+}
+
+/// De stand van een slot uit het antwoord van de kern; het cpu-procent
+/// vult [`KernSys::cpu_pct`] uit twee standen.
 pub fn slot_status_of(info: &SlotInfo) -> SlotStatus {
     let state = match info.slot_state() {
         Some(systemapi::SlotState::Streaming) => SlotState::Streaming,
@@ -241,7 +276,7 @@ pub fn slot_status_of(info: &SlotInfo) -> SlotStatus {
         app: slot_app(info.app),
         exit_code: info.exit_code,
         heartbeat: info.heartbeat,
-        mem_sys: 0,
+        mem_sys: info.mem_sys,
         cpu_pct: None,
         fault_vec: info.fault_vec,
         fault_esr: info.fault_esr,
@@ -397,7 +432,8 @@ impl<C: Call> SystemApi for KernSys<C> {
             .and_then(|(_, n)| SlotInfo::decode(info.get(..n).unwrap_or_default()).ok());
         match got {
             Some(i) => {
-                let s = slot_status_of(&i);
+                let mut s = slot_status_of(&i);
+                s.cpu_pct = self.cpu_pct(slot, &i);
                 self.last.insert(slot, s.clone());
                 s
             }

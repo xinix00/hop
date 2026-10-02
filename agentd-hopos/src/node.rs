@@ -276,6 +276,26 @@ impl<S: SystemApi, I: Images> Node<S, I> {
         }
     }
 
+    /// Legt het gemeten gebruik van een taak vast: cpu als procent van zijn
+    /// eigen cores (de meetlat van de app via de kern, docs/apps.md) en
+    /// geheugen als procent van zijn limiet (wat de app zelf in gebruik
+    /// meldt). Zonder meting blijft het vorige getal staan.
+    async fn record_usage(&mut self, task_id: &str, pid: u32) {
+        let (cpu, mem) = self.runner.usage(&TaskRef { id: task_id, pid }).await;
+        let limit = self
+            .agent
+            .task(task_id)
+            .and_then(|t| self.agent.get_job(&t.job_name))
+            .map_or(0, |j| j.memory_limit);
+        let mem_pct = match mem {
+            Some(m) if limit > 0 => (m.min(limit).saturating_mul(100) / limit) as f64,
+            _ => return,
+        };
+        if let Some(c) = cpu {
+            self.agent.record_usage(task_id, f64::from(c), mem_pct);
+        }
+    }
+
     /// Stopt de bewoners die de kern nog heeft maar deze Hop niet kent.
     ///
     /// Hop houdt geen staat op hopfs: wat hij weet komt uit de leader-staat
@@ -717,6 +737,9 @@ impl<S: SystemApi, I: Images> Node<S, I> {
                         Ok(RunState::Failed) | Err(_) => Status::Failed,
                     };
                     self.agent.on_status(now, &task_id, st);
+                    if st == Status::Running {
+                        self.record_usage(&task_id, pid).await;
+                    }
                 }
                 Action::Probe { .. } => self.once(
                     "probe",
