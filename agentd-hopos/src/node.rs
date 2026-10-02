@@ -200,7 +200,14 @@ impl<S: SystemApi, I: Images> Node<S, I> {
         let mut attributes = BTreeMap::new();
         attributes.insert(String::from("node.id"), cfg.node_id.clone());
         attributes.insert(String::from("node.os"), String::from("hopos"));
-        attributes.insert(String::from("node.arch"), String::from("arm64"));
+        // De architectuur van deze bewoner, voor de `match` van de artifacts
+        // (02-10: hardcoded arm64 liet een riscv64-node arm64-ELF's halen).
+        let arch = if cfg!(target_arch = "riscv64") {
+            "riscv64"
+        } else {
+            "arm64"
+        };
+        attributes.insert(String::from("node.arch"), String::from(arch));
         let settings = Settings {
             id: cfg.node_id.clone(),
             endpoint: endpoint.clone(),
