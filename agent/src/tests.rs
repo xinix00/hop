@@ -1201,69 +1201,6 @@ fn update_job_never_resurrects_deleted() {
     assert!(!a.set_job_priority(T0, "gone", 1));
 }
 
-// ---- handoff_test.go -----------------------------------------------------------
-
-#[test]
-fn handoff_round_trip() {
-    let mut a = hop_agent();
-    let mut j = hop_job("app", 4 << 20);
-    j.command = String::new();
-    let id = a.run(T0, j, false, None).unwrap();
-    a.on_started(T0, &id, Driver::Hop, ok(3));
-    let blob = a.snapshot().unwrap();
-    let mut b = hop_agent();
-    let slots = b.restore(blob.as_bytes()).unwrap();
-    assert_eq!(slots, [(id.clone(), 3)]);
-    assert_eq!(b.task(&id).unwrap().state, TaskState::Running);
-    assert!(b.get_job("app").is_some());
-    // De reservering reist mee.
-    assert_eq!(b.resource_usage(), a.resource_usage());
-}
-
-#[test]
-fn handoff_weigert_onzin() {
-    let mut a = agent();
-    assert!(a.restore(b"").unwrap().is_empty());
-    assert!(a.restore(b"{nee").is_err());
-    assert_eq!(a.restore(br#"{"version":2}"#), Err(Error::Version(2)));
-}
-
-/// Eén poll: de opslag hieronder antwoordt meteen, en een host-test heeft geen executor.
-fn ready<F: core::future::Future>(f: F) -> F::Output {
-    let mut f = core::pin::pin!(f);
-    let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
-    match f.as_mut().poll(&mut cx) {
-        core::task::Poll::Ready(v) => v,
-        core::task::Poll::Pending => panic!("de geheugen-opslag wacht nooit"),
-    }
-}
-
-/// Een opslag in het geheugen.
-#[derive(Default)]
-struct MemStore(Option<Vec<u8>>);
-
-impl Store for MemStore {
-    async fn save(&mut self, blob: &[u8]) -> core::result::Result<(), StoreError> {
-        self.0 = Some(blob.to_vec());
-        Ok(())
-    }
-    async fn load(&mut self) -> core::result::Result<Option<Vec<u8>>, StoreError> {
-        Ok(self.0.clone())
-    }
-}
-
-#[test]
-fn state_survives_restart_via_store() {
-    let mut a = agent();
-    run_ok(&mut a, T0, job("keep"));
-    assert!(a.tick(T0 + S).contains(&Action::SaveState));
-    let mut store = MemStore::default();
-    ready(a.save_to(&mut store)).unwrap();
-    let mut b = agent();
-    ready(b.restore_from(&mut store)).unwrap();
-    assert_eq!(b.placed_task_counts().get("keep"), Some(&1));
-}
-
 // ---- agentloop/loop_test.go ----------------------------------------------------
 
 /// Een discoverer met vaste antwoorden.

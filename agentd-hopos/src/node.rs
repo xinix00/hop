@@ -175,7 +175,7 @@ pub struct Node<S, I> {
     cluster: Option<Cluster>,
 }
 
-impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
+impl<S: SystemApi, I: Images> Node<S, I> {
     /// Een node volgens `cfg`, met de kern achter `sys`, artifacts via `images`, op tijd `now`.
     ///
     /// De leader draait hier (standalone) en kent de eigen agent vanaf het
@@ -267,29 +267,24 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
         }
     }
 
-    /// Herstelt de agent-staat uit hopfs en neemt de kooien van zijn lopende taken over.
+    /// Stopt de bewoners die de kern nog heeft maar deze Hop niet kent.
     ///
-    /// Na een herstart van Hop (of een kern-flip) draaien de apps door, maar
-    /// een lege agent kent ze niet meer en zou op hun kooien stuiten. Geeft
-    /// het aantal overgenomen kooien; niets opgeslagen is 0.
-    pub async fn restore(&mut self, now: Nanos) -> Result<usize, agent::Error> {
-        let running = self.agent.restore_from(self.runner.system_mut()).await?;
-        let slots: Vec<(String, runner::Slot)> = running
-            .into_iter()
-            .filter_map(|(id, pid)| {
-                let pid = u32::try_from(pid).ok().filter(|&p| p > 0)?;
-                Some((id, runner::Slot(pid)))
-            })
-            .collect();
-        self.runner.adopt_running(&slots);
+    /// Hop houdt geen staat op hopfs: wat hij weet komt uit de leader-staat
+    /// in de object-store (S3) of uit de init-jobs, en bij een warme flip
+    /// draait hij door (`HOPOS_HOP_RESUMED`). Een bewoner die hier nog
+    /// staat terwijl Hop vers begint, is dus van niemand; zonder deze stap
+    /// hield hij zijn slot tot de volgende koude boot (GEMETEN 01-10 op de
+    /// Pi 4). Een staat uit een bestand overnemen was erger: na een koude
+    /// boot werd die een spook op het slot van de volgende bewoner (02-10,
+    /// de M4: twee minuten 503 "port 80 is taken" tot Hop het slot met de
+    /// echte spin erin stopte).
+    pub async fn sweep_strays(&mut self) {
         for slot in self.runner.sweep_strays().await {
             self.lines.push(format!(
                 "hop: stray resident in slot {} stopped: not in the saved state HOP_STRAY_STOPPED slot={}",
                 slot.0, slot.0
             ));
         }
-        self.drain(now).await;
-        Ok(slots.len())
     }
 
     /// Zaait de init-jobs uit `specs` (een JSON-array van jobspecs, zoals
@@ -721,14 +716,6 @@ impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
                     ),
                 ),
                 Action::Notify { job, event } => self.notify(now, &job, event),
-                Action::SaveState => {
-                    if let Err(e) = self.agent.save_to(self.runner.system_mut()).await {
-                        self.once(
-                            "save",
-                            format!("hop: agent state not saved to hopfs: {e} HOP_STATE_SKIPPED"),
-                        );
-                    }
-                }
             }
         }
     }

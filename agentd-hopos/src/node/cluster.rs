@@ -151,7 +151,7 @@ pub(crate) fn refuse_forward(f: &Forward) -> Response {
     )
 }
 
-impl<S: SystemApi + agent::Store, I: Images> Node<S, I> {
+impl<S: SystemApi, I: Images> Node<S, I> {
     /// Een geclusterde node: de verkiezing beslist wie leidt, niet de boot.
     ///
     /// De leader-helft staat dicht tot de verkiezing hem opent

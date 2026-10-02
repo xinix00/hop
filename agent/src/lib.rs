@@ -35,7 +35,6 @@ extern crate alloc;
 mod action;
 mod election;
 mod elector;
-mod handoff;
 mod health;
 mod ids;
 mod node;
@@ -46,7 +45,6 @@ use core::fmt;
 pub use action::{Action, Event, Outcome, Probe, StartError, StartOk, Status};
 pub use election::{Discoverer, Election, LinkError, Request};
 pub use elector::{Elector, LeaseOp, LeaseOps, LeaseReply};
-pub use handoff::{HANDOFF_VERSION, Store, StoreError};
 pub use node::{Agent, Capacity};
 pub use settings::Settings;
 
@@ -95,10 +93,6 @@ pub enum Error {
     NotFound,
     /// Een JSON-fout uit `types`.
     Json(types::Error),
-    /// Een overdracht van een andere versie.
-    Version(u64),
-    /// De staat-opslag faalde.
-    Store(StoreError),
     /// Geheugen op.
     Alloc,
 }
@@ -113,11 +107,6 @@ impl fmt::Display for Error {
             Error::NoArtifact => f.write_str("no matching artifact for this node's attributes"),
             Error::NotFound => f.write_str("not found"),
             Error::Json(e) => write!(f, "json: {e}"),
-            Error::Version(v) => write!(
-                f,
-                "agent handoff: version {v}, this agent speaks {HANDOFF_VERSION}"
-            ),
-            Error::Store(e) => write!(f, "state store: {e}"),
             Error::Alloc => f.write_str("out of memory"),
         }
     }

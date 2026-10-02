@@ -661,7 +661,7 @@ fn now(app: &App, exec: &Exec) -> u64 {
 /// Zet de regels van de node op het log.
 fn flush<S, I>(node: &mut Node<S, I>)
 where
-    S: runner::SystemApi + agent::Store,
+    S: runner::SystemApi,
     I: Images,
 {
     for line in node.take_lines() {
@@ -872,30 +872,17 @@ async fn resident(app: &'static App) {
             }
         }
     };
-    // Schoon is: niets overgenomen en niets fout gelezen. Een staat die niet
-    // te lezen is, is geen lege staat; dan geen zaad (Go: nooit zaaien op
-    // een opslagfout).
-    let clean = match node.restore(now(app, exec)).await {
-        Ok(0) => true,
-        Ok(n) => {
-            log!("hop: adopted {n} running cage(s) from the saved state HOP_ADOPTED");
-            false
-        }
-        Err(e) => {
-            log!("hop: saved agent state not restored: {e}");
-            false
-        }
-    };
+    // Hop begint leeg: zijn staat komt uit de object-store (geclusterd) of
+    // uit de init-jobs, nooit uit een bestand op hopfs. Wat de kern nog aan
+    // bewoners heeft, is van niemand.
+    node.sweep_strays().await;
     flush(&mut node);
     if clustered {
         // De boot-claim: raak, dan leidt deze node nu (de staat laadt eerst).
         node.cluster_boot(now(app, exec));
         flush(&mut node);
     }
-    if clean
-        && !clustered
-        && let Some(specs) = init_specs(&cfg, net).await
-    {
+    if !clustered && let Some(specs) = init_specs(&cfg, net).await {
         if let Err(e) = node.seed_init_jobs(&specs, now(app, exec)).await {
             log!("hop: init jobs not seeded: {e} HOP_INIT_FAIL");
         }

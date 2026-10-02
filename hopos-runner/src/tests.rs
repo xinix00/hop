@@ -10,8 +10,8 @@ use runner::{
     SysError, SystemApi, TaskRef,
 };
 
+use crate::KernSys;
 use crate::fake::{FakeDial, FakeKern, NeverTimer};
-use crate::{KernSys, STATE_PATH};
 
 type Sys = KernSys<applib::sys::Client<FakeDial, NeverTimer>>;
 
@@ -269,34 +269,6 @@ fn next_log_and_set_clock() {
     assert_eq!(bl(s.next_log_line(slot, &mut buf)), None);
     bl(s.set_clock(1_759_000_000_000_000_000)).unwrap();
     assert_eq!(k.0.borrow().clock, 1_759_000_000_000_000_000);
-}
-
-#[test]
-fn state_store_roundtrips_over_hopfs() {
-    use agent::Store;
-    let (mut s, k) = sys(4);
-    assert_eq!(bl(s.load()), Ok(None));
-    bl(s.save(b"{\"version\":1}")).unwrap();
-    bl(s.save(b"{}")).unwrap();
-    assert_eq!(k.0.borrow().files[STATE_PATH], b"{}");
-    assert_eq!(bl(s.load()), Ok(Some(b"{}".to_vec())));
-}
-
-#[test]
-fn without_a_disk_the_state_store_says_so() {
-    // De kern zonder hopfs weigert elke bestandscall met "no storage layer
-    // on board": dat is geen i/o-fout maar "geen schijf", en zo heet hij
-    // ook in de logregel van Hop (de Pi 5, 30-09).
-    use agent::Store;
-    let (mut s, k) = sys(4);
-    k.0.borrow_mut().no_storage = true;
-    assert_eq!(bl(s.load()), Err(agent::StoreError::NoStorage));
-    assert_eq!(bl(s.save(b"{}")), Err(agent::StoreError::NoStorage));
-    assert!(
-        agent::StoreError::NoStorage
-            .to_string()
-            .starts_with("no disk on this node")
-    );
 }
 
 #[test]

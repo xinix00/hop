@@ -55,8 +55,6 @@ pub enum Action {
         /// De gebeurtenis.
         event: Event,
     },
-    /// De staat veranderde: schrijf hem weg ([`crate::Agent::save_to`]).
-    SaveState,
 }
 
 /// Een gezondheidscontrole als opdracht.

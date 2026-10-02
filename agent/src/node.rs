@@ -68,7 +68,6 @@ pub struct Agent {
     out: Vec<Action>,
     next_monitor: Nanos,
     shutting_down: bool,
-    dirty: bool,
 }
 
 impl Agent {
@@ -86,7 +85,6 @@ impl Agent {
             out: Vec::new(),
             next_monitor: 0,
             shutting_down: false,
-            dirty: false,
         }
     }
 
@@ -145,10 +143,6 @@ impl Agent {
         if now >= self.next_monitor {
             self.next_monitor = now.saturating_add(self.settings.monitor_interval());
             self.monitor(now);
-        }
-        if self.dirty {
-            self.dirty = false;
-            self.push(Action::SaveState);
         }
         self.take_actions()
     }
@@ -409,7 +403,6 @@ impl Agent {
     }
 
     fn insert_entry(&mut self, task: Task, first_start: bool) {
-        self.dirty = true;
         self.tasks.insert(
             task.id.clone(),
             Entry {
@@ -488,7 +481,6 @@ impl Agent {
         });
         if !alive {
             self.tasks.remove(id);
-            self.dirty = true;
             let task_id = String::from(id);
             self.push(Action::Stop {
                 task_id,
@@ -507,7 +499,6 @@ impl Agent {
         e.task.started_at = Time(now);
         e.task.next_restart_at = Time::ZERO;
         let name = e.task.job_name.clone();
-        self.dirty = true;
         let has_check = self
             .jobs
             .get(&name)
@@ -529,7 +520,6 @@ impl Agent {
     /// de volgende poging weigert de toelating vooraf (503).
     fn release_unplaceable(&mut self, id: &str) {
         if let Some(e) = self.tasks.remove(id) {
-            self.dirty = true;
             self.push(Action::Notify {
                 job: e.task.job_name,
                 event: Event::Unplaceable,
@@ -574,7 +564,6 @@ impl Agent {
         let Some(job) = self.jobs.get(&e.task.job_name) else {
             // De job is weg: de taak ook.
             self.tasks.remove(id);
-            self.dirty = true;
             return;
         };
         let max = job.max_restarts.unwrap_or(DEFAULT_MAX_RESTARTS);
@@ -594,7 +583,6 @@ impl Agent {
         }
         e.task.last_failed_at = Time(now);
         let count = e.task.restart_count;
-        self.dirty = true;
         // -1 = onbeperkt; 0 = nooit.
         if max >= 0 && count >= max {
             e.task.state = TaskState::Failed;
@@ -621,7 +609,6 @@ impl Agent {
         };
         let Some(job) = self.jobs.get(&old.task.job_name) else {
             self.tasks.remove(id);
-            self.dirty = true;
             return;
         };
         if self.resolve_job_for_run(job).is_err() {
@@ -774,7 +761,6 @@ impl Agent {
     fn remove_and_stop(&mut self, id: &str) -> bool {
         match self.tasks.remove(id) {
             Some(e) => {
-                self.dirty = true;
                 self.push(stop_action(&e.task));
                 true
             }
@@ -811,7 +797,6 @@ impl Agent {
         // delete nog als nieuwer en importeert hij de job opnieuw (15-07).
         self.state_time = Time(now);
         let n = self.stop_job_tasks(name);
-        self.dirty = true;
         let job = String::from(name);
         self.push(Action::Notify {
             job,
@@ -889,7 +874,6 @@ impl Agent {
         }
         self.jobs.insert(job.name.clone(), job);
         self.state_time = Time(now);
-        self.dirty = true;
         Ok(())
     }
 
@@ -900,7 +884,6 @@ impl Agent {
             Some(slot) => {
                 *slot = job;
                 self.state_time = Time(now);
-                self.dirty = true;
                 true
             }
             None => false,
@@ -935,7 +918,6 @@ impl Agent {
     pub fn delete_job_definition(&mut self, now: Nanos, name: &str) {
         self.jobs.remove(name);
         self.state_time = Time(now);
-        self.dirty = true;
     }
 
     /// Wanneer de job-store het laatst veranderde.
@@ -955,23 +937,11 @@ impl Agent {
         Ok(())
     }
 
-    // ---- Voor handoff en tests -------------------------------------------------
+    // ---- Voor tests ----------------------------------------------------------
 
-    pub(crate) fn jobs_map(&self) -> &BTreeMap<String, Job> {
-        &self.jobs
-    }
-
+    #[cfg(test)]
     pub(crate) fn tasks_map(&self) -> &BTreeMap<String, Entry> {
         &self.tasks
-    }
-
-    pub(crate) fn restore_entries(&mut self, jobs: Vec<Job>, tasks: Vec<Task>) {
-        for j in jobs {
-            self.jobs.insert(j.name.clone(), j);
-        }
-        for t in tasks {
-            self.insert_entry(t, false);
-        }
     }
 
     /// Zet een taak rechtstreeks in de staat (tests: de Go-tests schreven `s.tasks`).

@@ -22,9 +22,6 @@
 //! geneste executor-ronde binnen de poll van een taak, en de executor roept
 //! zichzelf nooit aan (handboek §4). Een host-test pollt de nep-verbinding,
 //! die altijd klaar is.
-//!
-//! Ook hier: [`KernSys`] is een [`agent::Store`] over hopfs, zodat
-//! `Action::SaveState` de agent-staat in het eigen bestand van Hop zet.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -56,9 +53,6 @@ mod start_mounts;
 mod store;
 
 use runner::{Slot, SlotApp, SlotState, SlotStatus, StartSpec, Streamed, SysError, SystemApi};
-
-/// Het pad van de agent-staat in de eigen map van Hop op hopfs.
-pub const STATE_PATH: &str = "/hop/agent-state.json";
 
 /// Hoe groot een foutreden van de kern bij een stroom mag zijn; langer
 /// wordt een protocolfout (de client weigert een te lang antwoord).
@@ -466,75 +460,6 @@ impl<C: Call> SystemApi for KernSys<C> {
             .await
             .map(|_| ())
             .map_err(|e| sys_error(&e))
-    }
-}
-
-/// De fout van de kern als opslagfout: "no storage layer on board" is
-/// geen schijf (`StoreError::NoStorage`), al het andere is een i/o-fout.
-fn store_err(e: &sys::Error) -> agent::StoreError {
-    match e {
-        sys::Error::Call { msg, .. } if msg.as_str().starts_with("no storage layer") => {
-            agent::StoreError::NoStorage
-        }
-        _ => agent::StoreError::Io,
-    }
-}
-
-impl<C: Call> agent::Store for KernSys<C> {
-    async fn save(&mut self, blob: &[u8]) -> Result<(), agent::StoreError> {
-        // Eerst op nul, dan de happen: een halve schrijf is dan een kort
-        // bestand, geen mengsel van oud en nieuw (zoals `write_file` van applib).
-        let trunc = sys::Req {
-            n: 0,
-            ..sys::Req::path(hopabi::OP_TRUNCATE, STATE_PATH)
-        };
-        self.exchange(trunc, &mut [])
-            .await
-            .map_err(|e| store_err(&e))?;
-        let mut off = 0u64;
-        for piece in blob.chunks(sys::MAX_CHUNK) {
-            let w = sys::Req {
-                off,
-                data: piece,
-                ..sys::Req::path(hopabi::OP_WRITE, STATE_PATH)
-            };
-            self.exchange(w, &mut []).await.map_err(|e| store_err(&e))?;
-            off = off.saturating_add(u64::try_from(piece.len()).unwrap_or(u64::MAX));
-        }
-        Ok(())
-    }
-
-    async fn load(&mut self) -> Result<Option<Vec<u8>>, agent::StoreError> {
-        let size = match self
-            .exchange(sys::Req::path(hopabi::OP_STAT, STATE_PATH), &mut [])
-            .await
-        {
-            Ok((r, _)) => r.size,
-            Err(sys::Error::NotFound { .. }) => return Ok(None),
-            Err(e) => return Err(store_err(&e)),
-        };
-        let len = usize::try_from(size).map_err(|_| agent::StoreError::Io)?;
-        let mut out = Vec::new();
-        out.try_reserve_exact(len)
-            .map_err(|_| agent::StoreError::Io)?;
-        out.resize(len, 0);
-        let mut at = 0usize;
-        while at < len {
-            let end = len.min(at.saturating_add(sys::MAX_CHUNK));
-            let dst = out.get_mut(at..end).unwrap_or_default();
-            let r = sys::Req {
-                off: u64::try_from(at).unwrap_or(u64::MAX),
-                n: u64::try_from(dst.len()).unwrap_or(u64::MAX),
-                ..sys::Req::path(hopabi::OP_READ, STATE_PATH)
-            };
-            let (_, n) = self.exchange(r, dst).await.map_err(|e| store_err(&e))?;
-            if n == 0 {
-                break;
-            }
-            at = at.saturating_add(n);
-        }
-        out.truncate(at);
-        Ok(Some(out))
     }
 }
 

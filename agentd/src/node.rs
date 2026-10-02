@@ -483,7 +483,6 @@ impl Node {
                 // Op de host is er geen overdracht: een herstart van de daemon
                 // begint schoon (Go: `Init`), want de processen van de vorige
                 // zijn niet over te nemen. De gewenste staat staat bij de leader.
-                Action::SaveState => {}
             }
         }
     }

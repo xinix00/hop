@@ -224,14 +224,6 @@ fn post_a_job_and_the_kernel_places_it() {
         n.agent().tasks().next().unwrap().state,
         types::TaskState::Running
     );
-    // De tik schreef de veranderde agent-staat naar hopfs.
-    let saved =
-        k.0.borrow()
-            .files
-            .get(hopos_runner::STATE_PATH)
-            .cloned()
-            .unwrap();
-    assert!(String::from_utf8(saved).unwrap().contains("\"web\""));
 }
 
 #[test]
@@ -337,16 +329,32 @@ fn block_on_ready<F: Future>(f: F) -> bool {
 }
 
 #[test]
-fn a_new_resident_adopts_the_cages_of_the_old_one() {
+fn a_fresh_resident_stops_what_the_kernel_still_runs() {
     let (mut n, k) = node();
+    // Slot 1 is Hop zelf; de veger blijft daar vanaf.
+    k.0.borrow_mut().slots.insert(
+        1,
+        hopos_runner::fake::FakeSlot {
+            placed: true,
+            ..Default::default()
+        },
+    );
     http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
     block_on(n.tick(T0 + types::time::SECOND));
-    // Een nieuwe bewoner over dezelfde kern: de staat komt uit hopfs.
+    assert_eq!(k.0.borrow().slots.len(), 2);
+    // Een nieuwe Hop over dezelfde kern kent niets: geen staat op hopfs,
+    // dus de bewoner in slot 2 is van niemand en gaat weg.
     let sys = KernSys::new(k.client(), 4);
     let mut again = Node::new(&cfg(), sys, MemImages::new(BTreeMap::new()), T0);
-    assert_eq!(block_on(again.restore(T0)).unwrap(), 1);
-    assert_eq!(again.runner().cages_in_use(), 1);
-    assert_eq!(again.agent().tasks().next().unwrap().job_name, "web");
+    block_on(again.sweep_strays());
+    assert_eq!(k.0.borrow().slots.keys().copied().collect::<Vec<_>>(), [1]);
+    assert!(
+        again
+            .take_lines()
+            .iter()
+            .any(|l| l.contains("HOP_STRAY_STOPPED slot=2"))
+    );
+    assert_eq!(again.agent().tasks().count(), 0);
 }
 
 /// Twee taken om de beurt, zoals de executor van de app-core ze pollt.

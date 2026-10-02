@@ -122,29 +122,6 @@ impl<S: SystemApi> HopRunner<S> {
         self.in_use.len()
     }
 
-    /// Draagt de kooien van al draaiende taken over (na een kern-flip).
-    ///
-    /// Dit is geen tweede waarheid over wat er draait, alleen EIGENDOM: welke
-    /// taak deze kooi straks mag stoppen. Zonder deze stap is zo'n bewoner niet
-    /// meer te stoppen (GEMETEN 02-09 op de M4: welcome verwijderd, node meldde
-    /// hem nog live). Idempotent; pakt nooit een kooi af die al uitgedeeld is.
-    pub fn adopt_running(&mut self, slots: &[(String, Slot)]) {
-        for (id, slot) in slots {
-            if slot.0 < 1 || self.cages.contains_key(id) || self.in_use.contains_key(slot) {
-                continue;
-            }
-            self.in_use.insert(*slot, id.clone());
-            self.cages.insert(
-                id.clone(),
-                Cage {
-                    phase: Phase::Armed(*slot),
-                    fault_logged: false,
-                },
-            );
-            self.logs.open(id);
-        }
-    }
-
     /// Stopt de bewoners die van niemand zijn en geeft hun slots.
     ///
     /// Na een herstart van Hop draaien de apps door, en wie niet in de
@@ -154,7 +131,7 @@ impl<S: SystemApi> HopRunner<S> {
     /// eigenaar. GEMETEN 01-10 op de Pi 4: twee uitgemeten benches in slot 3
     /// en 4 die Hop niet kende; elke plaatsing en elke flip liep daarna op
     /// "slot 5 out of range 1..4". Een node heeft één Hop, dus een bewoner
-    /// die hij na [`adopt_running`](Self::adopt_running) niet kent, is van
+    /// die hij niet kent, is van
     /// niemand. Alleen de slots boven het eigen (1); een stop die de kern
     /// niet bevestigt, blijft zijn quarantaine (hij wordt niet hergebruikt).
     pub async fn sweep_strays(&mut self) -> Vec<Slot> {

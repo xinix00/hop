@@ -488,19 +488,6 @@ fn hop_runner_one_core_class_sharing() {
 }
 
 #[test]
-fn hop_runner_adoption_and_reuse_keep_neighbor() {
-    let mut r = runner(3, &[]);
-    r.system_mut().live(1);
-    r.system_mut().live(2);
-    r.adopt_running(&[("smp".into(), Slot(1)), ("shared".into(), Slot(2))]);
-    assert_eq!(run(&mut r, "new", &hop_job()).unwrap(), 3);
-    bl(r.stop(0, &TaskRef { id: "smp", pid: 1 })).unwrap();
-    assert_eq!(run(&mut r, "again", &hop_job()).unwrap(), 1);
-    assert_eq!(r.slot_of("shared"), Some(Slot(2)));
-    assert!(bl(r.system_mut().slot_status(Slot(2))).core_on);
-}
-
-#[test]
 fn hop_runner_capacity_failure_releases_cage() {
     let mut r = runner(1, &[]);
     let mut j = hop_job();
@@ -673,27 +660,12 @@ fn kern_picks_the_slot_at_image_begin() {
 }
 
 #[test]
-fn adopt_running_restores_logs() {
-    let mut r = runner(3, &[]);
-    r.system_mut().live(2);
-    r.system_mut()
-        .slots
-        .get_mut(&2)
-        .unwrap()
-        .logs
-        .push_back("na de flip".into());
-    r.adopt_running(&[("kept".into(), Slot(2))]);
-    bl(r.pump_logs(0));
-    assert_eq!(tail(&r, 0, "kept"), ["na de flip"]);
-}
-
-#[test]
 fn sweep_strays_stops_only_the_residents_nobody_owns() {
     let mut r = runner(4, &[]);
-    r.system_mut().live(2);
+    r.system_mut().live(1);
+    assert_eq!(run(&mut r, "kept", &hop_job()).unwrap(), 2);
     r.system_mut().live(3);
     r.system_mut().live(4);
-    r.adopt_running(&[("kept".into(), Slot(2))]);
     assert_eq!(bl(r.sweep_strays()), [Slot(3), Slot(4)]);
     assert_eq!(r.system().stops, [3, 4]);
     assert!(r.system().slot(2).core_on);
