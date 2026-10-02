@@ -95,7 +95,10 @@ fn main() {}
 const TICK: Duration = Duration::from_secs(1);
 
 /// De langste stilte op een verbinding: een pool van [`WORKERS`] per poort,
-/// dus een keep-alive-client mag een werker niet lang ophouden.
+/// dus een keep-alive-client mag een werker niet lang ophouden. Zijn alle
+/// werkers bezet, dan wacht een nieuwe verbinding niet eens zo lang: de
+/// werker sluit zijn verbinding dan na het antwoord
+/// (`Handoff::none_free`, zie `forward::serve`).
 const READ_CAP: Duration = Duration::from_secs(2);
 
 /// Werkers per poort. Een open stroom houdt er een vast; met hoogstens twee
@@ -749,6 +752,7 @@ async fn work(
             &mut streams,
             &mut client,
             port,
+            || pool.none_free(),
         )
         .await;
         pool.free(i);

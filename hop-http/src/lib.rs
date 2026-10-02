@@ -189,6 +189,18 @@ fn write_head<C: Conn>(ex: &mut Exchange<'_, C>, r: &Response) -> Result<(), Err
     ex.write_header(r.status)
 }
 
+/// Zegt de aanroeper dat de verbinding na dit antwoord dichtgaat
+/// (`Connection: close`); leanhttp sluit hem dan na de laatste byte.
+///
+/// Voor een pool met weinig werkers: een werker die ziet dat elke andere
+/// bezet is, houdt zijn verbinding niet open tot de leestermijn, want een
+/// verbinding die op een werker wacht, mag niet op de stilte van een
+/// keep-alive-client wachten. Vóór [`write_reply`] aanroepen; de kop gaat
+/// mee met het antwoord.
+pub fn close_after<C: Conn>(ex: &mut Exchange<'_, C>) -> Result<(), Error> {
+    ex.header_mut().set("Connection", "close")
+}
+
 /// Schrijft een [`Reply`] op de draad.
 pub async fn write_reply<C: Conn>(ex: &mut Exchange<'_, C>, reply: &Reply) -> Result<(), Error> {
     match reply {

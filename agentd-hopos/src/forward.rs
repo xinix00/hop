@@ -394,12 +394,22 @@ fn head_of(req: &Request) -> Request {
 /// Een [`Routed::Reply`] gaat zoals altijd (een stroom van de eigenaar via
 /// `streams`); een [`Routed::Forward`] voert deze taak zelf uit met `client`.
 /// Na elke stroom, op elk pad, meldt `streams.done()` hem af.
+///
+/// `crowded` zegt per verzoek of elke werker van de pool bezet is. Dan
+/// krijgt het antwoord `Connection: close` en gaat de verbinding erna
+/// dicht, in plaats van tot de leestermijn open te blijven voor een
+/// keep-alive-client die misschien niets meer vraagt. Een browser opent
+/// zijn parallelle verzoeken op eigen verbindingen; zonder dit wachtte de
+/// derde op de stilte van de eerste (gemeten: 2, 4, 6 s voor leader,
+/// agents en jobs op het dashboard). Go had een goroutine per verbinding
+/// en kende dit wachten niet.
 pub async fn serve<X, H, S, C, R>(
     conn: X,
     mut handler: H,
     streams: &mut S,
     client: &mut Client<C, R>,
     port: Port,
+    mut crowded: impl FnMut() -> bool,
 ) -> Result<(), leanhttp::Error>
 where
     X: AsyncRead + AsyncWrite + Close,
@@ -410,6 +420,9 @@ where
 {
     let out = leanhttp::serve(conn, async |ex: &mut Exchange<'_, X>| {
         let req = hop_http::read_request(ex).await?;
+        if crowded() {
+            hop_http::close_after(ex)?;
+        }
         let cors = (port == Port::Agent).then(|| head_of(&req));
         match handler(req).await {
             Routed::Reply(reply) => {

@@ -86,4 +86,39 @@ impl<T> Handoff<T> {
             *b = false;
         }
     }
+
+    /// Of elke werker een verbinding heeft: de volgende verbinding zou
+    /// moeten wachten. Een werker die dit ziet terwijl hij een verzoek
+    /// afhandelt, houdt zijn verbinding daarna niet open (`Connection:
+    /// close`), zodat een wachter nooit op de stilte van een keep-alive-
+    /// client hoeft te wachten.
+    pub fn none_free(&self) -> bool {
+        self.busy.borrow().iter().all(|b| *b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn none_free_only_when_every_worker_holds_a_connection() {
+        let pool: Handoff<u8> = Handoff::new(2);
+        assert!(!pool.none_free());
+        let a = pool.give(1).unwrap();
+        assert!(!pool.none_free(), "one worker is still free");
+        let b = pool.give(2).unwrap();
+        assert!(pool.none_free());
+        assert_eq!(
+            pool.give(3),
+            Err(3),
+            "nobody free: the connection comes back"
+        );
+        pool.free(a);
+        assert!(!pool.none_free());
+        assert_eq!(pool.give(3), Ok(a));
+        pool.free(b);
+        pool.free(a);
+        assert!(!pool.none_free());
+    }
 }

@@ -529,3 +529,74 @@ fn real_github_release_download() {
     assert_eq!(sink.len, Some(sink.bytes.len() as u64));
     assert!(sink.bytes.starts_with(b"\x7fELF"), "geen ELF");
 }
+
+// ---- De pool onder druk ----
+
+/// Geen stromen: de doorgifte-lus zonder eigenaar.
+struct NoStreams;
+
+impl hop_http::Streams for NoStreams {
+    async fn poll(&mut self, _: hop_http::Ask) -> hop_http::Chunk {
+        hop_http::Chunk::default()
+    }
+    async fn nap(&mut self, _: core::time::Duration) {}
+    fn now(&self) -> u64 {
+        0
+    }
+    fn done(&mut self) {}
+}
+
+fn no_clock() -> Option<u64> {
+    None
+}
+
+/// Twee verzoeken achter elkaar op één verbinding door `forward::serve`,
+/// met `crowded` als stand van de pool; wat er op de draad kwam.
+fn serve_two(crowded: bool) -> String {
+    use crate::forward::{Routed, serve};
+    use hop_http::Reply;
+
+    let out = Rc::new(RefCell::new(Vec::new()));
+    let conn = Mem {
+        input: b"GET /a HTTP/1.1\r\nHost: n\r\n\r\nGET /b HTTP/1.1\r\nHost: n\r\n\r\n".to_vec(),
+        at: 0,
+        out: out.clone(),
+    };
+    let net = FakeNet {
+        script: Vec::new(),
+        seen: Rc::new(RefCell::new(Vec::new())),
+    };
+    let mut client = crate::client::Client::new(net, names(), Pool::new(b"test"), no_clock);
+    let mut none = NoStreams;
+    block_on(serve(
+        conn,
+        async |req: api::Request| {
+            let mut r = api::Response::empty(200);
+            r.body = req.path.into_bytes();
+            Routed::Reply(Reply::Plain(r))
+        },
+        &mut none,
+        &mut client,
+        crate::Port::Leader,
+        || crowded,
+    ))
+    .unwrap();
+    String::from_utf8(out.borrow().clone()).unwrap()
+}
+
+#[test]
+fn a_crowded_pool_closes_after_the_answer() {
+    // Ruimte genoeg: keep-alive, beide verzoeken op dezelfde verbinding.
+    let text = serve_two(false);
+    assert_eq!(text.matches("HTTP/1.1 200").count(), 2, "{text}");
+    assert!(!text.contains("Connection: close"), "{text}");
+
+    // Elke werker bezet: het eerste antwoord zegt close, en de verbinding
+    // gaat dicht voordat het tweede verzoek aan de beurt is. Een wachtende
+    // verbinding krijgt deze werker dus na één verzoek, niet na de
+    // leestermijn.
+    let text = serve_two(true);
+    assert_eq!(text.matches("HTTP/1.1 200").count(), 1, "{text}");
+    assert!(text.contains("Connection: close"), "{text}");
+    assert!(text.ends_with("/a"), "{text}");
+}

@@ -23,6 +23,8 @@
 //! de thread meldt zijn stroom af in `Drop` ([`StreamGuard`]).
 
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -90,6 +92,14 @@ struct Worker {
     http: Http,
     /// De clustersleutel, voor de aanroepen die de thread zelf doet.
     key: Vec<u8>,
+    /// Hoeveel threads van deze poort een verbinding hebben. Zijn het er
+    /// [`WORKERS`], dan wacht de volgende verbinding in de backlog, en dan
+    /// sluit een thread zijn verbinding na het antwoord in plaats van tot
+    /// [`READ_CAP`] op een keep-alive-client te wachten die misschien niets
+    /// meer vraagt. Een browser doet zijn parallelle verzoeken op eigen
+    /// verbindingen; Go had een goroutine per verbinding en kende dit
+    /// wachten niet.
+    busy: Arc<AtomicUsize>,
 }
 
 /// Meldt een open stroom af bij de eigenaar, op elk pad.
@@ -142,6 +152,7 @@ pub(crate) fn spawn_pool(
     owner: &Sender<Msg>,
     key: &[u8],
 ) -> std::io::Result<()> {
+    let busy = Arc::new(AtomicUsize::new(0));
     for i in 0..WORKERS {
         let l = listener.try_clone()?;
         let w = Worker {
@@ -149,6 +160,7 @@ pub(crate) fn spawn_pool(
             owner: owner.clone(),
             http: Http::new(),
             key: key.to_vec(),
+            busy: busy.clone(),
         };
         std::thread::Builder::new()
             .name(format!("http-{port:?}-{i}"))
@@ -170,15 +182,22 @@ fn worker(l: &TcpListener, w: &Worker) {
         };
         let _ = stream.set_nodelay(true);
         let conn = Capped(StdConn::new(stream, Some(READ_CAP)));
+        w.busy.fetch_add(1, Ordering::AcqRel);
         // Een verbinding die eindigt met een termijn of een reset is een
         // client die wegging; geen logregel waard.
         let _ = block_on(serve(conn, w));
+        w.busy.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
 async fn serve(conn: Capped, w: &Worker) -> leanhttp::Result {
     let out = leanhttp::serve(conn, async |ex: &mut Exchange<'_, Capped>| {
         let req = read_request(ex).await?;
+        if w.busy.load(Ordering::Acquire) >= WORKERS {
+            // Elke thread bezet: na dit antwoord dicht, zodat de wachtende
+            // verbinding een thread krijgt zodra dit verzoek af is.
+            ex.header_mut().set("Connection", "close")?;
+        }
         if w.port == Port::Agent {
             // De browser van het dashboard praat met deze poort: élk antwoord
             // draagt de CORS-koppen, ook een doorgifte naar de leader en een
@@ -688,6 +707,64 @@ mod tests {
         let text = exchange(async |ex| relay(ex, &http, &url, None).await);
         assert!(text.starts_with("HTTP/1.1 404"), "{text}");
         assert!(text.contains("no logs for task"), "{text}");
+    }
+
+    /// Eén verzoek over `s`; de kop van het antwoord (tot de lege regel).
+    fn ask_over(s: &mut TcpStream) -> String {
+        s.write_all(b"GET /health HTTP/1.1\r\nHost: n\r\n\r\n")
+            .unwrap();
+        let mut r = BufReader::new(s.try_clone().unwrap());
+        let mut head = String::new();
+        loop {
+            let mut line = String::new();
+            r.read_line(&mut line).unwrap();
+            head.push_str(&line);
+            if line == "\r\n" || line.is_empty() {
+                return head;
+            }
+        }
+    }
+
+    #[test]
+    fn a_full_pool_closes_after_the_answer_so_the_next_connection_never_waits() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        // De eigenaar: elk verzoek een leeg 200.
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            for m in rx {
+                if let Msg::Http { reply, .. } = m {
+                    let _ = reply.send(Reply::Plain(Response::empty(200)));
+                }
+            }
+        });
+        spawn_pool(&l, Port::Agent, &tx, b"").unwrap();
+
+        // Keep-alive-clients die na hun verzoek stil blijven, één per thread.
+        let mut held = Vec::new();
+        for i in 1..=WORKERS {
+            let mut s = TcpStream::connect(addr).unwrap();
+            let head = ask_over(&mut s);
+            assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+            if i < WORKERS {
+                assert!(!head.contains("Connection: close"), "#{i}: {head}");
+            } else {
+                // De laatste vrije thread: dicht na het antwoord.
+                assert!(head.contains("Connection: close"), "#{i}: {head}");
+            }
+            held.push(s);
+        }
+        // De volgende verbinding krijgt die thread meteen, niet na READ_CAP.
+        let t = Instant::now();
+        let mut s = TcpStream::connect(addr).unwrap();
+        let head = ask_over(&mut s);
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "waited {:?} on an idle keep-alive client",
+            t.elapsed()
+        );
+        drop(held);
     }
 
     #[test]
