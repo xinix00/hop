@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "abi"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.1#c59c7731f4c78ea8d6cc6522d8a6ebd34cb0f93a"
 dependencies = [
  "bounded",
  "dev",
@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "agent"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "config",
  "types",
@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "agentd"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "agent",
  "api",
@@ -38,7 +38,7 @@ dependencies = [
 
 [[package]]
 name = "agentd-hopos"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "abi",
  "agent",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "api"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "agent",
  "auth",
@@ -74,7 +74,7 @@ dependencies = [
 [[package]]
 name = "applib"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.1#c59c7731f4c78ea8d6cc6522d8a6ebd34cb0f93a"
 dependencies = [
  "abi",
  "bounded",
@@ -89,16 +89,16 @@ dependencies = [
 
 [[package]]
 name = "auth"
-version = "3.0.1"
+version = "3.0.2"
 
 [[package]]
 name = "bounded"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.1#c59c7731f4c78ea8d6cc6522d8a6ebd34cb0f93a"
 
 [[package]]
 name = "cli"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "auth",
  "hostnet",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "types",
 ]
@@ -115,11 +115,11 @@ dependencies = [
 [[package]]
 name = "dev"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.1#c59c7731f4c78ea8d6cc6522d8a6ebd34cb0f93a"
 
 [[package]]
 name = "discovery"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "types",
 ]
@@ -127,7 +127,7 @@ dependencies = [
 [[package]]
 name = "executor"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.1#c59c7731f4c78ea8d6cc6522d8a6ebd34cb0f93a"
 dependencies = [
  "dev",
  "sync",
@@ -136,11 +136,11 @@ dependencies = [
 [[package]]
 name = "heap"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.1#c59c7731f4c78ea8d6cc6522d8a6ebd34cb0f93a"
 
 [[package]]
 name = "hop-http"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "api",
  "applib",
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "hopos-runner"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "abi",
  "agent",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "hostnet"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "leanhttp",
  "leanhttps",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "leader"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "config",
  "types",
@@ -178,18 +178,18 @@ dependencies = [
 
 [[package]]
 name = "leancookie"
-version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.3#7264d7d2a5ac092240a36021811340df1c28cfff"
+version = "3.1.4"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.4#81c9a77d763a1216e8e4a60cfb3e34d69be885dc"
 
 [[package]]
 name = "leanhttp"
-version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.3#7264d7d2a5ac092240a36021811340df1c28cfff"
+version = "3.1.4"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.4#81c9a77d763a1216e8e4a60cfb3e34d69be885dc"
 
 [[package]]
 name = "leanhttps"
-version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.3#7264d7d2a5ac092240a36021811340df1c28cfff"
+version = "3.1.4"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.4#81c9a77d763a1216e8e4a60cfb3e34d69be885dc"
 dependencies = [
  "leanhttp",
  "leantls",
@@ -197,30 +197,30 @@ dependencies = [
 
 [[package]]
 name = "leannet"
-version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.3#7264d7d2a5ac092240a36021811340df1c28cfff"
+version = "3.1.4"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.4#81c9a77d763a1216e8e4a60cfb3e34d69be885dc"
 
 [[package]]
 name = "leans3"
-version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.3#7264d7d2a5ac092240a36021811340df1c28cfff"
+version = "3.1.4"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.4#81c9a77d763a1216e8e4a60cfb3e34d69be885dc"
 
 [[package]]
 name = "leantls"
-version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.3#7264d7d2a5ac092240a36021811340df1c28cfff"
+version = "3.1.4"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.4#81c9a77d763a1216e8e4a60cfb3e34d69be885dc"
 
 [[package]]
 name = "netdev"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.1#c59c7731f4c78ea8d6cc6522d8a6ebd34cb0f93a"
 dependencies = [
  "sync",
 ]
 
 [[package]]
 name = "runner"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "hostnet",
  "leanhttp",
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "store"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "config",
  "discovery",
@@ -243,8 +243,8 @@ dependencies = [
 [[package]]
 name = "sync"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.1#c59c7731f4c78ea8d6cc6522d8a6ebd34cb0f93a"
 
 [[package]]
 name = "types"
-version = "3.0.1"
+version = "3.0.2"

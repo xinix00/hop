@@ -11,8 +11,8 @@ description = "De runner::SystemApi van Hop over de system-client van applib: el
 runner = { path = "../runner" }
 agent = { path = "../agent" }
 # De kern-kant op een tag, nooit over een pad (PORT.md §6, beslissing 6).
-applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.0" }
-abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.0" }
+applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.1" }
+abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.1" }
 
 [lints]
 workspace = true
