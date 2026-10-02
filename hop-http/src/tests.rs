@@ -21,15 +21,32 @@ pub(crate) struct Mem {
     input: Vec<u8>,
     at: usize,
     out: Rc<RefCell<Vec<u8>>>,
+    /// Een client die na zijn verzoek blijft hangen (een lezer van een
+    /// stroom): na de invoer `Pending` in plaats van EOF, en een lees met
+    /// termijn (de sondering van `reader_gone`) verloopt meteen.
+    hold: bool,
+    probing: bool,
 }
 
 impl AsyncRead for Mem {
     fn poll_read(&mut self, _: &mut Context<'_>, buf: &mut [u8]) -> Poll<Result<usize, IoError>> {
         let rest = &self.input[self.at..];
+        if rest.is_empty() && self.hold {
+            return if self.probing {
+                Poll::Ready(Err(IoError::TimedOut))
+            } else {
+                Poll::Pending
+            };
+        }
         let n = rest.len().min(buf.len());
         buf[..n].copy_from_slice(&rest[..n]);
         self.at += n;
         Poll::Ready(Ok(n))
+    }
+
+    fn set_read_timeout(&mut self, t: Option<core::time::Duration>) -> Result<(), IoError> {
+        self.probing = t.is_some();
+        Ok(())
     }
 }
 
@@ -102,11 +119,32 @@ fn exchange_with(
     handler: impl AsyncFnMut(Request) -> Reply,
     streams: &mut Fake,
 ) -> String {
+    exchange_conn(raw, false, handler, streams)
+}
+
+/// Als [`exchange_with`], met een client die na zijn verzoek blijft lezen
+/// (een lezer van een stroom) in plaats van te sluiten.
+fn exchange_held(
+    raw: &[u8],
+    handler: impl AsyncFnMut(Request) -> Reply,
+    streams: &mut Fake,
+) -> String {
+    exchange_conn(raw, true, handler, streams)
+}
+
+fn exchange_conn(
+    raw: &[u8],
+    hold: bool,
+    handler: impl AsyncFnMut(Request) -> Reply,
+    streams: &mut Fake,
+) -> String {
     let out = Rc::new(RefCell::new(Vec::new()));
     let conn = Mem {
         input: raw.to_vec(),
         at: 0,
         out: out.clone(),
+        hold,
+        probing: false,
     };
     block_on(serve(conn, handler, streams)).unwrap();
     String::from_utf8(out.borrow().clone()).unwrap()
@@ -232,7 +270,7 @@ fn a_stream_asks_the_owner_until_it_is_done() {
         stream: LogStream::Stdout,
         seq: 0,
     };
-    let text = exchange_with(
+    let text = exchange_held(
         raw,
         async |_req: Request| Reply::Stream {
             head: Response::empty(200),
@@ -273,7 +311,7 @@ fn a_silent_stream_writes_a_keepalive_and_the_events_stream_starts_with_ping() {
             .collect(),
         ..Fake::default()
     };
-    let text = exchange_with(
+    let text = exchange_held(
         raw,
         async |_req: Request| Reply::Stream {
             head: Response::empty(200),
@@ -284,6 +322,43 @@ fn a_silent_stream_writes_a_keepalive_and_the_events_stream_starts_with_ping() {
     );
     assert!(text.contains("event: ping\ndata: {}\n\n"), "{text}");
     assert_eq!(text.matches(": keepalive").count(), 1, "{text}");
+    assert_eq!(f.done, 1);
+}
+
+#[test]
+fn a_reader_that_leaves_frees_the_stream() {
+    // De eigenaar heeft altijd iets nieuws, maar de client sloot al na zijn
+    // verzoek (EOF): de stroom ziet dat aan zijn leeskant, eindigt en meldt
+    // zich af, in plaats van zijn werker en zijn stroomplek vast te houden
+    // tot een schrijf faalt (op de netstack van HopOS: lang niet).
+    let raw = b"GET /v1/events HTTP/1.1\r\nHost: n\r\n\r\n";
+    let mut f = Fake {
+        chunks: (0..100)
+            .map(|i| Chunk {
+                text: alloc::format!("data: {i}\n\n"),
+                seq: i + 1,
+                done: false,
+            })
+            .collect(),
+        ..Fake::default()
+    };
+    let text = exchange_with(
+        raw,
+        async |_req: Request| Reply::Stream {
+            head: Response::empty(200),
+            first: String::from(api::PING),
+            ask: Ask::Events { seq: 0 },
+        },
+        &mut f,
+    );
+    // De kop ging nog weg, met de sluiting erbij; daarna geen pompen meer
+    // (ook de ping niet: leanhttp kijkt vóór elk stuk of de lezer er is).
+    assert!(text.contains("Connection: close"), "{text}");
+    assert!(
+        f.asked.len() <= 1,
+        "the stream kept pumping to a reader that left: {} asks",
+        f.asked.len()
+    );
     assert_eq!(f.done, 1);
 }
 

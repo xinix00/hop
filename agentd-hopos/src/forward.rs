@@ -310,6 +310,9 @@ async fn relay<X: leanhttp::Conn, C: Connect, R: Resolve>(
         }
         return hop_http::write_reply(ex, &Reply::Plain(resp)).await;
     }
+    // De leeskant vóór de kop, zodat de lus tussen twee happen kan zien dat
+    // de lezer wegging (de bron gaat dan mee dicht).
+    ex.claim_done().await?;
     stream_head(ex, cors)?;
     ex.flush().await?;
     let mut buf = alloc::vec![0u8; RELAY_CHUNK];
@@ -319,6 +322,9 @@ async fn relay<X: leanhttp::Conn, C: Connect, R: Resolve>(
             Ok(0) | Err(_) => return Ok(()),
             Ok(n) => n,
         };
+        if ex.reader_gone().await {
+            return Ok(());
+        }
         ex.write(buf.get(..n).unwrap_or_default()).await?;
         ex.flush().await?;
     }
@@ -426,13 +432,15 @@ where
         let cors = (port == Port::Agent).then(|| head_of(&req));
         match handler(req).await {
             Routed::Reply(reply) => {
-                let Reply::Stream { ref ask, .. } = reply else {
+                let Reply::Stream {
+                    ref head,
+                    ref first,
+                    ref ask,
+                } = reply
+                else {
                     return hop_http::write_reply(ex, &reply).await;
                 };
-                let r = match hop_http::write_reply(ex, &reply).await {
-                    Ok(()) => hop_http::pump(ex, ask, streams).await,
-                    Err(e) => Err(e),
-                };
+                let r = hop_http::pump(ex, head, first, ask, streams).await;
                 streams.done();
                 r
             }

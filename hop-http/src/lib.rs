@@ -44,7 +44,7 @@ use core::future::Future;
 use core::time::Duration;
 
 use api::{Effect, LogStream, Method, Request, Response};
-use leanhttp::{AsyncRead, AsyncWrite, Close, Conn, Exchange};
+use leanhttp::{AsyncRead, AsyncWrite, Close, Conn, Exchange, Next, Source};
 
 pub use applib::tcp::TcpConn;
 
@@ -53,8 +53,13 @@ pub use applib::tcp::TcpConn;
 /// seconde houdt een tail vlot zonder de eigenaar te bestoken.
 pub const STREAM_POLL: Duration = Duration::from_millis(500);
 
-/// Na zoveel stilte schrijft een stroom een [`api::KEEPALIVE`]: de schrijf
-/// is hoe hij merkt dat zijn lezer weg is, en dan geeft hij zijn taak terug.
+/// Na zoveel stilte schrijft een stroom een [`api::KEEPALIVE`]. Die houdt
+/// proxies wakker; een lezer die weggaat merkt de stroom aan zijn leeskant
+/// (`leanhttp::Exchange::reader_gone`, in `Exchange::stream`), niet pas aan
+/// een mislukte schrijf. Op de netstack van HopOS faalt een schrijf naar
+/// een weggevallen lezer namelijk lang niet (gemeten 02-10 op een LicheeRV:
+/// een gesloten `/v1/events` hield zijn werker en zijn stroomplek 47 s of
+/// langer vast, en het dashboard kreeg 503 "too many open streams").
 pub const KEEPALIVE_EVERY: Duration = Duration::from_secs(15);
 
 /// Wat een open stroom de eigenaar vraagt: wat er sinds zijn volgnummer bij kwam.
@@ -222,6 +227,8 @@ pub async fn write_reply<C: Conn>(ex: &mut Exchange<'_, C>, reply: &Reply) -> Re
             }
             ex.flush().await
         }
+        // Alleen de kop en de eerste bytes; een levende stroom gaat via
+        // [`pump`], die de leeskant claimt en de lezer in de gaten houdt.
         Reply::Stream { head, first, .. } => {
             stream_head(ex, head)?;
             if !first.is_empty() {
@@ -268,13 +275,15 @@ where
     let out = leanhttp::serve(conn, async |ex: &mut Exchange<'_, C>| {
         let req = read_request(ex).await?;
         let reply = handler(req).await;
-        let Reply::Stream { ref ask, .. } = reply else {
+        let Reply::Stream {
+            ref head,
+            ref first,
+            ref ask,
+        } = reply
+        else {
             return write_reply(ex, &reply).await;
         };
-        let r = match write_reply(ex, &reply).await {
-            Ok(()) => pump(ex, ask, streams).await,
-            Err(e) => Err(e),
-        };
+        let r = pump(ex, head, first, ask, streams).await;
         streams.done();
         r
     })
@@ -285,40 +294,82 @@ where
     Ok(())
 }
 
-/// Houdt een [`Reply::Stream`] open: vraag de eigenaar wat er bij kwam,
-/// schrijf het, slaap [`STREAM_POLL`], tot de eigenaar zegt dat het af is of
-/// een schrijf faalt (de lezer is weg). Om de [`KEEPALIVE_EVERY`] zonder
-/// bytes een [`api::KEEPALIVE`].
+/// De bron van een [`Reply::Stream`] voor [`leanhttp::Exchange::stream`]:
+/// de antwoorden van de eigenaar, een [`api::KEEPALIVE`] na
+/// [`KEEPALIVE_EVERY`] stilte, en [`STREAM_POLL`] slaap als er niets is.
+struct Pump<'a, S: Streams> {
+    streams: &'a mut S,
+    ask: &'a Ask,
+    seq: u64,
+    keepalive: u64,
+    quiet: u64,
+    /// Wat meteen na de kop komt (de ping van `/v1/events`), één keer.
+    first: Option<&'a str>,
+    /// De eigenaar zei dat het af is; de volgende beurt is het einde.
+    ended: bool,
+}
+
+impl<S: Streams> Source for Pump<'_, S> {
+    async fn next(&mut self) -> Next {
+        if let Some(f) = self.first.take()
+            && !f.is_empty()
+        {
+            return Next::Data(f.as_bytes().to_vec());
+        }
+        if self.ended {
+            return Next::End;
+        }
+        let c = self.streams.poll(self.ask.at(self.seq)).await;
+        self.seq = c.seq;
+        self.ended = c.done;
+        if !c.text.is_empty() {
+            self.quiet = self.streams.now();
+            return Next::Data(c.text.into_bytes());
+        }
+        if c.done {
+            return Next::End;
+        }
+        let now = self.streams.now();
+        if now.saturating_sub(self.quiet) >= self.keepalive {
+            self.quiet = now;
+            return Next::Data(api::KEEPALIVE.as_bytes().to_vec());
+        }
+        Next::Nothing
+    }
+
+    async fn nap(&mut self) {
+        self.streams.nap(STREAM_POLL).await;
+    }
+}
+
+/// Houdt een [`Reply::Stream`] open via [`leanhttp::Exchange::stream`]: de
+/// kop van `head`, dan `first`, dan wat de eigenaar op `ask` antwoordt, tot
+/// hij zegt dat het af is of de lezer weggaat. Om de [`KEEPALIVE_EVERY`]
+/// zonder bytes een [`api::KEEPALIVE`].
 ///
 /// Publiek voor een eigen [`serve`]-lus die naast de antwoorden van de
 /// eigenaar ook doorgiftes kent (de cluster van `agentd-hopos`): de stroom
-/// van de eigenaar blijft zo één implementatie.
+/// van de eigenaar blijft zo één implementatie. De aanroeper meldt de
+/// stroom daarna af ([`Streams::done`]).
 pub async fn pump<C: Conn, S: Streams>(
     ex: &mut Exchange<'_, C>,
-    first: &Ask,
+    head: &Response,
+    first: &str,
+    ask: &Ask,
     streams: &mut S,
 ) -> Result<(), Error> {
-    let keepalive = u64::try_from(KEEPALIVE_EVERY.as_nanos()).unwrap_or(u64::MAX);
-    let mut seq = first.seq();
-    let mut quiet = streams.now();
-    loop {
-        let c = streams.poll(first.at(seq)).await;
-        if !c.text.is_empty() {
-            ex.write(c.text.as_bytes()).await?;
-            ex.flush().await?;
-            quiet = streams.now();
-        }
-        seq = c.seq;
-        if c.done {
-            return Ok(());
-        }
-        if streams.now().saturating_sub(quiet) >= keepalive {
-            ex.write(api::KEEPALIVE.as_bytes()).await?;
-            ex.flush().await?;
-            quiet = streams.now();
-        }
-        streams.nap(STREAM_POLL).await;
-    }
+    stream_head(ex, head)?;
+    let quiet = streams.now();
+    let mut src = Pump {
+        streams,
+        ask,
+        seq: ask.seq(),
+        keepalive: u64::try_from(KEEPALIVE_EVERY.as_nanos()).unwrap_or(u64::MAX),
+        quiet,
+        first: Some(first),
+        ended: false,
+    };
+    ex.stream(head.status, &mut src).await
 }
 
 /// De luide weigering van een [`Effect`] dat deze node nog niet uitvoert; `None` voor [`Effect::None`].

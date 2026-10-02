@@ -30,7 +30,7 @@ dependencies = [
  "discovery",
  "hostnet",
  "leader",
- "leanhttp",
+ "leanhttp 3.1.5",
  "runner",
  "store",
  "types",
@@ -51,7 +51,7 @@ dependencies = [
  "hopos-runner",
  "leader",
  "leancookie",
- "leanhttp",
+ "leanhttp 3.1.5",
  "leanhttps",
  "leans3",
  "leantls",
@@ -81,7 +81,7 @@ dependencies = [
  "dev",
  "executor",
  "heap",
- "leanhttp",
+ "leanhttp 3.1.4",
  "leannet",
  "netdev",
  "sync",
@@ -144,7 +144,7 @@ version = "3.0.3"
 dependencies = [
  "api",
  "applib",
- "leanhttp",
+ "leanhttp 3.1.5",
  "types",
 ]
 
@@ -162,7 +162,7 @@ dependencies = [
 name = "hostnet"
 version = "3.0.3"
 dependencies = [
- "leanhttp",
+ "leanhttp 3.1.5",
  "leanhttps",
  "leans3",
  "leantls",
@@ -178,8 +178,8 @@ dependencies = [
 
 [[package]]
 name = "leancookie"
-version = "3.1.4"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.4#81c9a77d763a1216e8e4a60cfb3e34d69be885dc"
+version = "3.1.5"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.5#1bc86fcb0f7048017cce850a0169843c21b87cd1"
 
 [[package]]
 name = "leanhttp"
@@ -187,11 +187,16 @@ version = "3.1.4"
 source = "git+https://github.com/xinix00/lean.git?tag=v3.1.4#81c9a77d763a1216e8e4a60cfb3e34d69be885dc"
 
 [[package]]
+name = "leanhttp"
+version = "3.1.5"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.5#1bc86fcb0f7048017cce850a0169843c21b87cd1"
+
+[[package]]
 name = "leanhttps"
-version = "3.1.4"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.4#81c9a77d763a1216e8e4a60cfb3e34d69be885dc"
+version = "3.1.5"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.5#1bc86fcb0f7048017cce850a0169843c21b87cd1"
 dependencies = [
- "leanhttp",
+ "leanhttp 3.1.5",
  "leantls",
 ]
 
@@ -202,13 +207,13 @@ source = "git+https://github.com/xinix00/lean.git?tag=v3.1.4#81c9a77d763a1216e8e
 
 [[package]]
 name = "leans3"
-version = "3.1.4"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.4#81c9a77d763a1216e8e4a60cfb3e34d69be885dc"
+version = "3.1.5"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.5#1bc86fcb0f7048017cce850a0169843c21b87cd1"
 
 [[package]]
 name = "leantls"
-version = "3.1.4"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.4#81c9a77d763a1216e8e4a60cfb3e34d69be885dc"
+version = "3.1.5"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.5#1bc86fcb0f7048017cce850a0169843c21b87cd1"
 
 [[package]]
 name = "netdev"
@@ -223,7 +228,7 @@ name = "runner"
 version = "3.0.3"
 dependencies = [
  "hostnet",
- "leanhttp",
+ "leanhttp 3.1.5",
  "leans3",
  "types",
 ]
@@ -235,7 +240,7 @@ dependencies = [
  "config",
  "discovery",
  "hostnet",
- "leanhttp",
+ "leanhttp 3.1.5",
  "leans3",
  "types",
 ]

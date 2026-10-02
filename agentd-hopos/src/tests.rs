@@ -691,12 +691,14 @@ fn events_and_tasks_through_the_leader() {
     };
     assert_eq!(r.status, 200);
 
-    // Het plafond: nog één stroom mag, de derde niet.
-    let second = block_on(n.handle(Port::Leader, &signed(Method::Get, "/v1/events"), T0));
-    assert!(matches!(second, Reply::Stream { .. }));
+    // Het plafond: tot `MAX_STREAMS` stromen mag, de volgende niet.
+    for _ in 1..crate::node::MAX_STREAMS {
+        let more = block_on(n.handle(Port::Leader, &signed(Method::Get, "/v1/events"), T0));
+        assert!(matches!(more, Reply::Stream { .. }));
+    }
     let Reply::Plain(r) = block_on(n.handle(Port::Leader, &signed(Method::Get, "/v1/events"), T0))
     else {
-        panic!("third stream admitted");
+        panic!("a stream over the ceiling was admitted");
     };
     assert_eq!(r.status, 503);
     // Na een afmelding weer wel.

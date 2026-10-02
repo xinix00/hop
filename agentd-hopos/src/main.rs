@@ -101,10 +101,10 @@ const TICK: Duration = Duration::from_secs(1);
 /// (`Handoff::none_free`, zie `forward::serve`).
 const READ_CAP: Duration = Duration::from_secs(2);
 
-/// Werkers per poort. Een open stroom houdt er een vast; met hoogstens twee
+/// Werkers per poort. Een open stroom houdt er een vast; met hoogstens drie
 /// stromen per node (`MAX_STREAMS` in de node) houdt elke poort er minstens
 /// één vrij voor de CLI en de GUI.
-const WORKERS: usize = 3;
+const WORKERS: usize = 4;
 
 /// Hoe vaak de acceptor kijkt of er een werker vrij is als ze alle bezig
 /// zijn. Een koud pad (een vierde gelijktijdige verbinding), dus pollen is

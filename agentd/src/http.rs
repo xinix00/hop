@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use api::{Method, Request, Response};
 use hostnet::{Call, Http, StdConn, block_on};
-use leanhttp::{AsyncRead, AsyncWrite, Close, Exchange, IoError};
+use leanhttp::{AsyncRead, AsyncWrite, Close, Exchange, IoError, Next, Source};
 use types::json;
 
 use crate::msg::{Chunk, Msg, Poll as Ask, Port, Reply};
@@ -301,45 +301,79 @@ fn stream_head<C: leanhttp::Conn>(ex: &mut Exchange<'_, C>, head: &Response) -> 
     write_head(ex, head)
 }
 
-/// Een open stroom uit de eigenaar: kop, `first`, en dan elke
-/// [`STREAM_POLL`] wat er sinds `seq` bij kwam, tot de eigenaar zegt dat
-/// het af is of de lezer weg is (een schrijf faalt).
+/// De bron van een stroom uit de eigenaar voor [`Exchange::stream`]: elke
+/// vraag blokkerend (deze thread is van deze ene stroom), een
+/// [`api::KEEPALIVE`] na [`KEEPALIVE_EVERY`] stilte, en [`STREAM_POLL`]
+/// slaap als er niets is.
+struct OwnerSource<'a, F: Fn(u64) -> Ask> {
+    owner: &'a Sender<Msg>,
+    ask: F,
+    seq: u64,
+    quiet: Instant,
+    /// Wat meteen na de kop komt (de ping van `/v1/events`), één keer.
+    first: Option<&'a str>,
+    /// De eigenaar zei dat het af is; de volgende beurt is het einde.
+    ended: bool,
+}
+
+impl<F: Fn(u64) -> Ask> Source for OwnerSource<'_, F> {
+    async fn next(&mut self) -> Next {
+        if let Some(f) = self.first.take()
+            && !f.is_empty()
+        {
+            return Next::Data(f.as_bytes().to_vec());
+        }
+        if self.ended {
+            return Next::End;
+        }
+        // De eigenaar is weg: de node stopt, de stroom ook.
+        let Some(c) = poll_owner(self.owner, (self.ask)(self.seq)) else {
+            return Next::End;
+        };
+        self.seq = c.seq;
+        self.ended = c.done;
+        if !c.text.is_empty() {
+            self.quiet = Instant::now();
+            return Next::Data(c.text.into_bytes());
+        }
+        if c.done {
+            return Next::End;
+        }
+        if self.quiet.elapsed() >= KEEPALIVE_EVERY {
+            self.quiet = Instant::now();
+            return Next::Data(api::KEEPALIVE.as_bytes().to_vec());
+        }
+        Next::Nothing
+    }
+
+    async fn nap(&mut self) {
+        // Deze thread is van deze ene stroom: slapen is hier wachten.
+        std::thread::sleep(STREAM_POLL);
+    }
+}
+
+/// Een open stroom uit de eigenaar via [`Exchange::stream`]: kop, `first`,
+/// en dan elke [`STREAM_POLL`] wat er sinds `seq` bij kwam, tot de eigenaar
+/// zegt dat het af is of de lezer weg is (leanhttp sondeert de leeskant
+/// elke beurt; op deze blokkerende socket is dat één `read` van 1 ms).
 async fn pump<C: leanhttp::Conn>(
     ex: &mut Exchange<'_, C>,
     owner: &Sender<Msg>,
     head: &Response,
     first: &str,
-    mut seq: u64,
+    seq: u64,
     ask: impl Fn(u64) -> Ask,
 ) -> leanhttp::Result {
     stream_head(ex, head)?;
-    if !first.is_empty() {
-        ex.write(first.as_bytes()).await?;
-    }
-    ex.flush().await?;
-    let mut quiet = Instant::now();
-    loop {
-        let Some(c) = poll_owner(owner, ask(seq)) else {
-            // De eigenaar is weg: de node stopt, de stroom ook.
-            return Ok(());
-        };
-        if !c.text.is_empty() {
-            ex.write(c.text.as_bytes()).await?;
-            ex.flush().await?;
-            quiet = Instant::now();
-        }
-        seq = c.seq;
-        if c.done {
-            return Ok(());
-        }
-        if quiet.elapsed() >= KEEPALIVE_EVERY {
-            ex.write(api::KEEPALIVE.as_bytes()).await?;
-            ex.flush().await?;
-            quiet = Instant::now();
-        }
-        // Deze thread is van deze ene stroom: slapen is hier wachten.
-        std::thread::sleep(STREAM_POLL);
-    }
+    let mut src = OwnerSource {
+        owner,
+        ask,
+        seq,
+        quiet: Instant::now(),
+        first: Some(first),
+        ended: false,
+    };
+    ex.stream(head.status, &mut src).await
 }
 
 /// Vraagt de eigenaar één [`Ask`]; `None` als hij niet (meer) antwoordt.
@@ -386,6 +420,9 @@ async fn relay<C: leanhttp::Conn>(
         r.body = src.read_to_end(PROXY_MAX_BODY).unwrap_or_default();
         return write_reply(ex, &Reply::Plain(r)).await;
     }
+    // De leeskant vóór de kop, zodat de lus tussen twee happen kan zien dat
+    // de lezer wegging (de bron gaat dan mee dicht).
+    ex.claim_done().await?;
     stream_head(ex, &Response::empty(200))?;
     ex.flush().await?;
     let mut buf = vec![0u8; 16 << 10];
@@ -395,6 +432,9 @@ async fn relay<C: leanhttp::Conn>(
             Ok(0) | Err(_) => return Ok(()),
             Ok(n) => n,
         };
+        if ex.reader_gone().await {
+            return Ok(());
+        }
         ex.write(buf.get(..n).unwrap_or_default()).await?;
         ex.flush().await?;
     }
@@ -605,10 +645,14 @@ mod tests {
     use super::*;
 
     /// Een verbinding in het geheugen: het verzoek erin, het antwoord eruit.
+    /// De client blijft na zijn verzoek lezen (een lezer van een stroom): na
+    /// de invoer `Pending`, en een lees met termijn (de sondering van
+    /// `reader_gone`) verloopt meteen.
     struct Mem {
         input: Vec<u8>,
         at: usize,
         out: Rc<RefCell<Vec<u8>>>,
+        probing: bool,
     }
 
     impl AsyncRead for Mem {
@@ -618,10 +662,22 @@ mod tests {
             buf: &mut [u8],
         ) -> Poll<Result<usize, IoError>> {
             let rest = &self.input[self.at..];
+            if rest.is_empty() {
+                return if self.probing {
+                    Poll::Ready(Err(IoError::TimedOut))
+                } else {
+                    Poll::Pending
+                };
+            }
             let n = rest.len().min(buf.len());
             buf[..n].copy_from_slice(&rest[..n]);
             self.at += n;
             Poll::Ready(Ok(n))
+        }
+
+        fn set_read_timeout(&mut self, t: Option<Duration>) -> Result<(), IoError> {
+            self.probing = t.is_some();
+            Ok(())
         }
     }
 
@@ -668,6 +724,7 @@ mod tests {
             input: b"GET /x HTTP/1.1\r\nHost: n\r\n\r\n".to_vec(),
             at: 0,
             out: out.clone(),
+            probing: false,
         };
         block_on(leanhttp::serve(conn, async |ex: &mut Exchange<'_, Mem>| {
             f(ex).await
@@ -765,6 +822,53 @@ mod tests {
             t.elapsed()
         );
         drop(held);
+    }
+
+    #[test]
+    fn a_reader_that_leaves_frees_its_stream_within_a_poll() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        // De eigenaar: `/v1/events` is een stroom die nooit af is, en elke
+        // vraag levert niets nieuws; een afmelding gaat naar de test.
+        let (tx, rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            for m in rx {
+                match m {
+                    Msg::Http { reply, .. } => {
+                        let _ = reply.send(Reply::Subscribe {
+                            head: Response::empty(200),
+                            seq: 0,
+                        });
+                    }
+                    Msg::Poll { reply, .. } => {
+                        let _ = reply.send(Chunk::default());
+                    }
+                    Msg::StreamDone => {
+                        let _ = done_tx.send(());
+                    }
+                    _ => {}
+                }
+            }
+        });
+        spawn_pool(&l, Port::Agent, &tx, b"").unwrap();
+
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(b"GET /v1/events HTTP/1.1\r\nHost: n\r\n\r\n")
+            .unwrap();
+        let mut r = BufReader::new(s.try_clone().unwrap());
+        let mut line = String::new();
+        r.read_line(&mut line).unwrap();
+        assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+        // De lezer gaat weg; de stroom moet dat binnen een paar polls zien,
+        // niet pas na twee keepalives (30 s).
+        drop(r);
+        drop(s);
+        let t = Instant::now();
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the stream did not notice its reader leaving");
+        assert!(t.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

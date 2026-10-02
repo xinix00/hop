@@ -55,9 +55,11 @@ pub(crate) const LEADER_TICK: Nanos = 10 * SECOND;
 
 /// Hoeveel stromen (`/v1/events`, een log-tail) tegelijk open mogen staan.
 /// Een stroom houdt een verbindingstaak vast zolang hij loopt; de binary
-/// heeft er per poort een vast aantal (`WORKERS`, 3), dus met twee stromen
-/// houdt elke poort er minstens één vrij voor de CLI en de GUI.
-pub(crate) const MAX_STREAMS: usize = 2;
+/// heeft er per poort een vast aantal (`WORKERS`, 4), dus met drie stromen
+/// houdt elke poort er minstens één vrij voor de CLI en de GUI. Drie, omdat
+/// het dashboard er twee nodig heeft (`/v1/events` en een log-tail) en een
+/// herlaad er kort een derde bij opent terwijl de oude nog sluit.
+pub(crate) const MAX_STREAMS: usize = 3;
 
 /// De eerste dynamische poort; elke taak heeft een eigen IP op het slot-LAN,
 /// dus een nummer botst alleen binnen één taak.

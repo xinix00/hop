@@ -18,7 +18,7 @@ discovery = { path = "../discovery" }
 runner = { path = "../runner", features = ["std"] }
 hostnet = { path = "../hostnet" }
 store = { path = "../store" }
-leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.4" }
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.5" }
 
 [lints]
 workspace = true

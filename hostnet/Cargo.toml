@@ -8,10 +8,10 @@ repository.workspace = true
 description = "De host-kant van het net (std): std-sockets als leanhttp-verbinding, een block_on, de HTTP(S)-client met de Mozilla-wortels, en het leans3-transport."
 
 [dependencies]
-leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.4" }
-leanhttps = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.4" }
-leantls = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.4" }
-leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.4" }
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.5" }
+leanhttps = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.5" }
+leantls = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.5" }
+leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.5" }
 
 [lints]
 workspace = true
