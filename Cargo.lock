@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "abi"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.10#ed14d2c9a0b6fcdc021b0b4eec8b79cb19bbff4f"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
 dependencies = [
  "bounded",
  "dev",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "agent"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/hop.git?tag=v3.0.0-alpha.10#998ebdc571a59ce62ea0e444cd33872e54f99732"
+source = "git+https://github.com/xinix00/hop.git?tag=v3.0.0#54a304d105c57ef5ba1f093b8d7918c95e75c1ac"
 dependencies = [
  "config",
  "types",
@@ -23,7 +23,7 @@ dependencies = [
 [[package]]
 name = "api"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/hop.git?tag=v3.0.0-alpha.10#998ebdc571a59ce62ea0e444cd33872e54f99732"
+source = "git+https://github.com/xinix00/hop.git?tag=v3.0.0#54a304d105c57ef5ba1f093b8d7918c95e75c1ac"
 dependencies = [
  "agent",
  "auth",
@@ -35,12 +35,13 @@ dependencies = [
 [[package]]
 name = "applib"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.10#ed14d2c9a0b6fcdc021b0b4eec8b79cb19bbff4f"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
 dependencies = [
  "abi",
  "bounded",
  "dev",
  "executor",
+ "heap",
  "leanhttp",
  "leannet",
  "netdev",
@@ -50,17 +51,17 @@ dependencies = [
 [[package]]
 name = "auth"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/hop.git?tag=v3.0.0-alpha.10#998ebdc571a59ce62ea0e444cd33872e54f99732"
+source = "git+https://github.com/xinix00/hop.git?tag=v3.0.0#54a304d105c57ef5ba1f093b8d7918c95e75c1ac"
 
 [[package]]
 name = "bounded"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.10#ed14d2c9a0b6fcdc021b0b4eec8b79cb19bbff4f"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
 
 [[package]]
 name = "config"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/hop.git?tag=v3.0.0-alpha.10#998ebdc571a59ce62ea0e444cd33872e54f99732"
+source = "git+https://github.com/xinix00/hop.git?tag=v3.0.0#54a304d105c57ef5ba1f093b8d7918c95e75c1ac"
 dependencies = [
  "types",
 ]
@@ -68,20 +69,25 @@ dependencies = [
 [[package]]
 name = "dev"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.10#ed14d2c9a0b6fcdc021b0b4eec8b79cb19bbff4f"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
 
 [[package]]
 name = "executor"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.10#ed14d2c9a0b6fcdc021b0b4eec8b79cb19bbff4f"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
 dependencies = [
  "dev",
  "sync",
 ]
 
 [[package]]
-name = "hoplib"
+name = "heap"
 version = "3.0.0"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
+
+[[package]]
+name = "hoplib"
+version = "3.0.1"
 dependencies = [
  "api",
  "applib",
@@ -94,7 +100,7 @@ dependencies = [
 [[package]]
 name = "hostnet"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/hop.git?tag=v3.0.0-alpha.10#998ebdc571a59ce62ea0e444cd33872e54f99732"
+source = "git+https://github.com/xinix00/hop.git?tag=v3.0.0#54a304d105c57ef5ba1f093b8d7918c95e75c1ac"
 dependencies = [
  "leanhttp",
  "leanhttps",
@@ -105,7 +111,7 @@ dependencies = [
 [[package]]
 name = "leader"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/hop.git?tag=v3.0.0-alpha.10#998ebdc571a59ce62ea0e444cd33872e54f99732"
+source = "git+https://github.com/xinix00/hop.git?tag=v3.0.0#54a304d105c57ef5ba1f093b8d7918c95e75c1ac"
 dependencies = [
  "config",
  "types",
@@ -114,12 +120,12 @@ dependencies = [
 [[package]]
 name = "leanhttp"
 version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.3#7264d7d2a5ac092240a36021811340df1c28cfff"
 
 [[package]]
 name = "leanhttps"
 version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.3#7264d7d2a5ac092240a36021811340df1c28cfff"
 dependencies = [
  "leanhttp",
  "leantls",
@@ -127,23 +133,23 @@ dependencies = [
 
 [[package]]
 name = "leannet"
-version = "3.0.0"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.0.0#a7e089448c903fe199b604d246401cbd88640de3"
+version = "3.1.1"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.3#7264d7d2a5ac092240a36021811340df1c28cfff"
 
 [[package]]
 name = "leans3"
 version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.3#7264d7d2a5ac092240a36021811340df1c28cfff"
 
 [[package]]
 name = "leantls"
 version = "3.1.1"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.1#db6724745a2c579382c54a68c73c18d643d40038"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.3#7264d7d2a5ac092240a36021811340df1c28cfff"
 
 [[package]]
 name = "netdev"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.10#ed14d2c9a0b6fcdc021b0b4eec8b79cb19bbff4f"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
 dependencies = [
  "sync",
 ]
@@ -151,9 +157,9 @@ dependencies = [
 [[package]]
 name = "sync"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0-alpha.10#ed14d2c9a0b6fcdc021b0b4eec8b79cb19bbff4f"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad934072306991e56488e89de295b"
 
 [[package]]
 name = "types"
 version = "3.0.0"
-source = "git+https://github.com/xinix00/hop.git?tag=v3.0.0-alpha.10#998ebdc571a59ce62ea0e444cd33872e54f99732"
+source = "git+https://github.com/xinix00/hop.git?tag=v3.0.0#54a304d105c57ef5ba1f093b8d7918c95e75c1ac"

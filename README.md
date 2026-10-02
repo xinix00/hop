@@ -30,7 +30,7 @@ travels. An empty or missing key sends no header (unauthenticated mode).
 
 ```toml
 [dependencies]
-hoplib = { git = "https://github.com/xinix00/hoplib.git", tag = "v3.0.0", features = ["std"] }
+hoplib = { git = "https://github.com/xinix00/hoplib.git", tag = "v3.0.1", features = ["std"] }
 ```
 
 On the host:
@@ -106,7 +106,7 @@ tools/gate.sh   # host tests (all features), clippy -D warnings, fmt, no_std bui
 
 The tests run requests through hop's real `api::LeaderApi` (HMAC check
 included) and read SSE bytes produced by `api::EventLog`. Dependencies come
-only from git tags: hop v3.0.0-alpha.10, HopOS v3.0.0-alpha.10, lean v3.1.1.
+only from git tags: hop v3.0.0, HopOS v3.0.0, lean v3.1.3.
 
 ## License
 

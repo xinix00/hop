@@ -69,6 +69,11 @@ impl Cluster for FakeCluster {
     fn placed_counts(&self) -> Vec<(String, i64)> {
         self.jobs.iter().map(|j| (j.name.clone(), 2)).collect()
     }
+    fn placed_agents(&self, name: &str) -> Vec<types::Agent> {
+        // De taken van de nep-rondgang staan alle op node-1.
+        let on = |a: &&types::Agent| a.id == "node-1" && self.has_job(name);
+        self.agents.iter().filter(on).cloned().collect()
+    }
     fn is_settled(&self) -> bool {
         false
     }
@@ -137,7 +142,7 @@ fn leader(c: &mut FakeCluster, key: &str, req: &Request) -> Response {
     let api = LeaderApi::new(key.as_bytes(), "prod");
     let (r, effect) = api.handle(c, 0, &to_api(req));
     let r = match effect {
-        LeaderEffect::Tasks { agents } => {
+        LeaderEffect::Tasks { agents, scope } => {
             let results: Vec<(String, Option<Vec<Task>>)> = agents
                 .into_iter()
                 .map(|(id, _)| {
@@ -146,7 +151,7 @@ fn leader(c: &mut FakeCluster, key: &str, req: &Request) -> Response {
                     (id, tasks)
                 })
                 .collect();
-            api::tasks_reply(&results)
+            scope.reply(&results)
         }
         _ => r,
     };
@@ -351,11 +356,17 @@ fn job_status_and_its_fallback() {
         .unwrap()
         .unwrap();
     assert!(st.agents.is_empty() && st.tasks.is_empty());
-    // Hop tot en met alpha.10: 404, en de terugval filtert /v1/tasks.
+    // De leader van hop zelf: alleen node-1, alleen de taken van api.
     let mut cl = cluster();
     let r = leader(&mut cl, KEY, call.request());
-    assert_eq!(r.status, 404);
-    assert_eq!(call.parse(&r).unwrap(), None);
+    let st = call.parse(&r).unwrap().unwrap();
+    assert_eq!(st.agents.len(), 1);
+    assert_eq!(st.agents[0].id, "node-1");
+    let mine = st.tasks[0].tasks.as_ref().unwrap();
+    assert_eq!((mine.len(), mine[0].id.as_str()), (1, "t1"));
+    // Hop tot en met alpha.10: 404, en de terugval filtert /v1/tasks.
+    let old = reply(404, r#"{"error":"not found"}"#);
+    assert_eq!(call.parse(&old).unwrap(), None);
     let t = client().tasks().unwrap();
     let all = t
         .parse(&leader(&mut cl, KEY, t.request()))
