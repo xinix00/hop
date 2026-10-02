@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "agent"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "config",
  "types",
@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "agentd"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "agent",
  "api",
@@ -38,7 +38,7 @@ dependencies = [
 
 [[package]]
 name = "agentd-hopos"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "abi",
  "agent",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "api"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "agent",
  "auth",
@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "auth"
-version = "3.0.0"
+version = "3.0.1"
 
 [[package]]
 name = "bounded"
@@ -98,7 +98,7 @@ source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad93407
 
 [[package]]
 name = "cli"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "auth",
  "hostnet",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "types",
 ]
@@ -119,7 +119,7 @@ source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad93407
 
 [[package]]
 name = "discovery"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "types",
 ]
@@ -140,7 +140,7 @@ source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad93407
 
 [[package]]
 name = "hop-http"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "api",
  "applib",
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "hopos-runner"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "abi",
  "agent",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "hostnet"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "leanhttp",
  "leanhttps",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "leader"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "config",
  "types",
@@ -220,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "runner"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "hostnet",
  "leanhttp",
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "store"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "config",
  "discovery",
@@ -247,4 +247,4 @@ source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.0#e155d96533aad93407
 
 [[package]]
 name = "types"
-version = "3.0.0"
+version = "3.0.1"
