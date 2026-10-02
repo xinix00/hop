@@ -19,8 +19,8 @@ One crate, three faces:
 
 Talking to Hop (signing with `X-Hop-Auth`, the routes, reading the replies)
 is [hoplib](https://github.com/xinix00/hoplib), the client shared by the Hop
-plugins. Dependencies come from git tags only: hop `v3.0.0-alpha.10`, HopOS
-`v3.0.0-alpha.10`, lean `v3.1.1`, hoplib `v3.0.0`.
+plugins. Dependencies come from git tags only: hop `v3.0.0`, HopOS
+`v3.0.0`, lean `v3.1.3`, hoplib `v3.0.1`.
 
 ## Host binary
 
