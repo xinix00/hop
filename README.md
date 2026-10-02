@@ -2,9 +2,8 @@
 
 Een node achter NAT publiek bereikbaar via een Cloudflare-tunnel, zonder
 inkomende poort. De app belt uit naar de edge van Cloudflare en praat het
-tunnelprotocol zelf, op applib en de lean-crates. De Rust-vorm van
-`OLD/apps/cloudflared-lean` (Go, TamaGo); dezelfde protocolkeuzes, dezelfde
-env-namen, dezelfde grenzen.
+tunnelprotocol zelf, op applib en de lean-crates. Voor de volledige
+cloudflared (zijn eigen CLI in een slot) zie `go/cloudflared`.
 
 ```
 4,44 MB RAM   cloudflared-lean in Go (TamaGo, gemeten 19-08)
