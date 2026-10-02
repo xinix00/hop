@@ -2,7 +2,8 @@
 //!
 //! Bezit alleen de afleiding; alles hier draait één keer, vóór de eerste
 //! thread (handboek §2: eenmalige initialisatie in `main`). De regels zijn
-//! die van `OLD/cmd/agent/main.go`: vlaggen gaan over de config heen, geen
+//! die van `cmd/agent/main.go` (github.com/xinix00/hop, tag v1.0.7): vlaggen
+//! gaan over de config heen, geen
 //! lock-backend betekent standalone, en het node-id is config, dan
 //! `data/node-id`, dan een nieuw id dat daar bewaard wordt.
 

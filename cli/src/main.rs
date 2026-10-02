@@ -1,4 +1,5 @@
-//! `hop`: het commando voor een Hop-cluster, zoals `OLD/cmd/cli` in Go.
+//! `hop`: het commando voor een Hop-cluster, zoals `cmd/cli` in Go
+//! (github.com/xinix00/hop, tag v1.0.7).
 //!
 //! Commando's: `apply` (een jobspec-bestand of vlaggen), `jobs`, `status`,
 //! `agents [id]`, `logs <job|taak>` (met `--follow` een levende tail),

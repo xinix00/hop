@@ -6,7 +6,8 @@
 //! wat TLS nodig heeft: een certificaat is geldig tussen twee data, dus een
 //! node zonder echte tijd heeft geen echte ketenverificatie. Daarom hier,
 //! bij start en elk uur, zoals de Go-kern (`hopnet.SyncTime` op
-//! `pool.ntp.org`, OLD/metal/cmd/hopos/main.go).
+//! `pool.ntp.org`, `metal/cmd/hopos/main.go` op github.com/xinix00/HopOS,
+//! tag v2.2.8).
 //!
 //! Dit module bezit het pakket en zijn strenge lezing ([`request`],
 //! [`parse`]) en één synchronisatie ([`sync()`]): naam opzoeken, vragen,

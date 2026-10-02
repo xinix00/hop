@@ -1,4 +1,5 @@
-//! De tests van `OLD/cmd/agent/node_id_test.go` naam voor naam, plus de
+//! De tests van `cmd/agent/node_id_test.go` (github.com/xinix00/hop, tag
+//! v1.0.7) naam voor naam, plus de
 //! vlaggen en de netwerkkeuze van de boot.
 
 use std::net::Ipv4Addr;

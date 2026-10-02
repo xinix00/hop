@@ -1,5 +1,5 @@
-//! De tests van `OLD/internal/leader`, per Go-bestand één module, met
-//! dezelfde namen in snake_case.
+//! De tests van `internal/leader` uit de Go-generatie (github.com/xinix00/hop,
+//! tag v1.0.7), per Go-bestand één module, met dezelfde namen in snake_case.
 //!
 //! Go wachtte met `time.Sleep` tot goroutines klaar waren; hier is alles
 //! synchroon, dus een bewering volgt direct op de handeling.

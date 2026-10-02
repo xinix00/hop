@@ -1,15 +1,16 @@
 //! De lock van de cluster op HopOS: welke opslag de lease en de clusterstaat krijgen, en de async contracten ervan.
 //!
 //! In Go deed een HopOS-node alleen de S3-lock (`hopos.s3.*`, zie
-//! `OLD/pkg/agentboot`). Deze bewoner spreekt beide protocollen van de host
-//! (`store`): een hoplockserver (`HOPOS_LOCK_URL`, het CAS-protocol over
-//! http) en S3 (`HOPOS_S3_*`, leans3 over leanhttps met de wortels). De
-//! keuze is die van de daemon (`store::open_lease`): het type van de lock
-//! kiest de lease, zonder type is een URL een hoplockserver, en zonder
-//! lock blijft de node de standalone leader die hij was. De staat
-//! (`state/<cluster>`) gaat waar [`discovery::state_store_for`] hem zet,
-//! dezelfde poort als de daemon, zodat een host-agent en een HopOS-node van
-//! één cluster dezelfde staat lezen.
+//! `pkg/agentboot` op github.com/xinix00/hop, tag v1.0.7). Deze bewoner
+//! spreekt beide protocollen van de host (`store`): een hoplockserver
+//! (`HOPOS_LOCK_URL`, het CAS-protocol over http) en S3 (`HOPOS_S3_*`,
+//! leans3 over leanhttps met de wortels). De keuze is die van de daemon
+//! (`store::open_lease`): het type van de lock kiest de lease, zonder type
+//! is een URL een hoplockserver, en zonder lock blijft de node de
+//! standalone leader die hij was. De staat (`state/<cluster>`) gaat waar
+//! [`discovery::state_store_for`] hem zet, dezelfde poort als de daemon,
+//! zodat een host-agent en een HopOS-node van één cluster dezelfde staat
+//! lezen.
 //!
 //! S3 alleen maakt geen cluster: `hopos.s3.*` is ook de object-store van de
 //! apps (de store-ops), en een node die daarvoor een bucket krijgt, is niet

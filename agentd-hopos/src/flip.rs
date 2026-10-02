@@ -21,7 +21,7 @@
 //! kijken.
 //!
 //! De KOUDE flip (`"cold": true`, 29-09) is dezelfde weg met één vlag in
-//! `n` van de FLIP ([`FLIP_COLD`]) en één stap ertussen: na de download en
+//! `n` van de FLIP ([`FLIP_COLD`](abi::systemapi::FLIP_COLD)) en één stap ertussen: na de download en
 //! vóór de FLIP stopt Hop zijn eigen taken op deze node (`node.rs`), zodat
 //! de kern alleen nog stopt wat Hop niet kende. De kern springt dan zonder
 //! bewoners over te dragen en start Hop koud; de jobs staan in de
@@ -32,6 +32,8 @@ use alloc::format;
 use alloc::string::String;
 use core::future::Future;
 
+use abi::layout::ABI_TAIL;
+use abi::systemapi::{FLIP_COLD, PrivOp};
 use hopos_runner::{Call, KernSys};
 use runner::{Slot, StartSpec, Streamed, SystemApi};
 
@@ -41,19 +43,6 @@ use crate::node::{Images, Sink};
 /// (`kern::system::FLIP_BUNDLE_JOB` in HopOS). Hier als tekst tot de
 /// getagde HopOS hem in `abi` draagt.
 pub const FLIP_BUNDLE_JOB: &str = "hopos.flip-bundle";
-
-/// `abi::systemapi::PrivOp::Flip`.
-const OP_FLIP: u8 = 0x46;
-
-/// De koude vlag in `n` van de FLIP (`abi::systemapi::FLIP_COLD` in HopOS,
-/// na alpha.9; hier als getal tot de getagde HopOS hem draagt). Een kern
-/// van vóór de vlag weigert hem niet maar flipt warm, en dan weigert hij
-/// een bundel met een andere switch-code alsnog vóór de sprong.
-pub const FLIP_COLD: u64 = 1;
-
-/// De ABI-staart van een partitie (`abi::layout::ABI_TAIL`, 2 MiB): de
-/// bundel moet eronder passen.
-const TAIL: u64 = 2 << 20;
 
 /// Hoe lang de FLIP-call mag duren: de kern hasht en legt de nieuwe kern
 /// neer voor hij antwoordt (op QEMU ruim onder een seconde).
@@ -74,7 +63,7 @@ pub trait KernFlip {
 impl<C: Call> KernFlip for KernSys<C> {
     async fn flip(&mut self, slot: Slot, sha256_hex: &str, cold: bool) -> Result<(), String> {
         let req = applib::sys::Req {
-            op: OP_FLIP,
+            op: PrivOp::Flip.op(),
             seq: 0,
             off: u64::from(slot.0),
             n: if cold { FLIP_COLD } else { 0 },
@@ -99,7 +88,8 @@ struct Bundle<'a, S> {
 
 impl<S: SystemApi> Sink for Bundle<'_, S> {
     async fn begin(&mut self, size: u64) -> Result<(), String> {
-        let mem = size.saturating_add(TAIL).next_multiple_of(2 << 20);
+        // De bundel moet onder de ABI-staart van de partitie passen.
+        let mem = size.saturating_add(ABI_TAIL).next_multiple_of(2 << 20);
         let spec = StartSpec {
             image_size: size,
             mem_limit: mem,
@@ -262,7 +252,6 @@ mod tests {
         let start = abi::systemapi::PrivOp::StartSlot.op();
         let stream = abi::systemapi::PrivOp::StreamImage.op();
         let flip = abi::systemapi::PrivOp::Flip.op();
-        assert_eq!(OP_FLIP, flip);
         assert_eq!(st.ops.first(), Some(&start));
         assert!(st.ops.contains(&stream));
         assert!(st.ops.contains(&flip), "no FLIP op: {:?}", st.ops);
@@ -287,7 +276,6 @@ mod tests {
         let st = k.0.borrow();
         assert!(st.slots.is_empty(), "bundle slot left behind");
         assert!(st.ops.contains(&abi::systemapi::PrivOp::Flip.op()));
-        assert_eq!(FLIP_COLD, 1);
     }
 
     #[test]

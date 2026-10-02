@@ -1,4 +1,5 @@
-//! De tests van `OLD/cmd/cli/main_test.go`, naam voor naam, plus de
+//! De tests van `cmd/cli/main_test.go` (github.com/xinix00/hop, tag v1.0.7),
+//! naam voor naam, plus de
 //! vlaggen, de tabel en de body van `apply`.
 
 use crate::jobspec::{ApplyFlags, build_job, parse_kv, parse_memory, parse_pairs};

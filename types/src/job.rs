@@ -1,8 +1,9 @@
 //! De jobspec: wat de gebruiker wil draaien, en de JSON-vorm ervan.
 //!
 //! Een job heeft geen id: de naam is de sleutel (upsert op naam). De velden
-//! en hun JSON-namen zijn die van `OLD/internal/types/types.go`; wat daar
-//! `omitempty` was, wordt hier ook weggelaten bij het schrijven.
+//! en hun JSON-namen zijn die van `internal/types/types.go` in de
+//! Go-generatie (github.com/xinix00/hop, tag v1.0.7); wat daar `omitempty`
+//! was, wordt hier ook weggelaten bij het schrijven.
 
 use alloc::string::String;
 use alloc::vec::Vec;

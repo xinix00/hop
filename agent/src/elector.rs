@@ -1,6 +1,7 @@
 //! De verkiezingskant van de eigenaar: het laatste antwoord van de lease-opslag en de timer van onze eigen lease.
 //!
-//! Go's `AsyncDiscoverer` (`OLD/internal/agentloop/async.go`), met één
+//! Go's `AsyncDiscoverer` (`internal/agentloop/async.go` op
+//! github.com/xinix00/hop, tag v1.0.7), met één
 //! eigenaar per staat in plaats van een ops-kanaal naar een goroutine. De
 //! opslag zelf (S3, hoplockserver, in geheugen) is van een andere eigenaar:
 //! een thread op de host, een taak op HopOS. De [`Elector`] stuurt die
@@ -266,7 +267,7 @@ impl<O: LeaseOps> Discoverer for Elector<O> {
 
 #[cfg(test)]
 mod tests {
-    //! De tests van `OLD/internal/agentloop/async_test.go` voor zover ze de
+    //! De tests van `internal/agentloop/async_test.go` (v1.0.7) voor zover ze de
     //! elector zelf raken: antwoorden komen uit het laatste antwoord, en er
     //! staat hoogstens één opdracht van elke soort uit.
 

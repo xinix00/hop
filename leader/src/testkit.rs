@@ -1,5 +1,6 @@
 //! Nep-agents voor de tests: de Rust-vorm van `mockAgent` uit
-//! `OLD/internal/leader/failover_test.go`.
+//! `internal/leader/failover_test.go` in de Go-generatie
+//! (github.com/xinix00/hop, tag v1.0.7).
 //!
 //! Go startte per agent een `httptest`-server; hier is het een tabel achter
 //! de [`Transport`]-trait, per endpoint. Het gedrag is dat van de Go-mock:

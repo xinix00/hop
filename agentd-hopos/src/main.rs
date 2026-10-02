@@ -229,20 +229,15 @@ impl Connect for SlotConnect {
     }
 }
 
-/// De resolver van de bewoner.
-///
-/// TODO: HopOS v3.0.0-alpha.5 heeft nog geen resolver in applib; die zit
-/// in de volgende tag (`applib::appnet::resolve`, één A-vraag over UDP naar
-/// `DNS` uit de env). Tot de bump is een hostnaam een luide fout met de
-/// naam erin, en werken alleen adressen. De bump is deze ene impl:
-/// `appnet::resolve(host).await.map_err(|e| format!("{e}"))`.
+/// De resolver van de bewoner: `applib::appnet::resolve`, één A-vraag over
+/// UDP naar `DNS` uit de env.
 #[derive(Copy, Clone, Default)]
 struct SlotResolver;
 
 impl Resolve for SlotResolver {
     async fn resolve(&mut self, host: &str) -> Result<[u8; 4], String> {
-        // De resolver van applib (sinds HopOS alpha.6): een naam die al een
-        // IP is gaat er meteen doorheen, de rest via de DNS uit de env.
+        // Een naam die al een IP is gaat er meteen doorheen, de rest via de
+        // DNS uit de env.
         applib::appnet::resolve(host)
             .await
             .map_err(|e| alloc::format!("{e}"))

@@ -5,8 +5,9 @@
 //! zodat een job die de API binnenkomt byte voor byte dezelfde is als die de
 //! leader naar een agent stuurt en die in de gecommitte snapshot staat.
 //!
-//! De JSON-vorm volgt de Go-generatie (`OLD/internal/types`) veld voor veld,
-//! zodat de GUI, de CLI en bestaande snapshots blijven werken.
+//! De JSON-vorm volgt de Go-generatie (github.com/xinix00/hop, tag v1.0.7,
+//! `internal/types`) veld voor veld, zodat de GUI, de CLI en bestaande
+//! snapshots blijven werken.
 //!
 //! Alles is `no_std` met `alloc`, en elke allocatie is faalbaar: een job komt
 //! van buiten, en een te grote job is een fout, geen afgebroken programma.
@@ -114,8 +115,9 @@ pub fn try_push_str(out: &mut alloc::string::String, s: &str) -> Result {
 
 #[cfg(test)]
 mod tests {
-    //! De tests van `OLD/internal/types/types_test.go`, plus de jobspecs in
-    //! `OLD/jobs/` als vectoren.
+    //! De tests van `internal/types/types_test.go` uit de Go-generatie
+    //! (github.com/xinix00/hop, tag v1.0.7), plus de jobspecs uit `jobs/`
+    //! daar als vectoren, letterlijk in de toetsen overgenomen.
 
     use super::*;
     use crate::time::SECOND;
@@ -253,7 +255,7 @@ mod tests {
 
     #[test]
     fn job_vectors_from_old_jobs() {
-        // OLD/jobs/counter.json en counter-docker.json, letterlijk.
+        // jobs/counter.json en counter-docker.json van v1.0.7, letterlijk.
         let counter = br#"{
   "name": "counter",
   "command": "sh -c 'i=0; while true; do echo counter: $i; i=$((i+1)); sleep 1; done'",
@@ -287,7 +289,7 @@ mod tests {
 
     #[test]
     fn job_readme_spec_parses() {
-        // De jobspec uit OLD/README.md, met duren als strings zoals daar.
+        // De jobspec uit de README van v1.0.7, met duren als strings zoals daar.
         let spec = br#"{
   "name": "api-service",
   "command": "./server --http=$ER_PORT_HTTP",

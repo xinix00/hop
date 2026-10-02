@@ -1,6 +1,0 @@
-{
-  "node": {"id": "node-4", "port": 8083},
-  "api_key": "dev-secret-key-2025",
-  "cluster": {"name": "dev-local", "lock": {"url": "https://server-lock.haas.software"}},
-  "paths": {"state_file": "./data/state-node4.json", "rootfs_base": "./data/rootfs-node4"}
-}

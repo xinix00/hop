@@ -1,6 +1,7 @@
 //! De leader-verkiezing op de host: een lease-thread die de opslag bezit, en de [`agent::Discoverer`] van de eigenaar.
 //!
-//! Go's `AsyncDiscoverer` (`OLD/internal/agentloop/async.go`), met één
+//! Go's `AsyncDiscoverer` (`internal/agentloop/async.go` op
+//! github.com/xinix00/hop, tag v1.0.7), met één
 //! eigenaar per staat in plaats van een ops-kanaal naar een goroutine:
 //!
 //! - De lease-thread ([`spawn`]) bezit de [`discovery::Discovery`] (de
