@@ -2,10 +2,7 @@
 
 Lightweight cluster orchestrator. Simple alternative to Nomad.
 
-This is Hop v3, written in Rust. The Go generation (v1.x) lives on tag
-[v1.0.7](https://github.com/xinix00/hop/tree/v1.0.7) with its own README, docs
-and tests. The Go tree is the specification the Rust tree is written from,
-test for test; comments that cite a Go file mean its path on that tag.
+This is Hop v3, written in Rust.
 
 On HopOS, Hop is the first resident: an app with one privilege no other app
 has, the right to place, stop and replace apps. The kernel owns the mechanism;
