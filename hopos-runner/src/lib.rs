@@ -282,6 +282,7 @@ pub fn slot_status_of(info: &SlotInfo) -> SlotStatus {
         } else {
             info.ram_size
         },
+        cores: info.cores,
         cpu_pct: None,
         fault_vec: info.fault_vec,
         fault_esr: info.fault_esr,
@@ -431,7 +432,12 @@ impl<C: Call> SystemApi for KernSys<C> {
     async fn slot_status(&mut self, slot: Slot) -> SlotStatus {
         let mut info = [0u8; systemapi::SLOT_INFO_LEN];
         let got = self
-            .plain(PrivOp::SlotStatus, u64::from(slot.0), systemapi::SLOT_INFO_LEN as u64, &mut info)
+            .plain(
+                PrivOp::SlotStatus,
+                u64::from(slot.0),
+                systemapi::SLOT_INFO_LEN as u64,
+                &mut info,
+            )
             .await
             .ok()
             .and_then(|(_, n)| SlotInfo::decode(info.get(..n).unwrap_or_default()).ok());

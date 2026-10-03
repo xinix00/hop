@@ -244,6 +244,29 @@ fn status_decodes_slot_info() {
     );
 }
 
+/// De cores van een slot reizen mee in de stand (de noemer van het
+/// cpu-procent van een taak), naast de partitie als geheugenlimiet.
+#[test]
+fn status_carries_the_cores_of_the_slot() {
+    let (mut s, k) = sys(4);
+    k.0.borrow_mut().system.insert(
+        3,
+        systemapi::SlotInfo {
+            state: 2,
+            core_on: 1,
+            cores: 2,
+            partition: 32 << 20,
+            ..systemapi::SlotInfo::default()
+        },
+    );
+    let st = bl(s.slot_status(runner::Slot(3)));
+    assert_eq!(
+        (st.state, st.cores, st.mem_limit),
+        (SlotState::Running, 2, 32 << 20)
+    );
+    assert_eq!(bl(s.slot_status(runner::Slot(9))).cores, 0);
+}
+
 #[test]
 fn stop_frees_and_an_unknown_stop_is_not_confirmed() {
     let (mut s, k) = sys(4);

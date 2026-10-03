@@ -744,11 +744,16 @@ impl Agent {
         }
     }
 
-    /// Legt het gemeten gebruik van een taak vast (procenten van zijn eigen toewijzing).
-    pub fn record_usage(&mut self, id: &str, cpu_percent: f64, mem_percent: f64) {
+    /// Legt het gemeten gebruik van een taak vast (procenten van zijn eigen
+    /// toewijzing) en de cores waar het cpu-procent op slaat; 0 cores is
+    /// onbekend en laat de vorige stand staan.
+    pub fn record_usage(&mut self, id: &str, cpu_percent: f64, mem_percent: f64, cores: u64) {
         if let Some(e) = self.tasks.get_mut(id) {
             e.task.cpu_percent = cpu_percent;
             e.task.mem_percent = mem_percent;
+            if cores != 0 {
+                e.task.cores = cores;
+            }
         }
     }
 

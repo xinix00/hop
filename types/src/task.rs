@@ -95,6 +95,9 @@ pub struct Task {
     pub memory_limit: u64,
     /// Actueel CPU-gebruik, gemeten door de agent.
     pub cpu_percent: f64,
+    /// Het aantal cores waar `cpu_percent` op slaat (de cores van het slot);
+    /// 0 is onbekend.
+    pub cores: u64,
     /// Actueel geheugengebruik, gemeten door de agent.
     pub mem_percent: f64,
     /// Bytes binnen tijdens `downloading`.
@@ -142,6 +145,7 @@ impl Task {
                 "cpu_shares" => t.cpu_shares = de::int(v, k)?,
                 "memory_limit" => t.memory_limit = de::uint(v, k)?,
                 "cpu_percent" => t.cpu_percent = de::float(v, k)?,
+                "cores" => t.cores = de::uint(v, k)?,
                 "mem_percent" => t.mem_percent = de::float(v, k)?,
                 "downloaded_bytes" => t.downloaded = de::uint(v, k)?,
                 "image_size_bytes" => t.image_size = de::uint(v, k)?,
@@ -176,6 +180,7 @@ impl Task {
             "cpu_percent",
             Value::Number(Number::Float(self.cpu_percent)),
         )?;
+        o.uint_opt("cores", self.cores)?;
         o.field(
             "mem_percent",
             Value::Number(Number::Float(self.mem_percent)),
@@ -361,6 +366,7 @@ impl Agent {
                 pid,
                 state: TaskState::System,
                 cpu_percent: u.cpu_percent.unwrap_or(0.0),
+                cores: 1,
                 mem_percent: u.mem_percent(),
                 ..Task::default()
             };

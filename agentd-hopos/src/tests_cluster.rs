@@ -1211,6 +1211,8 @@ fn the_leader_shows_the_kernel_and_hop_of_every_agent() {
         ("hop", 1, types::TaskState::System)
     );
     assert_eq!((hop.cpu_percent, hop.mem_percent), (10.0, 12.5));
+    // De noemer van hun cpu-procent: één core, zoals de gui hem toont.
+    assert_eq!((kern.cores, hop.cores), (1, 1));
     let n2 = tasks("n2");
     let (kern, hop) = (t(&n2[0]), t(&n2[1]));
     assert_eq!((kern.cpu_percent, kern.mem_percent), (1.5, 12.5));

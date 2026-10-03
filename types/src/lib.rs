@@ -202,12 +202,21 @@ mod tests {
             state: TaskState::Running,
             started_at: Time(1_790_000_000 * SECOND),
             restart_count: 2,
+            cores: 2,
             ..Task::default()
         };
         let data = json::to_string(&task.to_value().unwrap()).unwrap();
+        assert!(data.contains(r#""cores":2"#), "{data}");
         let decoded = Task::from_value(&json::parse_str(&data).unwrap()).unwrap();
         assert_eq!(decoded, task);
         assert_eq!(decoded.ports.get("http"), Some(&8080));
+        // 0 cores is onbekend: het veld ontbreekt, en een taak zonder leest als 0.
+        let none = Task { cores: 0, ..task };
+        let data = json::to_string(&none.to_value().unwrap()).unwrap();
+        assert!(!data.contains("cores"), "{data}");
+        let old =
+            Task::from_value(&json::parse_str(r#"{"id":"t","cores":null}"#).unwrap()).unwrap();
+        assert_eq!(old.cores, 0);
     }
 
     #[test]
@@ -283,6 +292,8 @@ mod tests {
         );
         assert_eq!(k.state, TaskState::System);
         assert_eq!((k.cpu_percent, k.mem_percent), (3.0, 4.6));
+        // Het cpu-procent van de kern en van Hop slaat op één core.
+        assert_eq!(k.cores, 1);
         agent.telemetry.hop.mem_bytes = 1 << 20;
         let tasks = agent.system_tasks().unwrap();
         assert_eq!(tasks.len(), 2);
