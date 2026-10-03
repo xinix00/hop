@@ -4,8 +4,8 @@ version = 4
 
 [[package]]
 name = "abi"
-version = "3.0.5"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.5#a9d82e9c3dbb885b5932a1ad36a57f796d7c53d1"
+version = "3.0.6"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.6#a405a4037217816fd2c9d4f2d3fe67c67a02c206"
 dependencies = [
  "bounded",
  "dev",
@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "agent"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "config",
  "types",
@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "agentd"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "agent",
  "api",
@@ -38,7 +38,7 @@ dependencies = [
 
 [[package]]
 name = "agentd-hopos"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "abi",
  "agent",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "api"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "agent",
  "auth",
@@ -73,8 +73,8 @@ dependencies = [
 
 [[package]]
 name = "applib"
-version = "3.0.5"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.5#a9d82e9c3dbb885b5932a1ad36a57f796d7c53d1"
+version = "3.0.6"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.6#a405a4037217816fd2c9d4f2d3fe67c67a02c206"
 dependencies = [
  "abi",
  "bounded",
@@ -89,16 +89,16 @@ dependencies = [
 
 [[package]]
 name = "auth"
-version = "3.0.6"
+version = "3.0.7"
 
 [[package]]
 name = "bounded"
-version = "3.0.5"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.5#a9d82e9c3dbb885b5932a1ad36a57f796d7c53d1"
+version = "3.0.6"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.6#a405a4037217816fd2c9d4f2d3fe67c67a02c206"
 
 [[package]]
 name = "cli"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "auth",
  "hostnet",
@@ -107,27 +107,27 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "types",
 ]
 
 [[package]]
 name = "dev"
-version = "3.0.5"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.5#a9d82e9c3dbb885b5932a1ad36a57f796d7c53d1"
+version = "3.0.6"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.6#a405a4037217816fd2c9d4f2d3fe67c67a02c206"
 
 [[package]]
 name = "discovery"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "types",
 ]
 
 [[package]]
 name = "executor"
-version = "3.0.5"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.5#a9d82e9c3dbb885b5932a1ad36a57f796d7c53d1"
+version = "3.0.6"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.6#a405a4037217816fd2c9d4f2d3fe67c67a02c206"
 dependencies = [
  "dev",
  "sync",
@@ -135,12 +135,12 @@ dependencies = [
 
 [[package]]
 name = "heap"
-version = "3.0.5"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.5#a9d82e9c3dbb885b5932a1ad36a57f796d7c53d1"
+version = "3.0.6"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.6#a405a4037217816fd2c9d4f2d3fe67c67a02c206"
 
 [[package]]
 name = "hop-http"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "api",
  "applib",
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "hopos-runner"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "abi",
  "agent",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "hostnet"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "leanhttp",
  "leanhttps",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "leader"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "config",
  "types",
@@ -212,15 +212,15 @@ source = "git+https://github.com/xinix00/lean.git?tag=v3.1.6#222aa18fe6e60aae0b9
 
 [[package]]
 name = "netdev"
-version = "3.0.5"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.5#a9d82e9c3dbb885b5932a1ad36a57f796d7c53d1"
+version = "3.0.6"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.6#a405a4037217816fd2c9d4f2d3fe67c67a02c206"
 dependencies = [
  "sync",
 ]
 
 [[package]]
 name = "runner"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "hostnet",
  "leanhttp",
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "store"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "config",
  "discovery",
@@ -242,9 +242,9 @@ dependencies = [
 
 [[package]]
 name = "sync"
-version = "3.0.5"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.5#a9d82e9c3dbb885b5932a1ad36a57f796d7c53d1"
+version = "3.0.6"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.6#a405a4037217816fd2c9d4f2d3fe67c67a02c206"
 
 [[package]]
 name = "types"
-version = "3.0.6"
+version = "3.0.7"

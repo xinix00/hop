@@ -27,13 +27,13 @@ api = { path = "../api" }
 runner = { path = "../runner" }
 hopos-runner = { path = "../hopos-runner" }
 hop-http = { path = "../hop-http" }
-applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.5" }
+applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.6" }
 # De bouwstenen van het handboek (§2): de rijen van de cluster tussen de
 # eigenaar en de taken die het net op gaan (`sync::mpsc::Mailbox`). Dezelfde
 # tag als applib, dat ze zelf ook gebruikt: één `sync` in het image.
-sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.5" }
+sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.6" }
 # De opcodes, vlaggen en de partitie-indeling van de system-API (de flip).
-abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.5" }
+abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.6" }
 discovery = { path = "../discovery" }
 # De clusterlock op S3 (`HOPOS_S3_*`): de getekende verzoeken, over het
 # transport van de bewoner (leanhttps met de wortels, zoals de artifacts).
