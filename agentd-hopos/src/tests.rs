@@ -9,7 +9,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::future::{Future, poll_fn};
+use core::future::Future;
 use core::pin::pin;
 use core::task::{Context, Poll, Waker};
 use std::cell::RefCell;
@@ -23,6 +23,12 @@ use hopos_runner::fake::FakeKern;
 use leanhttp::{AsyncRead, AsyncWrite, Close, IoError};
 use types::json::Value;
 
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::time::Duration;
+use sync::mpsc::Mailbox;
+use sync::spsc::Channel;
+
+use crate::download::{Orders, Pieces, download_task};
 use crate::env::{BootConfig, BootError};
 use crate::{Answer, Handoff, Hub, Images, Node, Port, Question, Sink};
 
@@ -147,7 +153,9 @@ impl Streams for NoStreams {
     fn done(&mut self) {}
 }
 
-/// Stuurt `raw` door leanhttp en hop-http naar `port` van de node; het antwoord als (status, body).
+/// Stuurt `raw` door leanhttp en hop-http naar `port` van de node, en haalt
+/// daarna de downloads op die het verzoek gaf (zonder downloadtaak, zie
+/// `Node::settle`); het antwoord als (status, body).
 fn http(node: &mut TestNode, port: Port, raw: Vec<u8>) -> (u16, String) {
     let out = Rc::new(RefCell::new(Vec::new()));
     let conn = Mem {
@@ -161,6 +169,12 @@ fn http(node: &mut TestNode, port: Port, raw: Vec<u8>) -> (u16, String) {
         &mut NoStreams,
     ))
     .unwrap();
+    block_on(node.settle(T0));
+    reply_of(&out)
+}
+
+/// Het antwoord op de draad als (status, body).
+fn reply_of(out: &Rc<RefCell<Vec<u8>>>) -> (u16, String) {
     let text = String::from_utf8(out.borrow().clone()).unwrap();
     let status = text[9..12].parse().unwrap();
     let body = text
@@ -168,6 +182,12 @@ fn http(node: &mut TestNode, port: Port, raw: Vec<u8>) -> (u16, String) {
         .map(|(_, b)| String::from(b))
         .unwrap_or_default();
     (status, body)
+}
+
+/// Een tik, en dan de downloads die hij gaf (een herstart).
+fn tick(node: &mut TestNode, now: u64) {
+    block_on(node.tick(now));
+    block_on(node.settle(now));
 }
 
 #[test]
@@ -222,7 +242,7 @@ fn post_a_job_and_the_kernel_places_it() {
     assert!(body.contains("\"web\":1"), "{body}");
 
     // Een tik pollt de kooi bij de kern (SLOT_STATUS) en laat hem draaien.
-    block_on(n.tick(T0 + 6 * types::time::SECOND));
+    tick(&mut n, T0 + 6 * types::time::SECOND);
     assert!(k.0.borrow().ops.contains(&PrivOp::SlotStatus.op()));
     assert_eq!(
         n.agent().tasks().next().unwrap().state,
@@ -310,7 +330,7 @@ fn an_accepted_cold_flip_that_never_jumps_brings_the_tasks_back() {
     );
     placed_matches_the_agent(&mut n);
     // Binnen de wachttijd: niets.
-    block_on(n.tick(T0 + 29 * types::time::SECOND));
+    tick(&mut n, T0 + 29 * types::time::SECOND);
     assert!(k.0.borrow().slots.is_empty());
     assert!(
         !n.take_lines()
@@ -318,7 +338,7 @@ fn an_accepted_cold_flip_that_never_jumps_brings_the_tasks_back() {
             .any(|l| l.contains("HOP_FLIP_COLD_BACK"))
     );
     // Erna: de kern sprong niet, dus de taak herstart.
-    block_on(n.tick(T0 + 31 * types::time::SECOND));
+    tick(&mut n, T0 + 31 * types::time::SECOND);
     let lines = n.take_lines();
     assert!(
         lines.iter().any(|l| l.contains("HOP_FLIP_COLD_BACK")),
@@ -336,7 +356,7 @@ fn an_accepted_cold_flip_that_never_jumps_brings_the_tasks_back() {
     );
     placed_matches_the_agent(&mut n);
     // Eén keer: de volgende tik zegt het niet opnieuw.
-    block_on(n.tick(T0 + 62 * types::time::SECOND));
+    tick(&mut n, T0 + 62 * types::time::SECOND);
     assert!(
         !n.take_lines()
             .iter()
@@ -369,7 +389,7 @@ fn a_replaced_artifact_is_what_the_next_placement_gets() {
         .insert(String::from("http://images/web.elf"), NEW.to_vec());
     let (status, body) = http(&mut n, Port::Leader, wire("DELETE", "/v1/jobs/web", ""));
     assert_eq!(status, 204, "{body}");
-    block_on(n.tick(T0 + types::time::SECOND));
+    tick(&mut n, T0 + types::time::SECOND);
     assert!(k.0.borrow().slots.is_empty(), "de oude bewoner is weg");
     let (status, body) = http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
     assert!((200..300).contains(&status), "{status} {body}");
@@ -523,7 +543,7 @@ fn a_fresh_resident_stops_what_the_kernel_still_runs() {
         },
     );
     http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
-    block_on(n.tick(T0 + types::time::SECOND));
+    tick(&mut n, T0 + types::time::SECOND);
     assert_eq!(k.0.borrow().slots.len(), 2);
     // Een nieuwe Hop over dezelfde kern kent niets: geen staat op hopfs,
     // dus de bewoner in slot 2 is van niemand en gaat weg.
@@ -540,31 +560,60 @@ fn a_fresh_resident_stops_what_the_kernel_still_runs() {
     assert_eq!(again.agent().tasks().count(), 0);
 }
 
-/// Twee taken om de beurt, zoals de executor van de app-core ze pollt.
-///
-/// Geen executor in een host-test, en ook geen geneste ronde: deze lus is de
-/// enige die pollt. `a` is klaar als hij klaar is; `b` loopt eeuwig.
-fn run_two<A: Future, B: Future<Output = ()>>(a: A, b: B) -> A::Output {
-    let mut a = pin!(a);
-    let mut b = pin!(b);
-    let mut cx = Context::from_waker(Waker::noop());
-    for _ in 0..10_000_000 {
-        if let Poll::Ready(v) = a.as_mut().poll(&mut cx) {
-            return v;
+/// Artifacts die vóór elke brok de core teruggeven, zoals TCP waar de
+/// volgende bytes nog onderweg zijn.
+struct SlowImages(MemImages);
+
+impl Images for SlowImages {
+    async fn fetch<K: Sink>(&mut self, url: &str, sink: &mut K) -> Result<(), String> {
+        let bytes = self.0.0.borrow().get(url).cloned();
+        let bytes = bytes.ok_or_else(|| format!("404 {url}"))?;
+        sink.begin(bytes.len() as u64).await?;
+        for c in bytes.chunks(self.0.1) {
+            sync::yield_now().await;
+            sink.chunk(c).await?;
         }
-        let _ = b.as_mut().poll(&mut cx);
+        Ok(())
     }
-    panic!("de eigenaar kwam nooit klaar");
 }
 
+/// Stuurt `raw` naar de node en eist het antwoord in één poll: geen wacht
+/// op de kern, op het net of op een download. Haalt geen downloads op.
+fn http_once(node: &mut TestNode, port: Port, raw: Vec<u8>) -> (u16, String) {
+    let out = Rc::new(RefCell::new(Vec::new()));
+    let conn = Mem {
+        input: raw,
+        at: 0,
+        out: out.clone(),
+    };
+    let mut none = NoStreams;
+    let served = pin!(hop_http::serve(
+        conn,
+        async |req: Request| node.handle(port, &req, T0).await,
+        &mut none,
+    ))
+    .poll(&mut Context::from_waker(Waker::noop()));
+    let Poll::Ready(r) = served else {
+        panic!("the API did not answer within one poll");
+    };
+    r.unwrap();
+    reply_of(&out)
+}
+
+/// 03-10: de API mag nooit stilstaan tijdens een download.
+///
+/// Een image van 4 MiB in 64 brokken van 64 KiB, over een server die vóór
+/// elke brok de core teruggeeft, en een kern die bij elke call eerst de
+/// core teruggeeft. De downloadtaak en de eigenaar gaan om de beurt, zoals
+/// op de app-core: per ronde hoogstens één brok de kern in. Halverwege
+/// antwoordt `GET /v1/status` in één poll (ruim binnen 100 ms), en een
+/// tweede `POST /v1/jobs` wordt aangenomen; zijn download komt na de eerste.
 #[test]
-fn a_long_stream_does_not_block_the_other_tasks() {
-    // 8 MiB in brokken van 64 KiB, over een verbinding die bij elke lees
-    // eerst de core teruggeeft (zoals TCP waar het antwoord nog onderweg
-    // is). De eigenaar-taak stroomt; een tweede taak moet intussen gewoon
-    // aan de beurt komen, tussen de brokken door.
-    const SIZE: usize = 8 << 20;
+fn the_api_answers_while_an_image_streams() {
+    const SIZE: usize = 4 << 20;
     const CHUNK: usize = 64 << 10;
+    const API: &str =
+        r#"{"name":"api","artifacts":[{"url":"http://images/api.elf"}],"memory_limit":33554432}"#;
     let mut image = alloc::vec![0u8; SIZE];
     image[..4].copy_from_slice(b"\x7fELF");
     let k = FakeKern::new(4);
@@ -572,70 +621,138 @@ fn a_long_stream_does_not_block_the_other_tasks() {
     let sys = KernSys::new(k.client(), 4);
     let mut files = BTreeMap::new();
     files.insert(String::from("http://images/web.elf"), image);
-    let mut n = Node::new(
-        &cfg(),
-        sys,
-        MemImages(Rc::new(RefCell::new(files)), CHUNK),
-        T0,
-    );
+    files.insert(String::from("http://images/api.elf"), ELF.to_vec());
+    let files = Rc::new(RefCell::new(files));
+    let mut n = Node::new(&cfg(), sys, MemImages(files.clone(), CHUNK), T0);
 
-    let out = Rc::new(RefCell::new(Vec::new()));
-    let conn = Mem {
-        input: wire("POST", "/v1/jobs", JOB),
-        at: 0,
-        out: out.clone(),
-    };
-    let mut none = NoStreams;
-    let owner = hop_http::serve(
-        conn,
-        async |req: Request| n.handle(Port::Leader, &req, T0).await,
-        &mut none,
-    );
+    // Aangenomen in één poll; de download is een opdracht, nog geen brok.
+    let (status, body) = http_once(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
+    assert!((200..300).contains(&status), "{status} {body}");
+    assert!(!k.0.borrow().ops.contains(&PrivOp::StreamImage.op()));
 
-    // De tweede taak telt zijn beurten terwijl slot 1 half gestroomd is.
-    let during = Rc::new(RefCell::new(0u64));
-    let other = {
-        let (k, during) = (k.clone(), during.clone());
-        poll_fn(move |_| {
+    let orders: Orders = Mailbox::new();
+    let pieces: Pieces = Channel::new();
+    let wanted = AtomicU64::new(0);
+    let (tx, mut rx) = pieces.split().unwrap();
+    let images = SlowImages(MemImages(files, CHUNK));
+    let mut task = pin!(download_task(images, &orders, tx, &wanted));
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut fed = 0;
+    let mut asked = None;
+    for _ in 0..100_000 {
+        // De flush van de eigenaar: een opdracht, en wat hij nog wil.
+        if let Some(o) = n.take_order() {
+            orders.try_send(o).unwrap();
+        }
+        wanted.store(n.wanted(), Relaxed);
+        let _ = task.as_mut().poll(&mut cx);
+        // Eén brok per ronde, zoals de lus van de eigenaar.
+        if let Some((seq, p)) = rx.try_recv() {
+            block_on(n.on_piece(seq, p, T0));
+            fed += 1;
+        }
+        if fed == SIZE / CHUNK / 2 && asked.is_none() {
             let streaming =
                 k.0.borrow()
                     .slots
                     .get(&1)
                     .is_some_and(|s| !s.placed && !s.image.is_empty());
-            if streaming {
-                *during.borrow_mut() += 1;
-            }
-            Poll::<()>::Pending
-        })
-    };
-    run_two(owner, other).unwrap();
-
+            assert!(streaming, "slot 1 streams halfway");
+            let t = std::time::Instant::now();
+            let (status, body) = http_once(&mut n, Port::Leader, wire("GET", "/v1/status", ""));
+            asked = Some(t.elapsed());
+            assert_eq!(status, 200, "{body}");
+            let (status, body) = http_once(&mut n, Port::Leader, wire("POST", "/v1/jobs", API));
+            assert_eq!(status, 201, "{body}");
+            assert!(body.contains("dispatched"), "{body}");
+        }
+        let placed = k.0.borrow().slots.values().filter(|s| s.placed).count();
+        if placed == 2 && n.wanted() == 0 {
+            break;
+        }
+    }
+    let elapsed = asked.expect("the API was never asked during the download");
+    assert!(elapsed < Duration::from_millis(100), "{elapsed:?}");
     let st = k.0.borrow();
-    let slot = &st.slots[&1];
-    assert!(slot.placed);
-    assert_eq!(slot.image.len(), SIZE);
-    let streams = st
-        .ops
-        .iter()
-        .filter(|&&o| o == PrivOp::StreamImage.op())
-        .count();
-    assert_eq!(streams, SIZE / CHUNK);
-    // Elke brok wachtte op de kern, en in elk van die wachten kwam de andere
-    // taak aan de beurt: tussen de eerste en de laatste brok minstens één
-    // beurt per brok.
-    assert!(st.yields >= streams as u64, "{} {streams}", st.yields);
-    assert!(
-        *during.borrow() >= (streams - 1) as u64,
-        "de tweede taak kwam {} keer aan de beurt tijdens {streams} brokken",
-        during.borrow()
-    );
+    assert_eq!(st.slots[&1].job, "web");
+    assert_eq!(st.slots[&1].image.len(), SIZE);
+    assert_eq!(st.slots[&2].job, "api");
+    assert_eq!(st.slots[&2].image, ELF);
+    assert!(st.slots.values().all(|s| s.placed));
     drop(st);
-    let text = String::from_utf8(out.borrow().clone()).unwrap();
-    assert!(text.starts_with("HTTP/1.1 2"), "{text}");
+    let lines = n.take_lines();
+    for slot in ["slot=1", "slot=2"] {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("HOP_JOB_PLACED") && l.contains(slot)),
+            "{slot}: {lines:?}"
+        );
+    }
+}
+
+/// Een download die de node opgeeft (de taak stopt halverwege), stopt bij
+/// zijn volgende brok; de kooi is weg en de volgende download loopt gewoon.
+#[test]
+fn a_stopped_task_cancels_its_download() {
+    const SIZE: usize = 1 << 20;
+    const CHUNK: usize = 64 << 10;
+    let mut image = alloc::vec![0u8; SIZE];
+    image[..4].copy_from_slice(b"\x7fELF");
+    let k = FakeKern::new(4);
+    let sys = KernSys::new(k.client(), 4);
+    let mut files = BTreeMap::new();
+    files.insert(String::from("http://images/web.elf"), image);
+    let files = Rc::new(RefCell::new(files));
+    let mut n = Node::new(&cfg(), sys, MemImages(files.clone(), CHUNK), T0);
+    http_once(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
+
+    let orders: Orders = Mailbox::new();
+    let pieces: Pieces = Channel::new();
+    let wanted = AtomicU64::new(0);
+    let (tx, mut rx) = pieces.split().unwrap();
+    let images = SlowImages(MemImages(files, CHUNK));
+    let mut task = pin!(download_task(images, &orders, tx, &wanted));
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut fed = 0;
+    for _ in 0..10_000 {
+        if let Some(o) = n.take_order() {
+            orders.try_send(o).unwrap();
+        }
+        wanted.store(n.wanted(), Relaxed);
+        let _ = task.as_mut().poll(&mut cx);
+        if let Some((seq, p)) = rx.try_recv() {
+            block_on(n.on_piece(seq, p, T0));
+            fed += 1;
+        }
+        if fed == 4 {
+            break;
+        }
+    }
+    assert_eq!(n.wanted(), 1);
+    // De job weg terwijl hij stroomt: de kooi gaat terug.
+    let (status, _) = http_once(&mut n, Port::Leader, wire("DELETE", "/v1/jobs/web", ""));
+    assert_eq!(status, 204);
+    tick(&mut n, T0 + types::time::SECOND);
+    for _ in 0..10_000 {
+        wanted.store(n.wanted(), Relaxed);
+        let _ = task.as_mut().poll(&mut cx);
+        if let Some((seq, p)) = rx.try_recv() {
+            block_on(n.on_piece(seq, p, T0));
+        }
+    }
+    assert_eq!(n.wanted(), 0, "nothing is downloading");
     assert!(
-        n.take_lines()
-            .iter()
-            .any(|l| l.contains("HOP_JOB_PLACED slot=1"))
+        k.0.borrow().slots.is_empty(),
+        "{:?}",
+        k.0.borrow().slots.keys()
+    );
+    // De downloadtaak gaf het op: geen brokken meer onderweg.
+    assert!(rx.try_recv().is_none());
+    let lines = n.take_lines();
+    assert!(
+        lines.iter().any(|l| l.contains("HOP_JOB_FAILED")),
+        "{lines:?}"
     );
 }
 
@@ -646,6 +763,7 @@ fn a_clean_boot_seeds_the_init_jobs_once() {
     let specs =
         r#"[{"name":"web","artifacts":[{"url":"http://images/web.elf"}],"memory_limit":33554432}]"#;
     assert_eq!(block_on(n.seed_init_jobs(specs, T0)), Ok(1));
+    block_on(n.settle(T0));
     let lines = n.take_lines();
     assert!(
         lines
@@ -784,7 +902,7 @@ fn a_log_is_followed_live_through_the_leader() {
     http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
     let task = n.agent().tasks().next().unwrap().id.clone();
     app_says(&k, "one");
-    block_on(n.tick(T0 + types::time::SECOND));
+    tick(&mut n, T0 + types::time::SECOND);
 
     // hop logs --follow: via de leader naar de eigen agent, in-proces.
     let req = signed(
@@ -809,7 +927,7 @@ fn a_log_is_followed_live_through_the_leader() {
     assert_eq!(n.poll(&again, T0).text, "");
     // Een nieuwe regel van de app komt er als enige bij.
     app_says(&k, "two");
-    block_on(n.tick(T0 + 2 * types::time::SECOND));
+    tick(&mut n, T0 + 2 * types::time::SECOND);
     let c2 = n.poll(&again, T0);
     assert_eq!((c2.text.as_str(), c2.seq), ("data: two\n\n", 2));
     // Met follow=0: de momentopname (`hop logs` zonder --follow).

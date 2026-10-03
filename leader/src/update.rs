@@ -17,13 +17,17 @@ impl<S: JobStore> Leader<S> {
     /// Werkt een bestaande job bij volgens zijn `update_policy` (standaard rolling).
     ///
     /// Zonder eigen prioriteit houdt de job de oude. Draait synchroon, zodat
-    /// de API een echte status kan geven.
+    /// de API een echte status kan geven. Een vaste poort met een expliciete
+    /// rolling of blue-green wordt geweigerd voordat er iets verandert
+    /// ([`Job::check_rollable`]): die uitrol zou nooit slagen. Zonder policy
+    /// is een vaste poort recreate ([`Job::policy`]).
     pub fn update_job(&mut self, mut job: Job, net: &mut impl Transport) -> Result {
         let Some(old) = self.store.get(&job.name) else {
             return Err(Error::NotFound {
                 job: Name::new(&job.name),
             });
         };
+        job.check_rollable().map_err(Error::Json)?;
         if job.priority.is_none() {
             job.priority = old.priority;
         }

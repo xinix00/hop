@@ -1,7 +1,8 @@
 //! De eigenaar van alle staat van de node: agent, leader, runner en de twee API's.
 //!
-//! Eén struct achter `&mut self` (handboek §1). Een verzoek ([`Node::handle`])
-//! en de tik ([`Node::tick`]) zijn de enige ingangen; wat de agent daarna
+//! Eén struct achter `&mut self` (handboek §1). Een verzoek ([`Node::handle`]),
+//! de tik ([`Node::tick`]) en een brok van de downloadtaak
+//! ([`Node::on_piece`]) zijn de enige ingangen; wat de agent daarna
 //! wil (starten, stoppen, pollen, wegschrijven) voert de node meteen uit,
 //! in de volgorde waarin de agent het vroeg.
 //!
@@ -11,16 +12,23 @@
 //! de verbindingstaken en de rest draaien intussen door; alleen de staat van
 //! de node wacht, want die heeft één eigenaar (handboek §1 en §4).
 //!
-//! De traits [`Images`] en [`Sink`] zijn daardoor niet object-safe (een
+//! De download van een artifact is géén ingang die wacht: een start die op
+//! zijn image wacht, wordt een opdracht voor de downloadtaak
+//! ([`Node::take_order`], zie [`crate::download`]), en de bytes komen terug
+//! als [`Piece`]s ([`Node::on_piece`]), één brok per keer. Tussen twee
+//! brokken door handelt de eigenaar de bus af, dus de API staat nooit stil
+//! op een download (03-10).
+//!
+//! De traits [`Images`] en [`Sink`] zijn niet object-safe (een
 //! methode die een future geeft, kan niet in een vtable); de downloader
 //! krijgt de sink daarom als generieke parameter in plaats van als
-//! `&mut dyn Sink`. Er is per node één downloader en één soort sink, dus dat
-//! kost niets.
+//! `&mut dyn Sink`. Elke downloader (de downloadtaak, en de flip van de
+//! node) heeft één soort sink, dus dat kost niets.
 //!
 //! De markers voor de console verzamelt hij als regels ([`Node::take_lines`]);
 //! de binary zet ze met `applib::log!` op het log, een test leest ze.
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -41,6 +49,7 @@ use types::time::{MILLISECOND, SECOND};
 use types::{Driver, Job, Map, Nanos, SysUsage, Telemetry, Time};
 
 use crate::VERSION;
+use crate::download::{Order, Piece};
 use crate::env::BootConfig;
 use crate::forward::{Forward, Routed};
 use crate::local::Local;
@@ -90,9 +99,10 @@ pub enum Port {
 
 /// Waar de bytes van een image heen gaan tijdens een download.
 ///
-/// Elke methode wacht op de kern (de runner stroomt de bytes de kooi in),
-/// dus een future; `-> impl Future` en niet `async fn`, omdat de executor
-/// geen `Send` eist en de lint `async_fn_in_trait` dat niet kan weten.
+/// Elke methode kan wachten (een artifact gaat als [`Piece`] door de rij
+/// naar de eigenaar, een kernbundel de kern in), dus een future;
+/// `-> impl Future` en niet `async fn`, omdat de executor geen `Send` eist
+/// en de lint `async_fn_in_trait` dat niet kan weten.
 pub trait Sink {
     /// De lengte van het image; zonder lengte geen start.
     fn begin(&mut self, size: u64) -> impl Future<Output = Result<(), String>>;
@@ -113,43 +123,23 @@ pub trait Images {
     ) -> impl Future<Output = Result<(), String>>;
 }
 
-/// De runner als [`Sink`] voor één taak.
-struct Feed<'a, S> {
-    runner: &'a mut HopRunner<S>,
-    ms: u64,
-    task: &'a str,
+/// Een start die op zijn image wacht; de download loopt in de downloadtaak.
+#[derive(Debug)]
+struct Loading {
+    /// Het nummer van de opdracht ([`Order::seq`]).
+    seq: u64,
+    task_id: String,
+    job: String,
+    url: String,
+    ports: BTreeMap<String, u16>,
+    /// De opdracht is de downloadtaak in gegaan.
+    sent: bool,
+    /// De kern plaatste het image (de laatste brok); het einde komt nog.
     placed: Option<u32>,
-    failure: Option<runner::Error>,
 }
 
-impl<S: SystemApi> Sink for Feed<'_, S> {
-    async fn begin(&mut self, size: u64) -> Result<(), String> {
-        self.runner
-            .image_begin(self.ms, self.task, size)
-            .await
-            .map_err(|e| {
-                let text = format!("{e}");
-                self.failure = Some(e);
-                text
-            })
-    }
-
-    async fn chunk(&mut self, bytes: &[u8]) -> Result<(), String> {
-        match self.runner.image_chunk(self.ms, self.task, bytes).await {
-            Ok(Started::Running { pid }) => {
-                self.placed = Some(pid);
-                Ok(())
-            }
-            Ok(Started::AwaitImage) => Ok(()),
-            Ok(Started::Aborted) => Err(String::from("task stopped during its start")),
-            Err(e) => {
-                let text = format!("{e}");
-                self.failure = Some(e);
-                Err(text)
-            }
-        }
-    }
-}
+/// Hoe een start afliep: de kooi, of het soort fout en de reden.
+type Outcome = Result<u32, (StartError, String)>;
 
 /// Een map van `types` als `BTreeMap`, zoals de runner hem wil.
 fn to_btree<V: Clone>(m: &Map<V>) -> BTreeMap<String, V> {
@@ -193,6 +183,11 @@ pub struct Node<S, I> {
     /// Een koude flip die de kern aannam: leeft deze Hop op dit moment nog,
     /// dan sprong de kern niet ([`COLD_FLIP_WAIT`]).
     cold_flip_until: Option<Nanos>,
+    /// De starts die op hun image wachten, in volgorde; de eerste is de
+    /// download die loopt (als hij `sent` is).
+    loads: VecDeque<Loading>,
+    /// Het nummer van de volgende opdracht.
+    next_seq: u64,
 }
 
 impl<S: SystemApi, I: Images> Node<S, I> {
@@ -264,6 +259,8 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             hop: SysUsage::default(),
             next_measure: now,
             cold_flip_until: None,
+            loads: VecDeque::new(),
+            next_seq: 1,
         }
     }
 
@@ -585,6 +582,10 @@ impl<S: SystemApi, I: Images> Node<S, I> {
         let (resp, effect) = self.leader_handle(req, now);
         match effect {
             LeaderEffect::None => Routed::Reply(Reply::Plain(resp)),
+            LeaderEffect::Log(line) => {
+                self.lines.push(line);
+                Routed::Reply(Reply::Plain(resp))
+            }
             LeaderEffect::Tasks { agents, scope } => {
                 // Agents op andere nodes: de rondgang doet de verbindingstaak.
                 if let Some(f) = self.tasks_forward(&agents, &scope) {
@@ -918,18 +919,52 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             Ok(Started::Aborted) => Err((StartError::Failed, String::from("aborted"))),
             Ok(Started::AwaitImage) => {
                 let url = artifact.map_or("", |a| a.url.as_str());
-                self.stream(ms, task_id, url).await
+                if self.loads.try_reserve(1).is_ok() {
+                    self.loads.push_back(Loading {
+                        seq: self.next_seq,
+                        task_id: String::from(task_id),
+                        job: job.name.clone(),
+                        url: String::from(url),
+                        ports,
+                        sent: false,
+                        placed: None,
+                    });
+                    self.next_seq = self.next_seq.saturating_add(1);
+                    return;
+                }
+                let _ = self
+                    .runner
+                    .stop(
+                        ms,
+                        &TaskRef {
+                            id: task_id,
+                            pid: 0,
+                        },
+                    )
+                    .await;
+                Err((StartError::Failed, String::from("out of memory")))
             }
             Err(e) => Err((start_error(&e), format!("{e}"))),
         };
+        self.report_start(now, task_id, &job.name, &ports, outcome);
+    }
+
+    /// Meldt de afloop van een start aan de agent, met de regel voor het log.
+    fn report_start(
+        &mut self,
+        now: Nanos,
+        task_id: &str,
+        job: &str,
+        ports: &BTreeMap<String, u16>,
+        outcome: Outcome,
+    ) {
         match outcome {
             Ok(pid) => {
                 self.lines.push(format!(
-                    "hop: job {} task {task_id} placed HOP_JOB_PLACED slot={pid}",
-                    job.name
+                    "hop: job {job} task {task_id} placed HOP_JOB_PLACED slot={pid}"
                 ));
                 let mut placed = Map::new();
-                for (k, v) in &ports {
+                for (k, v) in ports {
                     let _ = placed.insert(k.clone(), *v);
                 }
                 let ok = StartOk {
@@ -940,66 +975,126 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             }
             Err((kind, why)) => {
                 self.lines.push(format!(
-                    "hop: job {} task {task_id} did not start: {why} HOP_JOB_FAILED",
-                    job.name
+                    "hop: job {job} task {task_id} did not start: {why} HOP_JOB_FAILED"
                 ));
                 self.agent.on_started(now, task_id, Driver::Hop, Err(kind));
             }
         }
     }
 
-    /// Haalt het image op en stroomt het de kooi in; de kooi als het lukte.
+    /// De volgende download voor de downloadtaak, als er een klaarligt.
     ///
-    /// De download en elke brok naar de kern zijn `.await`s: een image van
-    /// megabytes houdt de staat van de node zo lang vast, maar niet de core.
-    async fn stream(
-        &mut self,
-        ms: u64,
-        task_id: &str,
-        url: &str,
-    ) -> Result<u32, (StartError, String)> {
-        let mut feed = Feed {
-            runner: &mut self.runner,
-            ms,
-            task: task_id,
-            placed: None,
-            failure: None,
+    /// Eén tegelijk: de volgende komt pas als de vorige klaar is, zodat de
+    /// starts hun image in volgorde krijgen.
+    pub fn take_order(&mut self) -> Option<Order> {
+        let front = self.loads.front_mut().filter(|l| !l.sent)?;
+        front.sent = true;
+        Some(Order {
+            seq: front.seq,
+            url: front.url.clone(),
+        })
+    }
+
+    /// Een opdracht die de rij van de downloadtaak niet in kon: de volgende
+    /// [`Node::take_order`] geeft hem opnieuw.
+    pub fn order_back(&mut self, order: &Order) {
+        if let Some(front) = self.loads.front_mut().filter(|l| l.seq == order.seq) {
+            front.sent = false;
+        }
+    }
+
+    /// Het nummer van de download die de node nog wil; 0 als er geen loopt.
+    pub fn wanted(&self) -> u64 {
+        self.loads.front().filter(|l| l.sent).map_or(0, |l| l.seq)
+    }
+
+    /// Een stap van de lopende download: de lengte, een brok de kern in, of het einde.
+    ///
+    /// Een stap van een download die de node niet meer wil (een ander
+    /// nummer), telt niet. Faalt een stap, dan is de start klaar; de
+    /// downloadtaak ziet dat aan [`Node::wanted`] en stopt.
+    pub async fn on_piece(&mut self, seq: u64, piece: Piece, now: Nanos) {
+        let Some(load) = self.loads.front().filter(|l| l.sent && l.seq == seq) else {
+            return;
         };
-        let fetched = self.images.fetch(url, &mut feed).await;
-        let (placed, failure) = (feed.placed, feed.failure.take());
-        match (fetched, placed) {
-            (Ok(()), Some(pid)) => Ok(pid),
-            (Ok(()), None) => {
-                // Het image was korter dan zijn lengte: de kooi terug.
-                let _ = self
-                    .runner
-                    .stop(
-                        ms,
-                        &TaskRef {
-                            id: task_id,
-                            pid: 0,
-                        },
-                    )
-                    .await;
-                Err((
+        let ms = now / MILLISECOND;
+        let task = load.task_id.clone();
+        let placed = load.placed;
+        let outcome = match piece {
+            Piece::Begin(size) => match self.runner.image_begin(ms, &task, size).await {
+                Ok(()) => return,
+                Err(e) => Err((start_error(&e), format!("{e}"))),
+            },
+            Piece::Bytes(bytes) => match self.runner.image_chunk(ms, &task, &bytes).await {
+                Ok(Started::AwaitImage) => return,
+                Ok(Started::Running { pid }) => {
+                    if let Some(l) = self.loads.front_mut() {
+                        l.placed = Some(pid);
+                    }
+                    return;
+                }
+                Ok(Started::Aborted) => Err((
                     StartError::Failed,
-                    String::from("image ended before its length"),
-                ))
+                    String::from("task stopped during its start"),
+                )),
+                Err(e) => Err((start_error(&e), format!("{e}"))),
+            },
+            Piece::End(Ok(())) => placed.ok_or((
+                StartError::Failed,
+                String::from("image ended before its length"),
+            )),
+            Piece::End(Err(why)) => Err((StartError::Failed, why)),
+        };
+        self.finish_load(now, outcome).await;
+    }
+
+    /// Sluit de lopende download af: de kooi terug als hij faalde, de afloop
+    /// naar de agent, en wat de agent daarna wil.
+    async fn finish_load(&mut self, now: Nanos, outcome: Outcome) {
+        let Some(load) = self.loads.pop_front() else {
+            return;
+        };
+        if outcome.is_err() {
+            // Een start die faalde, laat geen gereserveerde kooi staan.
+            let id = TaskRef {
+                id: &load.task_id,
+                pid: 0,
+            };
+            let _ = self.runner.stop(now / MILLISECOND, &id).await;
+        }
+        self.report_start(now, &load.task_id, &load.job, &load.ports, outcome);
+        self.drain(now).await;
+        self.collect_events();
+        self.after_cluster(now);
+    }
+
+    /// Haalt elke download die klaarligt meteen op, zonder downloadtaak.
+    ///
+    /// Alleen voor de tests: die willen na een verzoek of een tik de
+    /// plaatsing zien zonder zelf een taak te draaien.
+    #[cfg(test)]
+    pub(crate) async fn settle(&mut self, now: Nanos) {
+        /// Verzamelt de stappen van één download.
+        struct Collect(Vec<Piece>);
+        impl Sink for Collect {
+            async fn begin(&mut self, size: u64) -> Result<(), String> {
+                self.0.push(Piece::Begin(size));
+                Ok(())
             }
-            (Err(why), _) => {
-                // Een download die faalde, laat de gereserveerde kooi niet staan.
-                let _ = self
-                    .runner
-                    .stop(
-                        ms,
-                        &TaskRef {
-                            id: task_id,
-                            pid: 0,
-                        },
-                    )
-                    .await;
-                let kind = failure.as_ref().map_or(StartError::Failed, start_error);
-                Err((kind, why))
+            async fn chunk(&mut self, bytes: &[u8]) -> Result<(), String> {
+                self.0.push(Piece::Bytes(bytes.to_vec()));
+                Ok(())
+            }
+        }
+        for _ in 0..64 {
+            let Some(order) = self.take_order() else {
+                return;
+            };
+            let mut pieces = Collect(Vec::new());
+            let r = self.images.fetch(&order.url, &mut pieces).await;
+            pieces.0.push(Piece::End(r));
+            for p in pieces.0 {
+                self.on_piece(order.seq, p, now).await;
             }
         }
     }

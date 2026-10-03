@@ -15,6 +15,9 @@
 //!   executor-rondes, handboek §4).
 //! - [`Hub`]: de brievenbus tussen de verbindingstaken en de eigenaar-taak
 //!   (handboek §1: wie iets wil met de staat, stuurt een bericht).
+//! - [`download`]: de downloadtaak, die de artifacts naast de eigenaar
+//!   ophaalt en de bytes als berichten teruggeeft, zodat de API nooit op
+//!   een download wacht.
 //! - [`Handoff`]: de overdracht van een verbinding van de acceptor van een
 //!   poort aan een vrije werker uit een vaste pool.
 //!
@@ -42,6 +45,7 @@
 extern crate alloc;
 
 pub mod client;
+pub mod download;
 pub mod entropy;
 pub mod env;
 pub mod fetch;

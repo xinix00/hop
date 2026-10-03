@@ -693,6 +693,49 @@ fn run_job_update_existing() {
     assert_eq!(get(&v, "policy").as_str(), Some("rolling"));
 }
 
+/// Een vaste poort met een expliciete rolling of blue-green: een 400 met
+/// de zin, en dezelfde zin als logregel. Zonder policy is een vaste poort
+/// recreate: aangenomen, en een update rolt als recreate.
+#[test]
+fn a_fixed_port_that_would_roll_is_refused() {
+    const WHY: &str =
+        "job web: a fixed port (http 80) cannot roll; use update_policy recreate or a dynamic port";
+    let mut c = FakeCluster::default();
+    for spec in [
+        r#"{"name":"web","command":"x","ports":{"http":80},"update_policy":"rolling"}"#,
+        r#"{"name":"web","command":"x","ports":{"http":80},"update_policy":"blue-green"}"#,
+    ] {
+        let (r, e) = leffect(&mut c, Method::Post, "/v1/jobs", spec);
+        assert_eq!(r.status, 400, "{spec}");
+        assert_eq!(get(&body(&r), "error").as_str(), Some(WHY));
+        assert_eq!(
+            e,
+            LeaderEffect::Log(alloc::format!("hop: {WHY} HOP_JOB_REFUSED"))
+        );
+    }
+    assert!(c.jobs.is_empty());
+
+    // Zonder policy, of met een dynamische poort: aangenomen.
+    let fixed = r#"{"name":"web","command":"x","ports":{"http":80}}"#;
+    assert_eq!(lcall(&mut c, Method::Post, "/v1/jobs", fixed).status, 201);
+    let dynamic = r#"{"name":"api","command":"x","ports":{"http":0}}"#;
+    assert_eq!(lcall(&mut c, Method::Post, "/v1/jobs", dynamic).status, 201);
+
+    // De update zonder policy rolt als recreate.
+    let update = r#"{"name":"web","command":"y","ports":{"http":80}}"#;
+    let r = lcall(&mut c, Method::Post, "/v1/jobs", update);
+    assert_eq!(r.status, 200);
+    assert_eq!(get(&body(&r), "policy").as_str(), Some("recreate"));
+
+    // Een expliciete rolling op een job die er al zo staat: dezelfde weigering.
+    let roll = r#"{"name":"web","command":"z","ports":{"http":80},"update_policy":"rolling"}"#;
+    let (r, e) = leffect(&mut c, Method::Post, "/v1/jobs", roll);
+    assert_eq!(r.status, 400);
+    assert!(matches!(e, LeaderEffect::Log(_)));
+    let web = c.jobs.iter().find(|j| j.name == "web").unwrap();
+    assert_eq!(web.command, "y");
+}
+
 #[test]
 fn delete_job_by_name() {
     let mut c = FakeCluster::default();

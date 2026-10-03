@@ -297,10 +297,10 @@ impl<C: Connect, R: Resolve> leanhttp::Dial for ArtifactDial<'_, '_, C, R> {
 
 /// De downloader van artifacts: `http://` en `https://`, en de bytes via de runner de kooi in.
 ///
-/// De download loopt in de eigenaar-taak: de staat van de node wacht zolang
-/// (de API antwoordt na de plaatsing), maar de core niet. Elke lees van het
-/// net en elke brok naar de kern is een `.await`, dus de netstack en de
-/// verbindingstaken draaien tussendoor.
+/// De artifacts haalt hij in de downloadtaak ([`crate::download`]), naast
+/// de eigenaar: de bytes gaan als berichten naar de node, die ze brok voor
+/// brok de kern in stroomt. De node heeft er een tweede voor de kernbundel
+/// van een flip.
 pub struct HttpImages<C, R, K> {
     connect: C,
     resolver: R,

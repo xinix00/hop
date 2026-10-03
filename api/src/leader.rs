@@ -114,6 +114,9 @@ pub enum LeaderEffect {
     /// `GET /v1/events`: open een SSE-stroom met [`crate::PING`] en daarna
     /// de meldingen uit de [`crate::EventLog`] van de node.
     Events,
+    /// Het antwoord is compleet; zet deze regel (met marker) op het log van
+    /// de node. Een weigering die de operator ook op de console moet zien.
+    Log(String),
 }
 
 /// Welke taken een rondgang ([`LeaderEffect::Tasks`]) terugmeldt, en in welke vorm.
@@ -284,6 +287,7 @@ impl LeaderApi {
                     return out;
                 }
             }
+            (Method::Post, "/v1/jobs") => return apply(cluster, now, req),
             _ => {}
         }
         (self.state(cluster, now, req), LeaderEffect::None)
@@ -297,7 +301,6 @@ impl LeaderApi {
             (Method::Post, "/v1/agents") => register(cluster, now, req),
             (Method::Post, "/v1/heartbeat") => heartbeat(cluster, now, req),
             (Method::Get, "/v1/jobs") => jobs(cluster),
-            (Method::Post, "/v1/jobs") => apply(cluster, now, req),
             (Method::Get, "/v1/status") => self.status(cluster),
             (Method::Post, "/v1/notify") => notify(cluster, req),
             (Method::Delete, p) if p.starts_with("/v1/agents/") => {
@@ -573,12 +576,33 @@ fn heartbeat<C: Cluster>(cluster: &mut C, now: Nanos, req: &Request) -> Response
 }
 
 /// Maakt of werkt een job bij op naam (upsert).
-fn apply<C: Cluster>(cluster: &mut C, now: Nanos, req: &Request) -> Response {
+///
+/// Een vaste poort met een expliciete `rolling` of `blue-green` slaagt bij
+/// de eerste update nooit (03-10: Hop probeerde het elke paar seconden
+/// opnieuw). Dus meteen een 400, ook voor een update van een job die er al
+/// zo staat, en dezelfde zin als regel op het log ([`LeaderEffect::Log`]).
+/// Zonder policy is een vaste poort recreate ([`Job::policy`]).
+fn apply<C: Cluster>(cluster: &mut C, now: Nanos, req: &Request) -> (Response, LeaderEffect) {
+    let job = match admit(req) {
+        Ok(job) => job,
+        Err(r) => return (r, LeaderEffect::None),
+    };
+    if let Err(e) = job.check_rollable() {
+        let why = alloc::format!("{e}");
+        let line = alloc::format!("hop: {why} HOP_JOB_REFUSED");
+        return (Response::error(400, &why), LeaderEffect::Log(line));
+    }
+    (upsert(cluster, now, job), LeaderEffect::None)
+}
+
+/// Leest de job uit het verzoek en toetst of er iets te draaien valt; een
+/// fout is het antwoord.
+fn admit(req: &Request) -> Result<Job, Response> {
     let Ok(mut job) = Job::from_json(&req.body) else {
-        return Response::error(400, "invalid json");
+        return Err(Response::error(400, "invalid json"));
     };
     if job.name.is_empty() {
-        return Response::error(400, "name required");
+        return Err(Response::error(400, "name required"));
     }
     // Eén artifact zonder command en zonder image kan alleen de hop-driver zijn:
     // het artifact IS het programma. Zelfde afkorting als de init-jobs.
@@ -591,11 +615,16 @@ fn apply<C: Cluster>(cluster: &mut C, now: Nanos, req: &Request) -> Response {
     }
     let hop_image = job.driver == Some(types::Driver::Hop) && !job.artifacts.is_empty();
     if job.command.is_empty() && job.image.is_empty() && !hop_image {
-        return Response::error(
+        return Err(Response::error(
             400,
             "command or image required (or driver \"hop\" with at least one artifact)",
-        );
+        ));
     }
+    Ok(job)
+}
+
+/// Werkt een bestaande job bij, of dispatcht een nieuwe.
+fn upsert<C: Cluster>(cluster: &mut C, now: Nanos, mut job: Job) -> Response {
     let name = job.name.clone();
     if cluster.has_job(&name) {
         let policy = job.policy().as_str();

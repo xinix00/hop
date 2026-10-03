@@ -249,3 +249,40 @@ fn update_keeps_old_priority_when_unset() {
     l.update_job(v("app", "./v2", 1, None), &mut net).unwrap();
     assert_eq!(l.store().get("app").unwrap().priority, Some(1));
 }
+
+/// Een job die al met een vaste poort staat (03-10: welcome op :80): een
+/// expliciete rolling of blue-green update wordt geweigerd voordat er iets
+/// verandert; zonder policy rolt hij als recreate.
+#[test]
+fn update_with_a_fixed_port_only_recreates() {
+    let mut l = leader();
+    let mut net = FakeNet::new();
+    join(&mut l, &mut net, "agent-1", NOW);
+    let mut old = v("web", "./web-v1", 1, None);
+    let _ = old.ports.insert("http".to_string(), 80);
+    l.dispatch_job(old, &mut net).unwrap();
+
+    for policy in [UpdatePolicy::Rolling, UpdatePolicy::BlueGreen] {
+        let mut new = v("web", "./web-v2", 1, Some(policy));
+        let _ = new.ports.insert("http".to_string(), 80);
+        let err = l.update_job(new, &mut net).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "job web: a fixed port (http 80) cannot roll; use update_policy recreate or a dynamic port",
+            "{policy:?}"
+        );
+        let stored = l.job("web").unwrap();
+        assert_eq!(stored.command, "./web-v1");
+        assert!(!stored.deploying);
+        assert!(net.get("agent-1").stops.is_empty());
+        assert_eq!(net.get("agent-1").tasks_for_job("web"), 1);
+    }
+
+    // Zonder policy: recreate, dus eerst de oude weg en dan de nieuwe.
+    let mut new = v("web", "./web-v2", 1, None);
+    let _ = new.ports.insert("http".to_string(), 80);
+    l.update_job(new, &mut net).unwrap();
+    assert_eq!(l.job("web").unwrap().command, "./web-v2");
+    assert_eq!(net.get("agent-1").stops, ["web"]);
+    assert_eq!(net.get("agent-1").tasks_for_job("web"), 1);
+}

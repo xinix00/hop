@@ -121,6 +121,17 @@ pub enum Error {
         /// De grens.
         max: usize,
     },
+    /// Een vaste poort met een update die oud en nieuw naast elkaar zet
+    /// (rolling, blue-green): de nieuwe taak krijgt de poort nooit, want de
+    /// oude houdt hem (03-10: Hop probeerde het elke paar seconden opnieuw).
+    FixedPortRolls {
+        /// De job.
+        job: Name,
+        /// De naam van de poort.
+        port: Name,
+        /// Het nummer.
+        number: u16,
+    },
 }
 
 impl fmt::Display for Error {
@@ -147,6 +158,10 @@ impl fmt::Display for Error {
             Self::OutOfRange { field } => write!(f, "{field}: number out of range"),
             Self::Invalid { field, why } => write!(f, "{field}: {why}"),
             Self::TooMany { field, max } => write!(f, "{field}: more than {max} entries"),
+            Self::FixedPortRolls { job, port, number } => write!(
+                f,
+                "job {job}: a fixed port ({port} {number}) cannot roll; use update_policy recreate or a dynamic port"
+            ),
         }
     }
 }

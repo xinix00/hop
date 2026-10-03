@@ -7,11 +7,15 @@
 //! HopOS-runner. Daarna drie soorten taken op de executor van de app-core:
 //!
 //! - de eigenaar: bezit de [`Node`], handelt de verzoeken uit de [`Hub`]
-//!   af en tikt elke seconde. Wat de node bij de kern vraagt (een slot, het
-//!   image, een status, de staat op hopfs) en de download van een artifact
-//!   zijn `.await`s: de eigenaar geeft dan de core terug, en de netstack en
-//!   de verbindingstaken draaien door. Er wordt nergens een executor-ronde
+//!   af en tikt elke seconde. Wat de node bij de kern vraagt (een slot, een
+//!   brok image, een status, de staat op hopfs) is een `.await`: de
+//!   eigenaar geeft dan de core terug, en de netstack en de
+//!   verbindingstaken draaien door. Er wordt nergens een executor-ronde
 //!   binnen een taak gedraaid (handboek §4);
+//! - de downloadtaak (`agentd_hopos::download`): haalt de artifacts op en
+//!   geeft de bytes als berichten aan de eigenaar, die ze brok voor brok de
+//!   kern in stroomt en tussendoor de bus afhandelt. Een download van
+//!   tientallen MB houdt de API zo niet meer vast (03-10);
 //! - per poort één acceptor en een vaste pool van [`WORKERS`] werkers
 //!   (agent op P, leader op P + 1000): de acceptor geeft elke verbinding als
 //!   waarde aan een vrije werker ([`Handoff`]); de werker draait leanhttp
@@ -32,7 +36,9 @@
 //! `HOP_CLOCK_SYNCED`, `HOP_INIT_SEEDED`, en de weigeringen en degradaties
 //! `HOPOS_API_NO_AUTH`, `HOPOS_API_INSECURE`, `HOP_NET_FAIL`,
 //! `HOP_SNTP_FAIL`, `HOP_CLOCK_FAIL`, `HOP_TLS_ENTROPY_WEAK`, `HOP_TLS_ENTROPY_HW`,
-//! `HOP_INIT_FAIL`. In een cluster ook `HOP_CLUSTER`, `HOP_CLUSTER_JOIN`,
+//! `HOP_INIT_FAIL`, `HOP_JOB_REFUSED` (een job die de leader-API weigerde,
+//! zoals een vaste poort die zou rollen) en `HOP_DOWNLOAD_QUEUE_FULL`. In
+//! een cluster ook `HOP_CLUSTER`, `HOP_CLUSTER_JOIN`,
 //! `HOP_LEADER_LOADING`, `HOP_STATE_LOADED`, `HOP_LEADER_STOPPED`, en de
 //! weigeringen `HOP_LOCK_BAD`, `HOP_CLUSTER_NO_CLOCK`, `HOP_LEASE_STORE`,
 //! `HOP_LINK_FAIL`, `HOP_RELAY_REFUSED`, `HOP_RELAY_FULL`,
@@ -58,11 +64,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::future::{Future, poll_fn};
 use core::pin::pin;
-use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use core::task::Poll;
 use core::time::Duration;
 
 use agentd_hopos::client::{Client, Idle};
+use agentd_hopos::download::{self, Orders, Piece, PieceRx, Pieces};
 use agentd_hopos::entropy::{HARVEST_ROUNDS, Pool};
 use agentd_hopos::env::INIT_JOBS_FILE;
 use agentd_hopos::forward::{self, Routed, STREAM_IDLE};
@@ -147,6 +154,14 @@ static STATE_Q: StateQueue = Mailbox::new();
 static DISPATCH_Q: DispatchQueue = Mailbox::new();
 /// De brievenbus van de eigenaar.
 static INBOX: Inbox = Mailbox::new();
+
+/// De rij met opdrachten naar de downloadtaak.
+static ORDERS: Orders = Mailbox::new();
+/// De brokken van de downloadtaak naar de eigenaar.
+static PIECES: Pieces = sync::spsc::Channel::new();
+/// De download die de eigenaar nog wil (`Node::wanted`); één schrijver, de
+/// eigenaar in [`flush`].
+static WANTED: AtomicU64 = AtomicU64::new(0);
 
 /// Hoe lang een aanroep van de cluster (lease, staat, link, dispatch) na
 /// zijn kop mag zwijgen: een lease of snapshot is klein.
@@ -489,7 +504,7 @@ fn kernel_seed(app: &App, pool: &mut Pool) -> Origin {
     rng.origin()
 }
 
-/// Een eigen pool voor een client van de cluster (`tag` maakt hem anders
+/// Een eigen pool voor een client van de cluster of de flip (`tag` maakt hem anders
 /// dan die van de downloader); dezelfde bron, zonder de regel opnieuw.
 fn quiet_pool(app: &App, exec: &'static Exec, tag: u8) -> Pool {
     let mut seed = Vec::new();
@@ -585,18 +600,41 @@ async fn start_cluster(
     })
 }
 
-/// Wacht op een verzoek in de bus, een bericht van de cluster, of de tik;
-/// het bericht als dat het eerst kwam.
-async fn wake(hub: &Hub, inbox: &Inbox, tick: impl Future<Output = ()>) -> Option<Mail> {
+/// Waarvoor de eigenaar wakker werd.
+enum Woke {
+    /// Een bericht van de cluster.
+    Mail(Mail),
+    /// Een stap van de lopende download.
+    Piece(u64, Piece),
+    /// De bus of de tik: de lus kijkt zelf.
+    Look,
+}
+
+/// Wacht op een verzoek in de bus, een bericht van de cluster, een brok van
+/// de downloadtaak, of de tik.
+///
+/// Een brok gaat vóór de bus: de lus handelt de bus bovenaan toch helemaal
+/// af, dus zo krijgen ze om de beurt een ronde (één brok, dan alle
+/// verzoeken), en een drukke API houdt een download niet tegen.
+async fn wake(
+    hub: &Hub,
+    inbox: &Inbox,
+    pieces: &mut PieceRx<'_>,
+    tick: impl Future<Output = ()>,
+) -> Woke {
     let mut a = pin!(hub.wait());
     let mut b = pin!(inbox.recv());
+    let mut d = pieces.recv();
     let mut c = pin!(tick);
     poll_fn(|cx| {
         if let Poll::Ready(m) = b.as_mut().poll(cx) {
-            return Poll::Ready(Some(m));
+            return Poll::Ready(Woke::Mail(m));
+        }
+        if let Poll::Ready((seq, p)) = core::pin::Pin::new(&mut d).poll(cx) {
+            return Poll::Ready(Woke::Piece(seq, p));
         }
         if a.as_mut().poll(cx).is_ready() || c.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(None);
+            return Poll::Ready(Woke::Look);
         }
         Poll::Pending
     })
@@ -658,7 +696,8 @@ fn now(app: &App, exec: &Exec) -> u64 {
     app.wall_ns().unwrap_or_else(|| exec.now())
 }
 
-/// Zet de regels van de node op het log.
+/// Zet de regels van de node op het log, en een download die klaarligt in
+/// de rij van de downloadtaak.
 fn flush<S, I>(node: &mut Node<S, I>)
 where
     S: runner::SystemApi,
@@ -667,6 +706,19 @@ where
     for line in node.take_lines() {
         log!("{line}");
     }
+    if let Some(order) = node.take_order() {
+        let seq = order.seq;
+        if let Err(sync::Full(back)) = ORDERS.try_send(order) {
+            // Kan alleen met afgebroken opdrachten die de taak nog niet
+            // oversloeg; de volgende flush probeert het opnieuw.
+            node.order_back(&back);
+            log!(
+                "hop: download {seq} waits: the download queue is full ({}) HOP_DOWNLOAD_QUEUE_FULL",
+                download::ORDERS
+            );
+        }
+    }
+    WANTED.store(node.wanted(), Relaxed);
 }
 
 /// De acceptor van één poort: elke verbinding als waarde naar een vrije werker.
@@ -846,6 +898,23 @@ async fn resident(app: &'static App) {
     if images.root_count() == 0 {
         log!("hop: the built-in root certificates did not parse; https refused HOP_TLS_NO_ROOTS");
     }
+    // De artifacts haalt de downloadtaak; de node houdt een eigen
+    // downloader voor de kernbundel van een flip (zeldzaam, en die wacht op
+    // de kern zelf, crate::flip).
+    let Some((pieces_tx, mut pieces)) = PIECES.split() else {
+        log!("hop: the download queue was already taken HOP_SPAWN_FAIL");
+        return;
+    };
+    if let Err(e) = exec.spawn(download::download_task(images, &ORDERS, pieces_tx, &WANTED)) {
+        log!("hop: cannot spawn the download task: {e} HOP_SPAWN_FAIL");
+        return;
+    }
+    let images = HttpImages::new(
+        SlotConnect { net, exec },
+        SlotResolver,
+        SlotClock { app, exec },
+        quiet_pool(app, exec, 5),
+    );
     // Het adres zoals de andere nodes deze node zien (achter een NAT anders
     // dan het slot-adres); de listeners blijven op de poorten van `cfg`.
     let seen = match lock::advertised(&cfg, |k| app.env(k).map(String::from)) {
@@ -963,9 +1032,12 @@ async fn resident(app: &'static App) {
             flush(&mut node);
         }
         let wait = Duration::from_nanos(next_tick.saturating_sub(now(app, exec)));
-        if let Some(m) = wake(hub, &INBOX, exec.after(wait)).await {
-            node.on_mail(m, now(app, exec));
-            flush(&mut node);
+        // Hoogstens één brok per ronde: daarna eerst weer de bus (bovenaan).
+        match wake(hub, &INBOX, &mut pieces, exec.after(wait)).await {
+            Woke::Mail(m) => node.on_mail(m, now(app, exec)),
+            Woke::Piece(seq, p) => node.on_piece(seq, p, now(app, exec)).await,
+            Woke::Look => {}
         }
+        flush(&mut node);
     }
 }

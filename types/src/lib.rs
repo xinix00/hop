@@ -121,6 +121,7 @@ mod tests {
 
     use super::*;
     use crate::time::SECOND;
+    use alloc::format;
     use alloc::string::ToString;
 
     fn map(pairs: &[(&str, &str)]) -> Map<String> {
@@ -438,6 +439,49 @@ mod tests {
         assert!(Job::from_value(&v, false).is_ok());
         let err = Job::from_value(&v, true).unwrap_err();
         assert_eq!(err.to_string(), "unknown field \"comand\"");
+    }
+
+    #[test]
+    fn a_fixed_port_recreates_unless_told_to_roll() {
+        let job = |s: &str| Job::from_json(s.as_bytes()).unwrap();
+        // Zonder policy is een vaste poort recreate; zonder vaste poort rolling.
+        let fixed = job(r#"{"name":"web","command":"x","ports":{"http":80}}"#);
+        assert_eq!(fixed.policy(), UpdatePolicy::Recreate);
+        assert!(fixed.check_rollable().is_ok());
+        let dynamic = job(r#"{"name":"web","command":"x","ports":{"http":0}}"#);
+        assert_eq!(dynamic.policy(), UpdatePolicy::Rolling);
+        // Een expliciete rolling met een vaste poort: nee, met de zin.
+        let err = job(r#"{"name":"web","ports":{"http":80},"update_policy":"rolling"}"#)
+            .check_rollable()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "job web: a fixed port (http 80) cannot roll; use update_policy recreate or a dynamic port"
+        );
+        for policy in ["rolling", "blue-green"] {
+            let j = job(&format!(
+                r#"{{"name":"web","ports":{{"admin":0,"http":80}},"update_policy":"{policy}"}}"#
+            ));
+            assert!(
+                matches!(
+                    j.check_rollable(),
+                    Err(Error::FixedPortRolls { number: 80, .. })
+                ),
+                "{policy}"
+            );
+        }
+        // Recreate, een dynamische poort (0) of geen poort: goed.
+        assert!(
+            job(r#"{"name":"web","ports":{"http":80},"update_policy":"recreate"}"#)
+                .check_rollable()
+                .is_ok()
+        );
+        assert!(
+            job(r#"{"name":"web","ports":{"http":0}}"#)
+                .check_rollable()
+                .is_ok()
+        );
+        assert!(job(r#"{"name":"web"}"#).check_rollable().is_ok());
     }
 
     #[test]

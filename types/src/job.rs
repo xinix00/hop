@@ -187,7 +187,9 @@ pub struct Job {
     pub command: String,
     /// Het aantal instanties: 0 is 1, -1 is "op elke agent".
     pub count: i64,
-    /// Poortnaam naar hostpoort (0 = dynamisch).
+    /// Poortnaam naar hostpoort (0 = dynamisch). Een vaste poort (niet 0)
+    /// maakt recreate de standaard voor `update_policy` (zie
+    /// [`Job::policy`]).
     pub ports: Map<u16>,
     /// Relatieve CPU-prioriteit (0 = niet begrensd).
     pub cpu_shares: i64,
@@ -206,7 +208,9 @@ pub struct Job {
     pub max_restarts: Option<i64>,
     /// Het venster waarin herstarts tellen (0 = standaard, 5 min).
     pub restart_window: Nanos,
-    /// Hoe een update uitrolt; `None` is rolling.
+    /// Hoe een update uitrolt; `None` is rolling, of recreate als de job een
+    /// vaste poort heeft. Een expliciete `rolling` of `blue-green` met een
+    /// vaste poort weigert de API ([`Job::check_rollable`]).
     pub update_policy: Option<UpdatePolicy>,
     /// `None` = automatisch (achteraan), 0 = bovenaan, N = N-de plek.
     pub priority: Option<i64>,
@@ -235,9 +239,45 @@ impl Job {
         usize::try_from(self.count).unwrap_or(0).max(1)
     }
 
-    /// De update-policy, met rolling als standaard.
+    /// De update-policy: de gezette, anders recreate bij een vaste poort en
+    /// rolling zonder.
+    ///
+    /// Rolling en blue-green zetten de nieuwe taak naast de oude, en een
+    /// vaste poort houdt de oude vast: op dezelfde node bindt de nieuwe nooit
+    /// (03-10: Hop probeerde het elke paar seconden opnieuw). Zonder keuze
+    /// van de gebruiker is recreate dan de enige die slaagt; zo blijven de
+    /// bestaande jobspecs met `"ports":{"http":80}` en de init-jobs werken.
     pub fn policy(&self) -> UpdatePolicy {
-        self.update_policy.unwrap_or_default()
+        match self.update_policy {
+            Some(p) => p,
+            None if self.fixed_port().is_some() => UpdatePolicy::Recreate,
+            None => UpdatePolicy::Rolling,
+        }
+    }
+
+    /// De eerste vaste poort (niet 0), als naam en nummer.
+    fn fixed_port(&self) -> Option<(&str, u16)> {
+        self.ports
+            .iter()
+            .find(|&(_, &p)| p != 0)
+            .map(|(name, &p)| (name, p))
+    }
+
+    /// Toetst of een update van deze job kan uitrollen: een expliciete
+    /// `rolling` of `blue-green` met een vaste poort kan dat nooit (zie
+    /// [`Job::policy`]); alleen recreate of een dynamische poort (0) wel.
+    pub fn check_rollable(&self) -> Result {
+        if self.policy() == UpdatePolicy::Recreate {
+            return Ok(());
+        }
+        match self.fixed_port() {
+            Some((port, number)) => Err(Error::FixedPortRolls {
+                job: Name::new(&self.name),
+                port: Name::new(port),
+                number,
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Vult de boot-config-afkorting in: precies één artifact en geen

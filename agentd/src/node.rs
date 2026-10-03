@@ -283,6 +283,10 @@ impl Node {
         let (resp, effect) = self.leader_handle(req, now);
         match effect {
             LeaderEffect::None => Reply::Plain(resp),
+            LeaderEffect::Log(line) => {
+                eprintln!("{line}");
+                Reply::Plain(resp)
+            }
             LeaderEffect::Tasks { agents, scope } => Reply::Tasks { agents, scope },
             LeaderEffect::Agent {
                 endpoint,
