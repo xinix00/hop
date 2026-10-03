@@ -290,7 +290,7 @@ impl<S: SystemApi, I: Images> Node<S, I> {
         // Met één decimaal: een kleine app in een ruime limiet (welcome,
         // 150 KB in 32 MB) is anders altijd 0 (03-10, LicheeRV).
         let mem_pct = match mem {
-            Some(m) if limit > 0 => (m.min(limit) as f64 * 1000.0 / limit as f64).round() / 10.0,
+            Some(m) if limit > 0 => (u128::from(m.min(limit)) * 1000 / u128::from(limit)) as f64 / 10.0,
             _ => return,
         };
         if let Some(c) = cpu {
