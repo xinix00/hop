@@ -50,7 +50,7 @@ use types::{Driver, Job, Map, Nanos, SysUsage, Telemetry, Time};
 
 use crate::VERSION;
 use crate::download::{Order, Piece};
-use crate::env::BootConfig;
+use crate::env::{BootConfig, ColdFlip};
 use crate::forward::{Forward, Routed};
 use crate::local::Local;
 
@@ -183,6 +183,13 @@ pub struct Node<S, I> {
     /// Een koude flip die de kern aannam: leeft deze Hop op dit moment nog,
     /// dan sprong de kern niet ([`COLD_FLIP_WAIT`]).
     cold_flip_until: Option<Nanos>,
+    /// Kan het board koud flippen (`HOPOS_COLD_FLIP`, [`Node::cold_refusal`]).
+    cold_flip: ColdFlip,
+    /// Draaide er sinds de start van deze Hop ooit iets op een app-core:
+    /// Hop zelf buiten `system`, of een plaatsing buiten `system`. Zonder
+    /// zekerheid ja (een job zonder groep kan op de OS-core vallen, maar
+    /// telt): met `fresh` weigert Hop dan liever zelf dan te stoppen.
+    app_core_used: bool,
     /// De starts die op hun image wachten, in volgorde; de eerste is de
     /// download die loopt (als hij `sent` is).
     loads: VecDeque<Loading>,
@@ -259,6 +266,8 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             hop: SysUsage::default(),
             next_measure: now,
             cold_flip_until: None,
+            cold_flip: cfg.cold_flip,
+            app_core_used: cfg.hop_group != agent::SYSTEM_GROUP,
             loads: VecDeque::new(),
             next_seq: 1,
         }
@@ -514,6 +523,10 @@ impl<S: SystemApi, I: Images> Node<S, I> {
     /// FLIP: haal de bundel, stop bij een koude flip eerst de eigen taken
     /// op deze node, en vraag de kern de flip (crate::flip).
     ///
+    /// Een koude flip die het board niet kan ([`Node::cold_refusal`]),
+    /// weigert Hop meteen: geen download, geen stop, één regel
+    /// (`HOP_FLIP_FAIL`) en een 502 met "ask warm".
+    ///
     /// De taken stoppen pas ná de download: een URL die niet werkt, laat
     /// alles draaien. Ze stoppen via de agent (`hold_for_flip`, dezelfde
     /// Stop-acties als een preemptie, maar de records blijven), dus de jobs
@@ -525,6 +538,9 @@ impl<S: SystemApi, I: Images> Node<S, I> {
     where
         S: crate::flip::KernFlip,
     {
+        if cold && let Some(why) = self.cold_refusal() {
+            return Err(String::from(why));
+        }
         let how = if cold { " (cold)" } else { "" };
         self.lines.push(format!(
             "hop: kernel flip{how} requested from {url} HOP_FLIP"
@@ -544,6 +560,19 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             Err(_) => self.cold_flip_back(now).await,
         }
         r
+    }
+
+    /// Waarom dit board nu niet koud kan flippen, als Hop dat al weet: het
+    /// board-contract van de kern (`HOPOS_COLD_FLIP`) en de eigen
+    /// plaatsingen. `None` is vragen; de kern weigert dan nog zelf.
+    fn cold_refusal(&self) -> Option<&'static str> {
+        match self.cold_flip {
+            ColdFlip::No => Some("cold flip: no PSCI on this board, ask warm"),
+            ColdFlip::Fresh if self.app_core_used => Some(
+                "cold flip: CPU_OFF has no way back on this board and an app core ran, ask warm",
+            ),
+            ColdFlip::Fresh | ColdFlip::Yes => None,
+        }
     }
 
     /// De koude flip ging niet door: de taken die hij stopte, herstarten.
@@ -914,7 +943,15 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             volumes: &volumes,
             ports: &ports,
         };
-        let outcome = match self.runner.start(ms, &req).await {
+        let started = self.runner.start(ms, &req).await;
+        // De kern zette hem op een core: buiten `system` telt dat als een
+        // app-core ([`Node::cold_refusal`]).
+        if matches!(started, Ok(Started::Running { .. } | Started::AwaitImage))
+            && tags.get("sharegroup").map(String::as_str) != Some(agent::SYSTEM_GROUP)
+        {
+            self.app_core_used = true;
+        }
+        let outcome = match started {
             Ok(Started::Running { pid }) => Ok(pid),
             Ok(Started::Aborted) => Err((StartError::Failed, String::from("aborted"))),
             Ok(Started::AwaitImage) => {

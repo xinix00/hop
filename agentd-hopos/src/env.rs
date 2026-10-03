@@ -17,6 +17,7 @@
 //! | `HOPOS_CORES` | de eigen app-cores die Hop uitdeelt; 0 mag alleen met `HOPOS_SYSTEM_CORE=1` | `1` |
 //! | `HOPOS_SYSTEM_CORE` | `1`: de kern deelt zijn core als sharegroup `system`; die telt niet in `HOPOS_CORES`, een job in `system` past altijd en een job zonder groep van één core mag bij een volle node door (de kern zet hem dan op de OS-core) | uit |
 //! | `HOPOS_HOP_GROUP` | de sharegroup van Hop zelf (`hopos.hop.sharegroup`): jobs met die tag delen Hop's core en tellen niet in `HOPOS_CORES` | `hop` |
+//! | `HOPOS_COLD_FLIP` | kan het board koud flippen: `yes`, `no` (geen PSCI, de M4) of `fresh` (alleen zolang nog nooit een app-core draaide, de Pi 5); Hop beslist ermee vóór hij een taak stopt ([`ColdFlip`]) | `yes` (een oude kern weigert zelf) |
 //! | `HOPOS_MEMORY` | het app-geheugen in bytes waar Hop tegen plant | 256 MiB |
 //! | `HOPOS_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_KEY`, `_SECRET`, `_PATHSTYLE` | de bucket van de node: de object-store van de apps, en met `HOPOS_LOCK_TYPE=s3` de lock van de cluster | geen |
 //! | `HOPOS_INIT_JOBS` | de init-jobs als één JSON-array (`hopos.init[]`) | [`INIT_JOBS_FILE`] als die er is |
@@ -59,6 +60,8 @@ pub const ENV_SYSTEM_CORE: &str = "HOPOS_SYSTEM_CORE";
 /// De sharegroup van Hop zelf (`hopos.hop.sharegroup`): jobs met die tag
 /// delen Hop's core, dus telt Hop haar vrij.
 pub const ENV_HOP_GROUP: &str = "HOPOS_HOP_GROUP";
+/// Kan het board koud flippen ([`ColdFlip`]).
+pub const ENV_COLD_FLIP: &str = "HOPOS_COLD_FLIP";
 /// Het app-geheugen.
 pub const ENV_MEMORY: &str = "HOPOS_MEMORY";
 /// De init-jobs als JSON-array.
@@ -79,6 +82,31 @@ pub const ENV_S3_PATHSTYLE: &str = "HOPOS_S3_PATHSTYLE";
 /// De init-jobs als bestand, in het volume van Hop, als de env ze niet
 /// droeg.
 pub const INIT_JOBS_FILE: &str = "/hop/init-jobs.json";
+
+/// Kan het board koud flippen (`HOPOS_COLD_FLIP`, het board-contract van
+/// de kern: HopOS `kern::nodecfg::ColdFlip`)?
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColdFlip {
+    /// `yes`, of de sleutel ontbreekt (een oude kern): vragen, de kern
+    /// weigert zelf als het niet kan.
+    Yes,
+    /// `no`: nooit (geen PSCI, de M4).
+    No,
+    /// `fresh`: alleen zolang er nog nooit een app-core draaide (de Pi 5:
+    /// CPU_OFF keert daar niet terug).
+    Fresh,
+}
+
+impl ColdFlip {
+    /// De waarde uit de env; alles behalve `no` en `fresh` is `yes`.
+    fn parse(v: Option<&str>) -> Self {
+        match v {
+            Some("no") => Self::No,
+            Some("fresh") => Self::Fresh,
+            _ => Self::Yes,
+        }
+    }
+}
 
 /// Het geheugen waar Hop tegen plant als de kern het niet zegt.
 pub const DEFAULT_MEMORY: u64 = 256 << 20;
@@ -147,6 +175,8 @@ pub struct BootConfig {
     pub system_core: bool,
     /// De sharegroup van Hop zelf (`HOPOS_HOP_GROUP`, standaard `hop`).
     pub hop_group: String,
+    /// Kan het board koud flippen (`HOPOS_COLD_FLIP`, standaard `yes`).
+    pub cold_flip: ColdFlip,
     /// Het app-geheugen in bytes.
     pub memory: u64,
     /// Of `HOPOS_MEMORY` ontbrak (de bewoner meldt dat luid).
@@ -171,6 +201,7 @@ impl fmt::Debug for BootConfig {
             .field("cores", &self.cores)
             .field("system_core", &self.system_core)
             .field("hop_group", &self.hop_group)
+            .field("cold_flip", &self.cold_flip)
             .field("memory", &self.memory)
             .field("memory_defaulted", &self.memory_defaulted)
             .field("s3", &self.s3)
@@ -278,6 +309,7 @@ impl BootConfig {
             cores: if system_core { cores } else { cores.max(1) },
             system_core,
             hop_group,
+            cold_flip: ColdFlip::parse(get(ENV_COLD_FLIP).as_deref()),
             memory: number(&get, ENV_MEMORY, DEFAULT_MEMORY)?,
             memory_defaulted: memory_raw.is_none(),
             s3: s3(&get),

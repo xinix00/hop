@@ -29,6 +29,11 @@
 //! de gestopte taken vast tot dan: weigert de kern (de FLIP geeft een fout,
 //! of hij nam hem aan en sprong toch niet, de Pi 5 op 03-10), dan herstarten
 //! ze (`HOP_FLIP_COLD_BACK`) en klopt de telling van de leader nog.
+//!
+//! Wat Hop al weet, vraagt hij niet: zegt het board-contract van de kern
+//! (`HOPOS_COLD_FLIP`, [`crate::env::ColdFlip`]) dat koud niet kan (`no`,
+//! of `fresh` nadat er iets op een app-core draaide), dan is de koude flip
+//! meteen een 502, zonder download en zonder dat er een taak stopt.
 
 use alloc::format;
 use alloc::string::String;

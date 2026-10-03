@@ -29,7 +29,7 @@ use sync::mpsc::Mailbox;
 use sync::spsc::Channel;
 
 use crate::download::{Orders, Pieces, download_task};
-use crate::env::{BootConfig, BootError};
+use crate::env::{BootConfig, BootError, ColdFlip};
 use crate::{Answer, Handoff, Hub, Images, Node, Port, Question, Sink};
 
 const KEY: &[u8] = b"test-key";
@@ -68,12 +68,18 @@ type TestNode = Node<
 >;
 
 fn cfg() -> BootConfig {
+    cfg_with(&[])
+}
+
+/// [`cfg`] met extra sleutels van de kern erbij.
+fn cfg_with(extra: &[(&'static str, &'static str)]) -> BootConfig {
     let mut env = BTreeMap::new();
     env.insert("HOPOS_APIKEY", "test-key");
     env.insert("HOPOS_NODE", "n1");
     env.insert("HOPOS_NODE_IP", "10.0.0.5");
     env.insert("HOPOS_CORES", "4");
     env.insert("HOPOS_MEMORY", "1073741824");
+    env.extend(extra.iter().copied());
     BootConfig::from_env(|k| env.get(k).map(|v| String::from(*v)), 2, "10.100.0.2").unwrap()
 }
 
@@ -253,6 +259,16 @@ fn post_a_job_and_the_kernel_places_it() {
 /// Een node met web geplaatst en een kernbundel op de server; de nep-kern
 /// neemt de FLIP aan als `flip_ok`.
 fn placed_for_a_flip(flip_ok: bool) -> (TestNode, FakeKern) {
+    let (mut n, k) = ready_for_a_flip(flip_ok, &[]);
+    http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
+    assert!(k.0.borrow().slots[&1].placed);
+    n.take_lines();
+    (n, k)
+}
+
+/// Een node met `env` erbij en een kernbundel op de server, nog zonder
+/// taak; de nep-kern neemt de FLIP aan als `flip_ok`.
+fn ready_for_a_flip(flip_ok: bool, env: &[(&'static str, &'static str)]) -> (TestNode, FakeKern) {
     let k = FakeKern::new(4);
     k.0.borrow_mut().flip_ok = flip_ok;
     let sys = KernSys::new(k.client(), 4);
@@ -262,11 +278,134 @@ fn placed_for_a_flip(flip_ok: bool) -> (TestNode, FakeKern) {
         String::from("http://images/k.flip"),
         b"\x7fELF-a-kernel-bundle".to_vec(),
     );
-    let mut n = Node::new(&cfg(), sys, MemImages::new(images), T0);
+    let mut n = Node::new(&cfg_with(env), sys, MemImages::new(images), T0);
+    n.take_lines();
+    (n, k)
+}
+
+/// Hop weigerde de koude flip zelf: een 502 met `why`, één regel, en de
+/// kern zag geen stop, geen bundel en geen FLIP.
+fn refused_by_hop(n: &mut TestNode, k: &FakeKern, why: &str) {
+    let ops_before = k.0.borrow().ops.len();
+    let (status, body) = cold_flip(n);
+    assert_eq!(status, 502, "{body}");
+    assert!(body.contains(why), "{body}");
+    let lines = n.take_lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].contains("HOP_FLIP_FAIL") && lines[0].contains(why),
+        "{lines:?}"
+    );
+    let st = k.0.borrow();
+    assert!(
+        st.ops[ops_before..]
+            .iter()
+            .all(|&o| o != PrivOp::StopSlot.op()
+                && o != PrivOp::StartSlot.op()
+                && o != PrivOp::Flip.op()),
+        "{:?}",
+        &st.ops[ops_before..]
+    );
+}
+
+/// De M4 (`HOPOS_COLD_FLIP=no`): geen PSCI, dus Hop weigert koud meteen,
+/// en de taak draait door.
+#[test]
+fn a_board_without_psci_refuses_cold_before_any_stop() {
+    let (mut n, k) = ready_for_a_flip(true, &[("HOPOS_COLD_FLIP", "no")]);
+    http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
+    n.take_lines();
+    refused_by_hop(&mut n, &k, "cold flip: no PSCI on this board, ask warm");
+    assert!(k.0.borrow().slots[&1].placed);
+    assert_eq!(
+        n.agent().tasks().next().unwrap().state,
+        types::TaskState::Running
+    );
+    placed_matches_the_agent(&mut n);
+    // Warm mag wel.
+    let sum = "ab".repeat(32);
+    let body = format!(r#"{{"url":"http://images/k.flip","sha256":"{sum}"}}"#);
+    let (status, body) = http(&mut n, Port::Agent, wire("POST", "/flip", &body));
+    assert_eq!(status, 202, "{body}");
+}
+
+/// De Pi 5 (`HOPOS_COLD_FLIP=fresh`) met Hop op de OS-core: zonder
+/// plaatsing op een app-core gaat de koude flip door, een job in `system`
+/// telt niet, en na de eerste plaatsing daarbuiten weigert Hop zelf.
+#[test]
+fn a_fresh_board_flips_cold_until_an_app_core_ran() {
+    let fresh = [
+        ("HOPOS_COLD_FLIP", "fresh"),
+        ("HOPOS_HOP_GROUP", "system"),
+        ("HOPOS_SYSTEM_CORE", "1"),
+    ];
+    let (mut n, k) = ready_for_a_flip(true, &fresh);
+    let (status, body) = cold_flip(&mut n);
+    assert_eq!(status, 202, "{body}");
+    assert!(k.0.borrow().ops.contains(&PrivOp::Flip.op()));
+
+    let (mut n, k) = ready_for_a_flip(true, &fresh);
+    let sys_job = r#"{"name":"sys","artifacts":[{"url":"http://images/web.elf"}],"cpu_shares":1024,"memory_limit":33554432,"tags":{"sharegroup":"system"}}"#;
+    let (status, body) = http(&mut n, Port::Leader, wire("POST", "/v1/jobs", sys_job));
+    assert!((200..300).contains(&status), "{status} {body}");
+    assert!(k.0.borrow().slots[&1].placed);
+    n.take_lines();
+    let (status, body) = cold_flip(&mut n);
+    assert_eq!(status, 202, "{body}");
+
+    let (mut n, k) = ready_for_a_flip(true, &fresh);
     http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
     assert!(k.0.borrow().slots[&1].placed);
     n.take_lines();
-    (n, k)
+    refused_by_hop(
+        &mut n,
+        &k,
+        "cold flip: CPU_OFF has no way back on this board and an app core ran, ask warm",
+    );
+    assert_eq!(
+        n.agent().tasks().next().unwrap().state,
+        types::TaskState::Running
+    );
+    // Ook na het stoppen van de job: de core draaide, en dat blijft zo.
+    http(&mut n, Port::Leader, wire("DELETE", "/v1/jobs/web", ""));
+    refused_by_hop(
+        &mut n,
+        &k,
+        "cold flip: CPU_OFF has no way back on this board and an app core ran, ask warm",
+    );
+}
+
+/// `fresh` met Hop op een eigen app-core: die core draait al, dus nooit koud.
+#[test]
+fn a_fresh_board_with_hop_on_an_app_core_never_flips_cold() {
+    let (mut n, k) = ready_for_a_flip(true, &[("HOPOS_COLD_FLIP", "fresh")]);
+    refused_by_hop(
+        &mut n,
+        &k,
+        "cold flip: CPU_OFF has no way back on this board and an app core ran, ask warm",
+    );
+}
+
+/// `yes` (en een oude kern zonder de sleutel): zoals voorheen, Hop stopt
+/// en vraagt; de kern beslist.
+#[test]
+fn a_board_that_flips_cold_stops_and_asks_as_before() {
+    for env in [&[("HOPOS_COLD_FLIP", "yes")][..], &[]] {
+        let (mut n, k) = ready_for_a_flip(false, env);
+        http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
+        n.take_lines();
+        let (status, body) = cold_flip(&mut n);
+        assert_eq!(status, 502, "{body}");
+        assert!(body.contains("kernel refused the flip"), "{body}");
+        let lines = n.take_lines();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("HOP_FLIP_COLD_STOP stopped=1")),
+            "{lines:?}"
+        );
+        assert!(k.0.borrow().ops.contains(&PrivOp::Flip.op()));
+    }
 }
 
 fn cold_flip(n: &mut TestNode) -> (u16, String) {
@@ -499,6 +638,22 @@ fn the_system_core_comes_from_the_env() {
     );
     // Een oude kern: geen system-core, en minstens één core zoals altijd.
     assert_eq!(with(&[open, ("HOPOS_CORES", "0")]), (1, false));
+    // Het board-contract van de koude flip; zonder sleutel `yes`.
+    let cold = |v: Option<&'static str>| {
+        let mut pairs = Vec::from([open]);
+        pairs.extend(v.map(|v| ("HOPOS_COLD_FLIP", v)));
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| String::from(*v))
+        };
+        BootConfig::from_env(get, 2, "x").unwrap().cold_flip
+    };
+    assert_eq!(cold(None), ColdFlip::Yes);
+    assert_eq!(cold(Some("yes")), ColdFlip::Yes);
+    assert_eq!(cold(Some("no")), ColdFlip::No);
+    assert_eq!(cold(Some("fresh")), ColdFlip::Fresh);
     assert_eq!(
         with(&[open, ("HOPOS_CORES", "3"), ("HOPOS_SYSTEM_CORE", "0")]),
         (3, false)
