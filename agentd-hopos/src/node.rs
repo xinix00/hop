@@ -287,8 +287,10 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             .task(task_id)
             .and_then(|t| self.agent.get_job(&t.job_name))
             .map_or(0, |j| j.memory_limit);
+        // Met één decimaal: een kleine app in een ruime limiet (welcome,
+        // 150 KB in 32 MB) is anders altijd 0 (03-10, LicheeRV).
         let mem_pct = match mem {
-            Some(m) if limit > 0 => (m.min(limit).saturating_mul(100) / limit) as f64,
+            Some(m) if limit > 0 => (m.min(limit) as f64 * 1000.0 / limit as f64).round() / 10.0,
             _ => return,
         };
         if let Some(c) = cpu {
