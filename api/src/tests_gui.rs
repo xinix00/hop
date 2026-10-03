@@ -401,6 +401,9 @@ fn every_dashboard_route_exists_on_the_leader() {
             (LeaderEffect::Tasks { scope, .. }, p) if p.ends_with("/status") => {
                 assert!(matches!(scope, TasksScope::Job { .. }), "{what}");
             }
+            (LeaderEffect::Tasks { scope, .. }, "/v1/tasks") => {
+                assert!(matches!(scope, TasksScope::All { .. }), "{what}");
+            }
             (LeaderEffect::None, _) => {}
             _ => panic!("{what}: unexpected effect {e:?}"),
         }
