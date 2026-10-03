@@ -98,6 +98,9 @@ pub struct Task {
     /// Het aantal cores waar `cpu_percent` op slaat (de cores van het slot);
     /// 0 is onbekend.
     pub cores: u64,
+    /// De logische core waarop de taak draait (de primaire core van zijn
+    /// slot); 0 is de OS-core en geldig, dus onbekend is `None`.
+    pub core: Option<u64>,
     /// Actueel geheugengebruik, gemeten door de agent.
     pub mem_percent: f64,
     /// Bytes binnen tijdens `downloading`.
@@ -146,6 +149,7 @@ impl Task {
                 "memory_limit" => t.memory_limit = de::uint(v, k)?,
                 "cpu_percent" => t.cpu_percent = de::float(v, k)?,
                 "cores" => t.cores = de::uint(v, k)?,
+                "core" => t.core = Some(de::uint(v, k)?),
                 "mem_percent" => t.mem_percent = de::float(v, k)?,
                 "downloaded_bytes" => t.downloaded = de::uint(v, k)?,
                 "image_size_bytes" => t.image_size = de::uint(v, k)?,
@@ -181,6 +185,9 @@ impl Task {
             Value::Number(Number::Float(self.cpu_percent)),
         )?;
         o.uint_opt("cores", self.cores)?;
+        if let Some(c) = self.core {
+            o.field("core", Value::uint(c))?;
+        }
         o.field(
             "mem_percent",
             Value::Number(Number::Float(self.mem_percent)),
@@ -208,6 +215,8 @@ pub struct SysUsage {
     pub mem_bytes: u64,
     /// Zijn RAM in bytes, de noemer van het geheugenprocent; 0 is onbekend.
     pub ram_bytes: u64,
+    /// De logische core van zijn slot (de kern: de OS-core, 0); `None` is onbekend.
+    pub core: Option<u64>,
 }
 
 impl SysUsage {
@@ -244,10 +253,20 @@ pub struct Telemetry {
     pub hop: SysUsage,
 }
 
-/// De sleutels van [`Telemetry::kern`] en [`Telemetry::hop`]: cpu, geheugen, RAM.
-const USAGE_KEYS: [[&str; 3]; 2] = [
-    ["kern_cpu_percent", "kern_mem_bytes", "kern_ram_bytes"],
-    ["hop_cpu_percent", "hop_mem_bytes", "hop_ram_bytes"],
+/// De sleutels van [`Telemetry::kern`] en [`Telemetry::hop`]: cpu, geheugen, RAM, core.
+const USAGE_KEYS: [[&str; 4]; 2] = [
+    [
+        "kern_cpu_percent",
+        "kern_mem_bytes",
+        "kern_ram_bytes",
+        "kern_core",
+    ],
+    [
+        "hop_cpu_percent",
+        "hop_mem_bytes",
+        "hop_ram_bytes",
+        "hop_core",
+    ],
 ];
 
 impl Telemetry {
@@ -257,13 +276,17 @@ impl Telemetry {
             self.temp_milli_c = de::int(v, k)?;
             return Ok(true);
         }
-        for (u, [cpu, mem, ram]) in [&mut self.kern, &mut self.hop].into_iter().zip(USAGE_KEYS) {
+        for (u, [cpu, mem, ram, core]) in
+            [&mut self.kern, &mut self.hop].into_iter().zip(USAGE_KEYS)
+        {
             if k == cpu {
                 u.cpu_percent = Some(de::float(v, k)?);
             } else if k == mem {
                 u.mem_bytes = de::uint(v, k)?;
             } else if k == ram {
                 u.ram_bytes = de::uint(v, k)?;
+            } else if k == core {
+                u.core = Some(de::uint(v, k)?);
             } else {
                 continue;
             }
@@ -286,12 +309,15 @@ impl Telemetry {
     /// Schrijft de gemeten velden in `o`.
     pub fn write(&self, o: &mut ObjectBuilder) -> Result {
         o.int_opt("temp_milli_c", self.temp_milli_c)?;
-        for (u, [cpu, mem, ram]) in [&self.kern, &self.hop].into_iter().zip(USAGE_KEYS) {
+        for (u, [cpu, mem, ram, core]) in [&self.kern, &self.hop].into_iter().zip(USAGE_KEYS) {
             if let Some(c) = u.cpu_percent {
                 o.field(cpu, Value::Number(Number::Float(c)))?;
             }
             o.uint_opt(mem, u.mem_bytes)?;
             o.uint_opt(ram, u.ram_bytes)?;
+            if let Some(c) = u.core {
+                o.field(core, Value::uint(c))?;
+            }
         }
         Ok(())
     }
@@ -367,6 +393,7 @@ impl Agent {
                 state: TaskState::System,
                 cpu_percent: u.cpu_percent.unwrap_or(0.0),
                 cores: 1,
+                core: u.core,
                 mem_percent: u.mem_percent(),
                 ..Task::default()
             };

@@ -1045,6 +1045,7 @@ fn tasks_reply_keys_by_agent_and_names_the_silent() {
         cpu_percent: Some(2.0),
         mem_bytes: 1 << 20,
         ram_bytes: 8 << 20,
+        core: Some(0),
     };
     a1.telemetry.hop.mem_bytes = 1 << 20;
     let a2 = types::Agent {

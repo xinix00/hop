@@ -283,6 +283,8 @@ pub fn slot_status_of(info: &SlotInfo) -> SlotStatus {
             info.ram_size
         },
         cores: info.cores,
+        // Core 0 is de OS-core en geldig; zonder core (span 0) meldt de kern ook 0.
+        core: (info.span != 0).then_some(u64::from(info.core)),
         cpu_pct: None,
         fault_vec: info.fault_vec,
         fault_esr: info.fault_esr,

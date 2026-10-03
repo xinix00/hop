@@ -70,6 +70,9 @@ pub struct SlotStatus {
     pub mem_limit: u64,
     /// Het aantal cores van het slot, de noemer bij `cpu_pct`; 0 = onbekend.
     pub cores: u64,
+    /// De logische (primaire) core van het slot; 0 is de OS-core, die Hop op
+    /// arm64 deelt. `None` als het slot geen core heeft (leeg) of onbekend.
+    pub core: Option<u64>,
     /// CPU als percentage van de EIGEN cores (0 tot 100); `None` zolang er geen meetvenster is.
     ///
     /// Nog niet in `SLOT_STATUS`: de adapter laat hem `None`.
@@ -100,6 +103,7 @@ impl SlotStatus {
             mem_sys: 0,
             mem_limit: 0,
             cores: 0,
+            core: None,
             cpu_pct: None,
             fault_vec: 0,
             fault_esr: 0,

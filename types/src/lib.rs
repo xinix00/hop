@@ -203,20 +203,28 @@ mod tests {
             started_at: Time(1_790_000_000 * SECOND),
             restart_count: 2,
             cores: 2,
+            core: Some(0),
             ..Task::default()
         };
         let data = json::to_string(&task.to_value().unwrap()).unwrap();
         assert!(data.contains(r#""cores":2"#), "{data}");
+        // Core 0 (de OS-core) is een meting en staat erin.
+        assert!(data.contains(r#""core":0"#), "{data}");
         let decoded = Task::from_value(&json::parse_str(&data).unwrap()).unwrap();
         assert_eq!(decoded, task);
         assert_eq!(decoded.ports.get("http"), Some(&8080));
         // 0 cores is onbekend: het veld ontbreekt, en een taak zonder leest als 0.
-        let none = Task { cores: 0, ..task };
+        // Geen core is onbekend: dan ontbreekt "core" ook.
+        let none = Task {
+            cores: 0,
+            core: None,
+            ..task
+        };
         let data = json::to_string(&none.to_value().unwrap()).unwrap();
-        assert!(!data.contains("cores"), "{data}");
+        assert!(!data.contains("cores") && !data.contains("core"), "{data}");
         let old =
             Task::from_value(&json::parse_str(r#"{"id":"t","cores":null}"#).unwrap()).unwrap();
-        assert_eq!(old.cores, 0);
+        assert_eq!((old.cores, old.core), (0, None));
     }
 
     #[test]
@@ -244,11 +252,13 @@ mod tests {
                     cpu_percent: Some(0.0),
                     mem_bytes: 3 << 20,
                     ram_bytes: 64 << 20,
+                    core: Some(0),
                 },
                 hop: SysUsage {
                     cpu_percent: None,
                     mem_bytes: 5 << 20,
                     ram_bytes: 0,
+                    core: None,
                 },
             },
             ..Agent::default()
@@ -260,6 +270,8 @@ mod tests {
         assert!(data.contains(r#""hop_mem_bytes":5242880"#), "{data}");
         assert!(!data.contains("hop_cpu_percent"), "{data}");
         assert!(!data.contains("hop_ram_bytes"), "{data}");
+        assert!(data.contains(r#""kern_core":0"#), "{data}");
+        assert!(!data.contains("hop_core"), "{data}");
         let decoded = Agent::from_value(&json::parse_str(&data).unwrap()).unwrap();
         assert_eq!(decoded, agent);
         // Een oude agent zonder de velden: niets gemeten.
@@ -268,9 +280,10 @@ mod tests {
         assert_eq!(old.telemetry.kern, SysUsage::default());
         assert!(old.system_tasks().unwrap().is_empty());
         // De heartbeat leest dezelfde sleutels; de rest telt niet.
-        let hb = r#"{"id":"n1","version":"3","kern_mem_bytes":7,"hop_cpu_percent":12.5,"x":1}"#;
+        let hb = r#"{"id":"n1","version":"3","kern_mem_bytes":7,"hop_cpu_percent":12.5,"hop_core":1,"x":1}"#;
         let t = Telemetry::from_value(&json::parse_str(hb).unwrap()).unwrap();
         assert_eq!((t.kern.mem_bytes, t.hop.cpu_percent), (7, Some(12.5)));
+        assert_eq!((t.kern.core, t.hop.core), (None, Some(1)));
     }
 
     /// `kern` en `hop` als taken: pid is het slot, staat `system`, het
@@ -282,6 +295,7 @@ mod tests {
             cpu_percent: Some(3.0),
             mem_bytes: 3 << 20,
             ram_bytes: 64 << 20,
+            core: Some(0),
         };
         let tasks = agent.system_tasks().unwrap();
         assert_eq!(tasks.len(), 1);
@@ -294,6 +308,8 @@ mod tests {
         assert_eq!((k.cpu_percent, k.mem_percent), (3.0, 4.6));
         // Het cpu-procent van de kern en van Hop slaat op één core.
         assert_eq!(k.cores, 1);
+        // De kern leeft op de OS-core.
+        assert_eq!(k.core, Some(0));
         agent.telemetry.hop.mem_bytes = 1 << 20;
         let tasks = agent.system_tasks().unwrap();
         assert_eq!(tasks.len(), 2);
@@ -303,6 +319,8 @@ mod tests {
         );
         // Zonder RAM geen noemer: 0, en geen cpu-meting ook 0.
         assert_eq!((tasks[1].cpu_percent, tasks[1].mem_percent), (0.0, 0.0));
+        // Hop zonder gemelde core: onbekend, niet 0.
+        assert_eq!(tasks[1].core, None);
         let back = Task::from_value(&tasks[0].to_value().unwrap()).unwrap();
         assert_eq!(back, tasks[0]);
     }

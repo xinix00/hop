@@ -983,9 +983,11 @@ fn a_held_lock_makes_the_node_follow_and_register_over_the_lan() {
 /// idle, 4 MiB in een partitie van 32 MiB.
 fn system_slots(k: &FakeKern, at_s: u64) {
     let span = (at_s - 100) * SECOND;
-    let slot = |idle_ns, mem_sys, ram_size, partition| SlotInfo {
+    let slot = |idle_ns, mem_sys, ram_size, partition, core| SlotInfo {
         state: 2,
         core_on: 1,
+        core,
+        span: 1,
         cores: 1,
         at_ns: at_s * SECOND,
         idle_ns,
@@ -995,9 +997,11 @@ fn system_slots(k: &FakeKern, at_s: u64) {
         ..SlotInfo::default()
     };
     let mut s = k.0.borrow_mut();
-    s.system.insert(0, slot(span / 5 * 4, 3 << 20, 64 << 20, 0));
+    // De kern op de OS-core (0), Hop op core 1 (zoals op de LicheeRV).
     s.system
-        .insert(2, slot(span / 10 * 9, 4 << 20, 1 << 20, 32 << 20));
+        .insert(0, slot(span / 5 * 4, 3 << 20, 64 << 20, 0, 0));
+    s.system
+        .insert(2, slot(span / 10 * 9, 4 << 20, 1 << 20, 32 << 20, 1));
 }
 
 fn json(body: &[u8]) -> types::json::Value {
@@ -1059,6 +1063,7 @@ fn the_heartbeat_to_the_leader_carries_the_kernel_and_hop() {
     assert_eq!(num(&v, "hop_mem_bytes"), f64::from(4u32 << 20));
     // De partitie van Hop is zijn limiet, niet de RAM-maat die hij meldt.
     assert_eq!(num(&v, "hop_ram_bytes"), f64::from(32u32 << 20));
+    assert_eq!((num(&v, "kern_core"), num(&v, "hop_core")), (0.0, 1.0));
     // Zonder kern-temperatuur (geen applib op de host) geen temp_milli_c.
     assert!(!body.contains("temp_milli_c"), "{body}");
 }
@@ -1213,6 +1218,8 @@ fn the_leader_shows_the_kernel_and_hop_of_every_agent() {
     assert_eq!((hop.cpu_percent, hop.mem_percent), (10.0, 12.5));
     // De noemer van hun cpu-procent: één core, zoals de gui hem toont.
     assert_eq!((kern.cores, hop.cores), (1, 1));
+    // De core van elk: de kern op de OS-core, Hop op die van zijn slot.
+    assert_eq!((kern.core, hop.core), (Some(0), Some(1)));
     let n2 = tasks("n2");
     let (kern, hop) = (t(&n2[0]), t(&n2[1]));
     assert_eq!((kern.cpu_percent, kern.mem_percent), (1.5, 12.5));

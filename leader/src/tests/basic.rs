@@ -53,6 +53,7 @@ fn leader_heartbeat_updates_last_seen() {
             cpu_percent: Some(7.0),
             mem_bytes: 1 << 20,
             ram_bytes: 32 << 20,
+            core: Some(1),
         },
         ..types::Telemetry::default()
     };

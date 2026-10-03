@@ -291,10 +291,10 @@ impl<S: SystemApi, I: Images> Node<S, I> {
     /// Legt het gemeten gebruik van een taak vast: cpu als procent van zijn
     /// eigen cores (de meetlat van de app via de kern, docs/apps.md) en
     /// geheugen als procent van zijn limiet (wat de app zelf in gebruik
-    /// meldt), met de cores van zijn slot als noemer van de cpu. Zonder
-    /// meting blijft het vorige getal staan.
+    /// meldt), met de cores van zijn slot als noemer van de cpu en de core
+    /// waarop het slot draait. Zonder meting blijft het vorige getal staan.
     async fn record_usage(&mut self, task_id: &str, pid: u32) {
-        let (cpu, mem, cores) = self.runner.usage(&TaskRef { id: task_id, pid }).await;
+        let (cpu, mem, cores, core) = self.runner.usage(&TaskRef { id: task_id, pid }).await;
         let limit = self
             .agent
             .task(task_id)
@@ -310,7 +310,7 @@ impl<S: SystemApi, I: Images> Node<S, I> {
         };
         if let Some(c) = cpu {
             self.agent
-                .record_usage(task_id, f64::from(c), mem_pct, cores);
+                .record_usage(task_id, f64::from(c), mem_pct, cores, core);
         }
     }
 
@@ -338,6 +338,7 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             cpu_percent: s.cpu_pct.map(f64::from),
             mem_bytes: s.mem_sys,
             ram_bytes: s.mem_limit,
+            core: s.core,
         }
     }
 

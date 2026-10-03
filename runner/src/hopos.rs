@@ -152,17 +152,26 @@ impl<S: SystemApi> HopRunner<S> {
     }
 
     /// CPU (procent van de eigen cores) en werkelijk geheugen, zoals de app ze
-    /// meldt, en het aantal cores van het slot (de noemer van de cpu).
+    /// meldt, het aantal cores van het slot (de noemer van de cpu) en de
+    /// core waarop het slot draait.
     ///
     /// `None` voor een veld dat nog niet gemeten is (de app start nog); 0
     /// cores is onbekend.
-    pub async fn usage(&mut self, task: &TaskRef<'_>) -> (Option<u8>, Option<u64>, u64) {
+    pub async fn usage(
+        &mut self,
+        task: &TaskRef<'_>,
+    ) -> (Option<u8>, Option<u64>, u64, Option<u64>) {
         if task.pid == 0 {
-            return (None, None, 0);
+            return (None, None, 0, None);
         }
         let slot = self.slot_of(task.id).unwrap_or(Slot(task.pid));
         let s = self.sys.slot_status(slot).await;
-        (s.cpu_pct, (s.mem_sys != 0).then_some(s.mem_sys), s.cores)
+        (
+            s.cpu_pct,
+            (s.mem_sys != 0).then_some(s.mem_sys),
+            s.cores,
+            s.core,
+        )
     }
 
     /// Haalt de logregels van alle draaiende apps uit de kern in hun ringen.

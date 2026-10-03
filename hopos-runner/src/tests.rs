@@ -267,6 +267,25 @@ fn status_carries_the_cores_of_the_slot() {
     assert_eq!(bl(s.slot_status(runner::Slot(9))).cores, 0);
 }
 
+/// De core van een slot: 0 is de OS-core en een echte core (Hop op arm64
+/// deelt hem met de kern); een slot zonder core (span 0) heeft er geen.
+#[test]
+fn status_carries_the_core_of_the_slot_and_0_is_a_core() {
+    let (mut s, k) = sys(4);
+    let info = |core, span| systemapi::SlotInfo {
+        state: 2,
+        core_on: 1,
+        core,
+        span,
+        ..systemapi::SlotInfo::default()
+    };
+    k.0.borrow_mut().system.insert(3, info(1, 1));
+    k.0.borrow_mut().system.insert(5, info(0, 1));
+    assert_eq!(bl(s.slot_status(runner::Slot(3))).core, Some(1));
+    assert_eq!(bl(s.slot_status(runner::Slot(5))).core, Some(0));
+    assert_eq!(bl(s.slot_status(runner::Slot(9))).core, None);
+}
+
 #[test]
 fn stop_frees_and_an_unknown_stop_is_not_confirmed() {
     let (mut s, k) = sys(4);
