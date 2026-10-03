@@ -224,7 +224,7 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             attributes: attributes.clone(),
             cpu_cores: cfg.cores,
             memory_bytes: cfg.memory,
-            free_groups: free_groups(cfg.system_core),
+            free_groups: free_groups(cfg.system_core, &cfg.hop_group),
             // Het zaad van de taak-id's: de klok en het node-id. Geen
             // entropiebron in een app; uniek genoeg op één node.
             seed: now ^ fnv(cfg.node_id.as_bytes()),
@@ -1006,12 +1006,12 @@ fn fnv(b: &[u8]) -> u64 {
     })
 }
 
-/// De groepen op een core die Hop niet uitdeelt: altijd `hop` (Hop heeft
-/// een core, eigen of gedeeld met de kern), en `system` als de kern zijn
-/// core deelt (`HOPOS_SYSTEM_CORE=1`).
-fn free_groups(system_core: bool) -> Vec<String> {
-    let mut g = Vec::from([String::from(agent::HOP_GROUP)]);
-    if system_core {
+/// De groepen op een core die Hop niet uitdeelt: Hop's eigen groep
+/// (`HOPOS_HOP_GROUP`, de core van Hop zelf, eigen of gedeeld met de kern),
+/// en `system` als de kern zijn core deelt (`HOPOS_SYSTEM_CORE=1`).
+fn free_groups(system_core: bool, hop_group: &str) -> Vec<String> {
+    let mut g = Vec::from([String::from(hop_group)]);
+    if system_core && hop_group != agent::SYSTEM_GROUP {
         g.push(String::from(agent::SYSTEM_GROUP));
     }
     g
