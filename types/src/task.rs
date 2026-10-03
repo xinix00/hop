@@ -1,6 +1,7 @@
 //! De taak (een draaiende instantie van een job) en de agent (een node die taken draait).
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::de::{self, ObjectBuilder};
 use crate::json::{self, Number, Value};
@@ -28,6 +29,12 @@ pub enum TaskState {
     Stopping,
     /// Gecrasht, OOM, te vaak herstart.
     Failed,
+    /// Een systeembewoner van de node: de kern (slot 0) of Hop zelf.
+    ///
+    /// Alleen in het antwoord van `/v1/tasks`, gemaakt uit de heartbeat
+    /// ([`Agent::system_tasks`]); nooit in de boeken van een agent of de
+    /// leader, dus nooit geplaatst, herstart, gestopt of geteld.
+    System,
 }
 
 impl TaskState {
@@ -39,6 +46,7 @@ impl TaskState {
             Self::Running => "running",
             Self::Stopping => "stopping",
             Self::Failed => "failed",
+            Self::System => "system",
         }
     }
 
@@ -50,6 +58,7 @@ impl TaskState {
             "running" => Some(Self::Running),
             "stopping" => Some(Self::Stopping),
             "failed" => Some(Self::Failed),
+            "system" => Some(Self::System),
             _ => None,
         }
     }
@@ -177,6 +186,112 @@ impl Task {
     }
 }
 
+/// Het slot van de kern: [`Agent::system_tasks`] zet het als pid van `kern`.
+pub const KERN_SLOT: i64 = 0;
+/// Het slot dat de kern Hop geeft: de pid van `hop` in [`Agent::system_tasks`].
+pub const HOP_SLOT: i64 = 1;
+
+/// Het gebruik van een systeembewoner van een node: de kern of Hop zelf.
+///
+/// Leeg is "niet gemeten": een host-node, een oude agent, of een kern die
+/// slot 0 nog niet meldt.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SysUsage {
+    /// CPU als procent van zijn eigen cores; `None` tot er twee standen zijn.
+    pub cpu_percent: Option<f64>,
+    /// Het geheugen in gebruik in bytes; 0 is onbekend.
+    pub mem_bytes: u64,
+    /// Zijn RAM in bytes, de noemer van het geheugenprocent; 0 is onbekend.
+    pub ram_bytes: u64,
+}
+
+impl SysUsage {
+    /// Of er iets gemeten is.
+    pub fn is_known(&self) -> bool {
+        self.cpu_percent.is_some() || self.mem_bytes != 0
+    }
+
+    /// Het geheugen als procent van zijn RAM, met één decimaal; 0 zonder RAM.
+    pub fn mem_percent(&self) -> f64 {
+        if self.ram_bytes == 0 {
+            return 0.0;
+        }
+        let tenths =
+            u128::from(self.mem_bytes.min(self.ram_bytes)) * 1000 / u128::from(self.ram_bytes);
+        // Hoogstens 1000: exact als f64.
+        tenths as f64 / 10.0
+    }
+}
+
+/// Wat een heartbeat naast de identiteit meldt: telemetrie, geen
+/// scheduling-input. Op de draad en in [`Agent`] plat, met het voorvoegsel
+/// `kern_` of `hop_`; een veld zonder meting ontbreekt.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Telemetry {
+    /// De CPU-temperatuur in milligraden Celsius; 0 is onbekend.
+    ///
+    /// Eén getal per node, en dat is bewust: wie meer sensoren heeft meldt
+    /// de heetste, want dát is het getal waarop je ingrijpt.
+    pub temp_milli_c: i64,
+    /// De kern (slot 0).
+    pub kern: SysUsage,
+    /// Hop zelf (zijn eigen slot).
+    pub hop: SysUsage,
+}
+
+/// De sleutels van [`Telemetry::kern`] en [`Telemetry::hop`]: cpu, geheugen, RAM.
+const USAGE_KEYS: [[&str; 3]; 2] = [
+    ["kern_cpu_percent", "kern_mem_bytes", "kern_ram_bytes"],
+    ["hop_cpu_percent", "hop_mem_bytes", "hop_ram_bytes"],
+];
+
+impl Telemetry {
+    /// Leest één sleutel; `false` als hij hier niet bij hoort.
+    fn read(&mut self, k: &str, v: &Value) -> Result<bool> {
+        if k == "temp_milli_c" {
+            self.temp_milli_c = de::int(v, k)?;
+            return Ok(true);
+        }
+        for (u, [cpu, mem, ram]) in [&mut self.kern, &mut self.hop].into_iter().zip(USAGE_KEYS) {
+            if k == cpu {
+                u.cpu_percent = Some(de::float(v, k)?);
+            } else if k == mem {
+                u.mem_bytes = de::uint(v, k)?;
+            } else if k == ram {
+                u.ram_bytes = de::uint(v, k)?;
+            } else {
+                continue;
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Leest de telemetrie uit een object (een heartbeat); de rest telt niet.
+    pub fn from_value(v: &Value) -> Result<Self> {
+        let mut t = Self::default();
+        for (k, v) in de::object(v, "heartbeat")?.iter() {
+            if !v.is_null() {
+                t.read(k, v)?;
+            }
+        }
+        Ok(t)
+    }
+
+    /// Schrijft de gemeten velden in `o`.
+    pub fn write(&self, o: &mut ObjectBuilder) -> Result {
+        o.int_opt("temp_milli_c", self.temp_milli_c)?;
+        for (u, [cpu, mem, ram]) in [&self.kern, &self.hop].into_iter().zip(USAGE_KEYS) {
+            if let Some(c) = u.cpu_percent {
+                o.field(cpu, Value::Number(Number::Float(c)))?;
+            }
+            o.uint_opt(mem, u.mem_bytes)?;
+            o.uint_opt(ram, u.ram_bytes)?;
+        }
+        Ok(())
+    }
+}
+
 /// Een bij de leader geregistreerde agent: de identiteit van een node.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Agent {
@@ -188,11 +303,8 @@ pub struct Agent {
     pub version: String,
     /// De laatste heartbeat.
     pub last_seen: Time,
-    /// De CPU-temperatuur in milligraden Celsius; 0 is onbekend.
-    ///
-    /// Eén getal per node, en dat is bewust: wie meer sensoren heeft meldt
-    /// de heetste, want dát is het getal waarop je ingrijpt.
-    pub temp_milli_c: i64,
+    /// Wat de laatste heartbeat meldde.
+    pub telemetry: Telemetry,
 }
 
 impl Agent {
@@ -209,8 +321,9 @@ impl Agent {
                 "endpoint" => a.endpoint = de::string(v, k)?,
                 "version" => a.version = de::string(v, k)?,
                 "last_seen" => a.last_seen = time(v, k)?,
-                "temp_milli_c" => a.temp_milli_c = de::int(v, k)?,
-                _ => {}
+                _ => {
+                    a.telemetry.read(k, v)?;
+                }
             }
         }
         Ok(a)
@@ -223,8 +336,37 @@ impl Agent {
         o.str("endpoint", &self.endpoint)?;
         o.str("version", &self.version)?;
         o.field("last_seen", time_value(self.last_seen)?)?;
-        o.int_opt("temp_milli_c", self.temp_milli_c)?;
+        self.telemetry.write(&mut o)?;
         Ok(o.build())
+    }
+
+    /// De systeemtaken van deze node, `kern` en `hop`, uit de laatste
+    /// heartbeat; alleen wat gemeten is.
+    ///
+    /// Ze staan in geen enkel boek (zie [`TaskState::System`]): de leader
+    /// voegt ze toe aan het antwoord van `/v1/tasks`, verder niets.
+    pub fn system_tasks(&self) -> Result<Vec<Task>> {
+        let mut out = Vec::new();
+        for (name, pid, u) in [
+            ("kern", KERN_SLOT, &self.telemetry.kern),
+            ("hop", HOP_SLOT, &self.telemetry.hop),
+        ] {
+            if !u.is_known() {
+                continue;
+            }
+            let t = Task {
+                id: crate::try_string(name)?,
+                job_name: crate::try_string(name)?,
+                driver: crate::try_string("hop")?,
+                pid,
+                state: TaskState::System,
+                cpu_percent: u.cpu_percent.unwrap_or(0.0),
+                mem_percent: u.mem_percent(),
+                ..Task::default()
+            };
+            crate::try_push(&mut out, t)?;
+        }
+        Ok(out)
     }
 
     /// De agent als compacte JSON-tekst.
@@ -240,7 +382,7 @@ impl TryClone for Agent {
             endpoint: self.endpoint.try_clone()?,
             version: self.version.try_clone()?,
             last_seen: self.last_seen,
-            temp_milli_c: self.temp_milli_c,
+            telemetry: self.telemetry,
         })
     }
 }

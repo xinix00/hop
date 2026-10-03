@@ -32,7 +32,7 @@ fn leader_restart_reject_unknown_heartbeat() {
     // Onbekende agents krijgen `false` op hun heartbeat (de adapter: 404).
     for i in 1..4 {
         let id = format!("agent-{i}");
-        assert!(!leader2.heartbeat(&id, "", 0, NOW), "{id}");
+        assert!(!leader2.heartbeat(&id, "", Default::default(), NOW), "{id}");
     }
     assert_eq!(leader2.agents().len(), 1);
 

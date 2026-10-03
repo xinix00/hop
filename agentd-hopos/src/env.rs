@@ -120,6 +120,8 @@ impl fmt::Debug for Redacted {
 pub struct BootConfig {
     /// Het node-id.
     pub node_id: String,
+    /// Het slot van Hop zelf (`applib::App::slot`; de kern geeft hem slot 1).
+    pub slot: u32,
     /// De HMAC-sleutel; leeg alleen met `insecure`.
     pub api_key: Vec<u8>,
     /// Bewust zonder sleutel: `HOPOS_INSECURE=1` en geen sleutel.
@@ -148,6 +150,7 @@ impl fmt::Debug for BootConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BootConfig")
             .field("node_id", &self.node_id)
+            .field("slot", &self.slot)
             .field("api_key", &Redacted(self.api_key.len()))
             .field("insecure", &self.insecure)
             .field("insecure_ignored", &self.insecure_ignored)
@@ -244,6 +247,7 @@ impl BootConfig {
         let memory_raw = get(ENV_MEMORY);
         Ok(Self {
             node_id: get(ENV_NODE).unwrap_or_else(|| alloc::format!("hopos-{slot}")),
+            slot: u32::try_from(slot).unwrap_or(u32::MAX),
             insecure: flag && api_key.is_empty(),
             insecure_ignored: flag && !api_key.is_empty(),
             api_key,

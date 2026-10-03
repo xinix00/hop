@@ -22,7 +22,7 @@ fn leader_registers_itself() {
         &mut net,
     )
     .unwrap();
-    assert!(l.heartbeat("local-agent", "", 0, NOW));
+    assert!(l.heartbeat("local-agent", "", Default::default(), NOW));
     assert_eq!(l.agents().len(), 1);
     assert_eq!(l.agents()[0].id, "local-agent");
     assert_eq!(l.agents()[0].endpoint, "http://10.0.0.1:8080");
@@ -39,7 +39,7 @@ fn leader_plus_follower_agents() {
     ] {
         l.register_agent(agent(id, ep), Map::new(), NOW, &mut net)
             .unwrap();
-        assert!(l.heartbeat(id, "", 0, NOW));
+        assert!(l.heartbeat(id, "", Default::default(), NOW));
     }
     assert_eq!(l.agents().len(), 3);
     for id in ["leader-node", "follower-1", "follower-2"] {
@@ -65,7 +65,7 @@ fn single_node_cluster_leader_is_only_agent() {
     let mut l = named("solo-node");
     let mut net = FakeNet::new();
     join(&mut l, &mut net, "solo-node", NOW);
-    assert!(l.heartbeat("solo-node", "", 0, NOW));
+    assert!(l.heartbeat("solo-node", "", Default::default(), NOW));
     assert_eq!(l.agents().len(), 1);
     assert_eq!(l.agents()[0].id, "solo-node");
     assert_eq!(l.local_agent_id(), "solo-node");

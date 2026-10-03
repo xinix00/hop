@@ -376,7 +376,9 @@ fn jobs(c: &Client) -> Result<(), String> {
         let (_, want) = expected(j, agents.len());
         let mut states: BTreeMap<&str, usize> = BTreeMap::new();
         for (_, ts) in &tasks {
-            for task in ts.iter().flatten().filter(|x| x.job_name == j.name) {
+            // `kern` en `hop` zijn geen instanties, ook niet van een job met die naam.
+            let mine = |x: &&Task| x.job_name == j.name && x.state != TaskState::System;
+            for task in ts.iter().flatten().filter(mine) {
                 *states.entry(task.state.as_str()).or_default() += 1;
             }
         }
@@ -522,7 +524,7 @@ fn agents(c: &Client, args: &[String]) -> Result<(), String> {
             a.id.clone(),
             a.endpoint.clone(),
             a.version.clone(),
-            fmt_temp(a.temp_milli_c),
+            fmt_temp(a.telemetry.temp_milli_c),
             clock(a.last_seen),
         ]);
     }
@@ -534,8 +536,8 @@ fn agent_details(c: &Client, a: &Agent) -> Result<(), String> {
     println!("Agent:    {}", a.id);
     println!("Endpoint: {}", a.endpoint);
     println!("Version:  {}", a.version);
-    if a.temp_milli_c != 0 {
-        println!("CPU temp: {}", fmt_temp(a.temp_milli_c));
+    if a.telemetry.temp_milli_c != 0 {
+        println!("CPU temp: {}", fmt_temp(a.telemetry.temp_milli_c));
     }
     println!("LastSeen: {}", clock(a.last_seen));
     println!();

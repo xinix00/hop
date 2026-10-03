@@ -31,19 +31,23 @@ const T0: u64 = 1_788_220_800 * types::time::SECOND;
 const ELF: &[u8] = b"\x7fELF-the-web-app-image-bytes";
 const JOB: &str = r#"{"name":"web","artifacts":[{"url":"http://images/web.elf"}],"cpu_shares":1024,"memory_limit":33554432}"#;
 
+/// Een server in het geheugen: per URL de bytes; de test kan ze vervangen.
+type Files = Rc<RefCell<BTreeMap<String, Vec<u8>>>>;
+
 /// Artifacts uit het geheugen, in brokken van `.1` bytes.
-struct MemImages(BTreeMap<String, Vec<u8>>, usize);
+struct MemImages(Files, usize);
 
 impl MemImages {
     /// Brokken van 8 bytes: veel brokken voor een klein image.
     fn new(files: BTreeMap<String, Vec<u8>>) -> Self {
-        Self(files, 8)
+        Self(Rc::new(RefCell::new(files)), 8)
     }
 }
 
 impl Images for MemImages {
     async fn fetch<K: Sink>(&mut self, url: &str, sink: &mut K) -> Result<(), String> {
-        let bytes = self.0.get(url).ok_or_else(|| format!("404 {url}"))?;
+        let bytes = self.0.borrow().get(url).cloned();
+        let bytes = bytes.ok_or_else(|| format!("404 {url}"))?;
         sink.begin(bytes.len() as u64).await?;
         for c in bytes.chunks(self.1) {
             sink.chunk(c).await?;
@@ -226,6 +230,41 @@ fn post_a_job_and_the_kernel_places_it() {
     );
 }
 
+/// Een vervangen artifact onder dezelfde URL: de volgende plaatsing krijgt het nieuwe image.
+///
+/// Hop houdt geen image vast; elke plaatsing haalt de URL opnieuw (GEMETEN
+/// 03-10 op de LicheeRV: een vervangen welcome-riscv64.elf in de rollende
+/// release kwam minutenlang oud binnen, maar dat was de redirect van
+/// GitHub, niet Hop). Deze toets houdt dat zo: DELETE en POST van dezelfde
+/// job plaatsen wat de server nu heeft.
+#[test]
+fn a_replaced_artifact_is_what_the_next_placement_gets() {
+    const NEW: &[u8] = b"\x7fELF-the-new-web-app";
+    let k = FakeKern::new(4);
+    let sys = KernSys::new(k.client(), 4);
+    let mut files = BTreeMap::new();
+    files.insert(String::from("http://images/web.elf"), ELF.to_vec());
+    let images = MemImages::new(files);
+    let server = images.0.clone();
+    let mut n = Node::new(&cfg(), sys, images, T0);
+    http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
+    assert_eq!(k.0.borrow().slots[&1].image, ELF);
+
+    server
+        .borrow_mut()
+        .insert(String::from("http://images/web.elf"), NEW.to_vec());
+    let (status, body) = http(&mut n, Port::Leader, wire("DELETE", "/v1/jobs/web", ""));
+    assert_eq!(status, 204, "{body}");
+    block_on(n.tick(T0 + types::time::SECOND));
+    assert!(k.0.borrow().slots.is_empty(), "de oude bewoner is weg");
+    let (status, body) = http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
+    assert!((200..300).contains(&status), "{status} {body}");
+    let st = k.0.borrow();
+    let placed: Vec<_> = st.slots.values().filter(|s| s.placed).collect();
+    assert_eq!(placed.len(), 1, "{:?}", st.slots.keys());
+    assert_eq!(placed[0].image, NEW);
+}
+
 #[test]
 fn an_unsigned_job_never_reaches_the_kernel() {
     let (mut n, k) = node();
@@ -389,7 +428,12 @@ fn a_long_stream_does_not_block_the_other_tasks() {
     let sys = KernSys::new(k.client(), 4);
     let mut files = BTreeMap::new();
     files.insert(String::from("http://images/web.elf"), image);
-    let mut n = Node::new(&cfg(), sys, MemImages(files, CHUNK), T0);
+    let mut n = Node::new(
+        &cfg(),
+        sys,
+        MemImages(Rc::new(RefCell::new(files)), CHUNK),
+        T0,
+    );
 
     let out = Rc::new(RefCell::new(Vec::new()));
     let conn = Mem {

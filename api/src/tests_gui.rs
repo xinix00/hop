@@ -218,7 +218,7 @@ impl Cluster for OneJob {
     fn register_agent(&mut self, _: u64, _: &str, _: &str, _: &str, _: &[(String, i64)]) -> bool {
         true
     }
-    fn heartbeat(&mut self, _: u64, _: &str, _: &str, _: i64) -> bool {
+    fn heartbeat(&mut self, _: u64, _: &str, _: &str, _: types::Telemetry) -> bool {
         true
     }
     fn unregister_agent(&mut self, _: &str) {}

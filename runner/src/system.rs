@@ -64,6 +64,10 @@ pub struct SlotStatus {
     ///
     /// Nog niet in `SLOT_STATUS`: de adapter laat hem 0.
     pub mem_sys: u64,
+    /// Het geheugen van het slot in bytes, de noemer bij `mem_sys`: zijn
+    /// partitie, of zonder partitie (de kern in slot 0) de RAM-maat die het
+    /// slot meldt; 0 = onbekend.
+    pub mem_limit: u64,
     /// CPU als percentage van de EIGEN cores (0 tot 100); `None` zolang er geen meetvenster is.
     ///
     /// Nog niet in `SLOT_STATUS`: de adapter laat hem `None`.
@@ -92,6 +96,7 @@ impl SlotStatus {
             exit_code: 0,
             heartbeat: 0,
             mem_sys: 0,
+            mem_limit: 0,
             cpu_pct: None,
             fault_vec: 0,
             fault_esr: 0,

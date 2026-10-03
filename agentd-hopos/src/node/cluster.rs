@@ -132,11 +132,6 @@ fn quote(s: &str) -> String {
     out
 }
 
-/// De temperatuur van de kern (CTRL_TEMP, HopOS alpha.9); 0 is geen meting.
-fn temp_milli_c() -> i64 {
-    applib::app().map_or(0, |a| i64::from(a.ctrl().temp_milli_c()))
-}
-
 /// De weigering van een doorgifte waar alleen een antwoord kan (de tests
 /// en [`Node::handle`]); de binary voert hem uit in `forward::serve`.
 pub(crate) fn refuse_forward(f: &Forward) -> Response {
@@ -524,19 +519,15 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             }
             LinkRequest::Heartbeat { leader } => {
                 let url = format!("http://{leader}/v1/heartbeat");
-                let body = format!(
-                    r#"{{"id":{},"endpoint":{},"version":"{VERSION}","temp_milli_c":{}}}"#,
-                    quote(self.agent.id()),
-                    quote(self.agent.endpoint()),
-                    temp_milli_c()
-                );
+                let body = self.heartbeat_body();
                 self.send_link(LinkJob::Election { req: r, url, body })
             }
             LinkRequest::SelfHeartbeat { .. } => {
                 let live = self.leads();
+                let telemetry = self.telemetry();
                 let known = live.then(|| {
                     self.leader
-                        .heartbeat(self.agent.id(), VERSION, temp_milli_c(), Time(now))
+                        .heartbeat(self.agent.id(), VERSION, telemetry, Time(now))
                 });
                 let result = match known {
                     Some(true) => Ok(()),
@@ -562,6 +553,22 @@ impl<S: SystemApi, I: Images> Node<S, I> {
                 Vec::new()
             }
         }
+    }
+
+    /// De body van `POST /v1/heartbeat`: de identiteit en de telemetrie.
+    ///
+    /// Zonder geheugen een lege body: de leader weigert hem (400), en dat
+    /// telt als een gemiste heartbeat, zoals een leader die niet antwoordt.
+    fn heartbeat_body(&self) -> String {
+        let body = || -> types::Result<String> {
+            let mut o = types::de::ObjectBuilder::new();
+            o.str("id", self.agent.id())?
+                .str("endpoint", self.agent.endpoint())?
+                .str("version", VERSION)?;
+            self.telemetry().write(&mut o)?;
+            types::json::to_string(&o.build())
+        };
+        body().unwrap_or_default()
     }
 
     fn election_reply(

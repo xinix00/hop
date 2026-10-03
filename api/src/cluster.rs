@@ -15,7 +15,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use leader::{JobStore, Leader, Transport};
-use types::{Agent, Job, Map, Nanos, Time, TryClone, try_string};
+use types::{Agent, Job, Map, Nanos, Telemetry, Time, TryClone, try_string};
 
 use crate::{Cluster, ClusterError, EventLog};
 
@@ -119,8 +119,8 @@ impl<S: JobStore, T: Transport> Cluster for LeaderCluster<'_, S, T> {
         }
     }
 
-    fn heartbeat(&mut self, now: Nanos, id: &str, version: &str, temp_milli_c: i64) -> bool {
-        self.leader.heartbeat(id, version, temp_milli_c, Time(now))
+    fn heartbeat(&mut self, now: Nanos, id: &str, version: &str, telemetry: Telemetry) -> bool {
+        self.leader.heartbeat(id, version, telemetry, Time(now))
     }
 
     fn unregister_agent(&mut self, id: &str) {
@@ -316,7 +316,7 @@ mod tests {
             r#"{"id":"a1","endpoint":"http://a1:8080","temp_milli_c":41000}"#,
         );
         assert_eq!(r.status, 200);
-        assert_eq!(l.agent("a1").unwrap().temp_milli_c, 41_000);
+        assert_eq!(l.agent("a1").unwrap().telemetry.temp_milli_c, 41_000);
 
         // Dispatch: de leider plaatst twee instanties via de transport.
         let r = call(

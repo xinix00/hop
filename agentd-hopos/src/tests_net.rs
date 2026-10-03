@@ -364,6 +364,37 @@ fn http_by_name_goes_plain_through_the_resolver() {
 }
 
 #[test]
+fn the_same_url_is_fetched_whole_every_time() {
+    // De server vervangt het bestand tussen twee plaatsingen. De downloader
+    // onthoudt niets: de tweede keer weer een kale GET (geen If-None-Match,
+    // geen gecachet image) en de nieuwe bytes.
+    const NEW: &[u8] = b"HTTP/1.1 200 OK\r\nETag: \"v2\"\r\nContent-Length: 8\r\n\r\n\x7fELF-new";
+    let seen: Seen = Rc::default();
+    let net = FakeNet {
+        script: vec![OK.to_vec(), NEW.to_vec()],
+        seen: seen.clone(),
+    };
+    let mut images = HttpImages::new(net, names(), TestClock(NOW), Pool::new(b"test"));
+    let url = "http://artifacts.local/a.elf";
+    let mut first = Keep::default();
+    block_on(images.fetch(url, &mut first)).unwrap();
+    let mut second = Keep::default();
+    block_on(images.fetch(url, &mut second)).unwrap();
+    assert_eq!(first.bytes, b"\x7fELF-image");
+    assert_eq!(second.bytes, b"\x7fELF-new");
+    let seen = seen.borrow();
+    assert_eq!(seen.len(), 2, "twee verbindingen, twee volledige downloads");
+    for (_, _, req) in seen.iter() {
+        let req = req.borrow();
+        assert!(req.starts_with(b"GET /a.elf HTTP/1.1\r\n"));
+        assert!(
+            !req.windows(13)
+                .any(|w| w.eq_ignore_ascii_case(b"If-None-Match"))
+        );
+    }
+}
+
+#[test]
 fn https_goes_through_tls_with_the_name_as_sni() {
     // De "server" praat geen TLS: de handshake faalt, maar pas nadat de
     // dialer de naam opzocht, poort 443 opende en een ClientHello met de

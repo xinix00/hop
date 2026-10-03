@@ -410,7 +410,7 @@ impl Cluster for FakeCluster {
         });
         true
     }
-    fn heartbeat(&mut self, _: u64, id: &str, _: &str, _: i64) -> bool {
+    fn heartbeat(&mut self, _: u64, id: &str, _: &str, _: types::Telemetry) -> bool {
         self.agents.iter().any(|a| a.id == id)
     }
     fn unregister_agent(&mut self, id: &str) {
@@ -1022,7 +1022,9 @@ fn tasks_asks_every_agent() {
                 ("a1".into(), "http://10.0.0.1:8080".into()),
                 ("a2".into(), "http://10.0.0.2:8080".into()),
             ],
-            scope: TasksScope::All,
+            scope: TasksScope::All {
+                agents: c.agents.clone()
+            },
         }
     );
 }
@@ -1034,13 +1036,40 @@ fn tasks_reply_keys_by_agent_and_names_the_silent() {
         job_name: "web".into(),
         ..types::Task::default()
     };
-    let r = tasks_reply(&[("a1".into(), Some(vec![t])), ("a2".into(), None)]);
+    // a1 meldde zijn kern en Hop, a2 ook, maar a2 antwoordde niet.
+    let mut a1 = types::Agent {
+        id: "a1".into(),
+        ..types::Agent::default()
+    };
+    a1.telemetry.kern = types::SysUsage {
+        cpu_percent: Some(2.0),
+        mem_bytes: 1 << 20,
+        ram_bytes: 8 << 20,
+    };
+    a1.telemetry.hop.mem_bytes = 1 << 20;
+    let a2 = types::Agent {
+        id: "a2".into(),
+        telemetry: a1.telemetry,
+        ..types::Agent::default()
+    };
+    let r = tasks_reply(
+        &[a1, a2],
+        &[("a1".into(), Some(vec![t])), ("a2".into(), None)],
+    );
     assert_eq!(r.status, 200);
     let v = body(&r);
     let by = get(&v, "tasks_by_agent").as_object().unwrap();
     let a1 = by.get("a1").unwrap().as_array().unwrap();
-    assert_eq!(a1.len(), 1);
+    assert_eq!(a1.len(), 3);
     assert_eq!(get(&a1[0], "id").as_str(), Some("t1"));
+    // De systeemtaken achter de echte, met hun slot als pid.
+    assert_eq!(get(&a1[1], "job_name").as_str(), Some("kern"));
+    assert_eq!(get(&a1[1], "state").as_str(), Some("system"));
+    assert_eq!(get(&a1[1], "pid").as_i64(), Some(0));
+    let mem = types::de::float(get(&a1[1], "mem_percent"), "mem_percent").unwrap();
+    assert_eq!(mem, 12.5);
+    assert_eq!(get(&a1[2], "job_name").as_str(), Some("hop"));
+    assert_eq!(get(&a1[2], "pid").as_i64(), Some(1));
     assert!(by.get("a2").is_none());
     let silent = get(&v, "unreachable").as_array().unwrap();
     assert_eq!(silent[0].as_str(), Some("a2"));

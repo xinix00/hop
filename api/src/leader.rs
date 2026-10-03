@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use types::json::{self, Value};
-use types::{Agent as AgentRecord, Job, Nanos, Time};
+use types::{Agent as AgentRecord, Job, Nanos, Telemetry, Time};
 
 use crate::{Method, Request, Response, check_auth, reply, s};
 
@@ -54,7 +54,7 @@ pub trait Cluster {
         placed: &[(String, i64)],
     ) -> bool;
     /// Een levensteken; `false` als de agent onbekend is (hij herregistreert dan).
-    fn heartbeat(&mut self, now: Nanos, id: &str, version: &str, temp_milli_c: i64) -> bool;
+    fn heartbeat(&mut self, now: Nanos, id: &str, version: &str, telemetry: Telemetry) -> bool;
     /// Meldt een agent af.
     fn unregister_agent(&mut self, id: &str);
     /// Alle jobs.
@@ -119,8 +119,12 @@ pub enum LeaderEffect {
 /// Welke taken een rondgang ([`LeaderEffect::Tasks`]) terugmeldt, en in welke vorm.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TasksScope {
-    /// `GET /v1/tasks`: alle taken van elke agent ([`tasks_reply`]).
-    All,
+    /// `GET /v1/tasks`: alle taken van elke agent, plus de systeemtaken uit
+    /// zijn heartbeat ([`tasks_reply`]).
+    All {
+        /// De agents zoals de leader ze kent (hun laatste heartbeat).
+        agents: Vec<AgentRecord>,
+    },
     /// `GET /v1/jobs/{naam}/status`: alleen de taken van deze job, van de
     /// agents waar hij staat ([`job_status_reply`]).
     Job {
@@ -135,7 +139,7 @@ impl TasksScope {
     /// Het antwoord uit de taken per agent (`None`: die agent antwoordde niet).
     pub fn reply(&self, results: &[(String, Option<Vec<types::Task>>)]) -> Response {
         match self {
-            Self::All => tasks_reply(results),
+            Self::All { agents } => tasks_reply(agents, results),
             Self::Job { name, agents } => job_status_reply(name, agents, results),
         }
     }
@@ -189,7 +193,15 @@ pub fn job_status_reply(
 /// {id: [taak, ...]}}`, en de agents die niet antwoordden onder
 /// `"unreachable"` (een uitbreiding op Go, die ze stil wegliet: zo kan de
 /// CLI zeggen wélke agent ontbreekt).
-pub fn tasks_reply(results: &[(String, Option<Vec<types::Task>>)]) -> Response {
+///
+/// Achter de taken van een agent die antwoordde staan zijn systeemtaken
+/// (`kern` en `hop`, [`AgentRecord::system_tasks`]) uit zijn laatste
+/// heartbeat in `agents`. Alleen hier: de takenlijst van de agent zelf
+/// (`GET /tasks`) en de boeken van de leader kennen ze niet.
+pub fn tasks_reply(
+    agents: &[AgentRecord],
+    results: &[(String, Option<Vec<types::Task>>)],
+) -> Response {
     let mut by_agent = types::de::ObjectBuilder::new();
     let mut unreachable = Vec::new();
     for (id, tasks) in results {
@@ -200,8 +212,15 @@ pub fn tasks_reply(results: &[(String, Option<Vec<types::Task>>)]) -> Response {
             unreachable.push(s(id));
             continue;
         };
+        let system = match agents.iter().find(|a| a.id == *id) {
+            Some(a) => match a.system_tasks() {
+                Ok(s) => s,
+                Err(_) => return Response::empty(500),
+            },
+            None => Vec::new(),
+        };
         let mut list = Vec::new();
-        for t in tasks {
+        for t in tasks.iter().chain(&system) {
             match t.to_value() {
                 Ok(v) if list.try_reserve(1).is_ok() => list.push(v),
                 _ => return Response::empty(500),
@@ -338,18 +357,19 @@ impl LeaderApi {
 
 /// `GET /v1/tasks`: de agents om te vragen.
 fn tasks<C: Cluster>(cluster: &C) -> (Response, LeaderEffect) {
+    let records = cluster.agents();
     let mut agents = Vec::new();
-    for a in cluster.agents() {
-        if agents.try_reserve(1).is_err() {
-            return (Response::empty(500), LeaderEffect::None);
-        }
-        agents.push((a.id, a.endpoint));
+    if agents.try_reserve_exact(records.len()).is_err() {
+        return (Response::empty(500), LeaderEffect::None);
+    }
+    for a in &records {
+        agents.push((a.id.clone(), a.endpoint.clone()));
     }
     (
         Response::empty(200),
         LeaderEffect::Tasks {
             agents,
-            scope: TasksScope::All,
+            scope: TasksScope::All { agents: records },
         },
     )
 }
@@ -544,10 +564,9 @@ fn heartbeat<C: Cluster>(cluster: &mut C, now: Nanos, req: &Request) -> Response
     if id.is_empty() || endpoint.is_empty() {
         return Response::error(400, "id and endpoint required");
     }
-    let temp = field(&v, "temp_milli_c")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    if !cluster.heartbeat(now, id, str_field(&v, "version"), temp) {
+    // Telemetrie die niet te lezen is, kost de heartbeat niet: dan niets gemeten.
+    let telemetry = Telemetry::from_value(&v).unwrap_or_default();
+    if !cluster.heartbeat(now, id, str_field(&v, "version"), telemetry) {
         return Response::error(404, "not registered");
     }
     reply(200, [("status", s("ok"))])

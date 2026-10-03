@@ -30,8 +30,8 @@ fn three_node_cluster_one_dies() {
     assert_eq!(net.total_tasks(), 30);
 
     net.get("agent-b").down = true;
-    l.heartbeat("agent-a", "", 0, at_ms(300));
-    l.heartbeat("agent-c", "", 0, at_ms(300));
+    l.heartbeat("agent-a", "", Default::default(), at_ms(300));
+    l.heartbeat("agent-c", "", Default::default(), at_ms(300));
     l.check_dead_agents(at_ms(300), &mut net).unwrap();
 
     let a2 = net.get("agent-a").task_count();
@@ -51,13 +51,13 @@ fn daemon_stable_during_blip_new_node_joins() {
     let b_runs = net.get("agent-b").run_calls;
 
     // A zwijgt even (onder de timeout); C komt erbij.
-    l.heartbeat("agent-b", "", 0, at_ms(100));
+    l.heartbeat("agent-b", "", Default::default(), at_ms(100));
     join(&mut l, &mut net, "agent-c", at_ms(100));
     assert_eq!(net.get("agent-c").task_count(), 1);
     assert_eq!(net.get("agent-a").run_calls, a_runs);
     assert_eq!(net.get("agent-b").run_calls, b_runs);
 
-    l.heartbeat("agent-a", "", 0, at_ms(150));
+    l.heartbeat("agent-a", "", Default::default(), at_ms(150));
     assert_eq!(l.placed("daemon").unwrap().len(), 3);
 }
 
@@ -83,7 +83,7 @@ fn mixed_jobs_agent_dies() {
     let b_runs = net.get("agent-b").run_calls;
 
     net.get("agent-a").down = true;
-    l.heartbeat("agent-b", "", 0, at_ms(300));
+    l.heartbeat("agent-b", "", Default::default(), at_ms(300));
     l.check_dead_agents(at_ms(300), &mut net).unwrap();
 
     // Alleen de twee gewone taken verhuizen; B had zijn daemon al.
@@ -112,7 +112,7 @@ fn agent_dies_and_rejoins_gets_daemon() {
     assert_eq!(net.get("agent-b").task_count(), 1);
 
     net.get("agent-b").down = true;
-    l.heartbeat("agent-a", "", 0, at_ms(300));
+    l.heartbeat("agent-a", "", Default::default(), at_ms(300));
     l.check_dead_agents(at_ms(300), &mut net).unwrap();
     // Een daemon verhuist niet: A had hem al.
     assert_eq!(net.get("agent-a").task_count(), 1);
@@ -139,7 +139,7 @@ fn zombie_agent_no_over_scheduling() {
     let a = net.get("agent-a").task_count();
 
     net.get("agent-a").down = true;
-    l.heartbeat("agent-b", "", 0, at_ms(300));
+    l.heartbeat("agent-b", "", Default::default(), at_ms(300));
     l.check_dead_agents(at_ms(300), &mut net).unwrap();
     assert_eq!(net.get("agent-b").task_count(), 20);
     let b_runs = net.get("agent-b").run_calls;
@@ -149,7 +149,7 @@ fn zombie_agent_no_over_scheduling() {
     zombie.add_tasks("app", a);
     net.agents.insert("http://agent-a".to_string(), zombie);
     assert!(rejoin(&mut l, &mut net, "agent-a", at_ms(400)));
-    assert!(l.heartbeat("agent-a", "", 0, at_ms(400)));
+    assert!(l.heartbeat("agent-a", "", Default::default(), at_ms(400)));
 
     // Geen enkele nieuwe /run.
     assert_eq!(net.get("agent-a").run_calls, 0);

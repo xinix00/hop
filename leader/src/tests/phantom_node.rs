@@ -42,8 +42,8 @@ fn network_blip_new_node_joins() {
     let b_runs = net.get("agent-b").run_calls;
 
     // Stap 2: A mist heartbeats, maar blijft onder de timeout.
-    l.heartbeat("agent-b", "", 0, at_ms(100));
-    l.heartbeat("agent-b", "", 0, at_ms(200));
+    l.heartbeat("agent-b", "", Default::default(), at_ms(100));
+    l.heartbeat("agent-b", "", Default::default(), at_ms(200));
     l.check_dead_agents(at_ms(300), &mut net).unwrap();
     assert!(l.agent("agent-a").is_some());
 
@@ -54,7 +54,7 @@ fn network_blip_new_node_joins() {
     assert_eq!(net.get("agent-b").run_calls, b_runs);
 
     // Stap 5: A is terug, alles intact.
-    assert!(l.heartbeat("agent-a", "", 0, at_ms(350)));
+    assert!(l.heartbeat("agent-a", "", Default::default(), at_ms(350)));
     assert_eq!(net.total_tasks(), 20);
     assert_eq!(net.get("agent-a").task_count(), a);
     assert_eq!(net.get("agent-b").task_count(), b);
@@ -67,7 +67,7 @@ fn network_blip_agent_unreachable() {
 
     // A's endpoint is weg, maar A is nog niet dood.
     net.get("agent-a").down = true;
-    l.heartbeat("agent-b", "", 0, at_ms(50));
+    l.heartbeat("agent-b", "", Default::default(), at_ms(50));
     l.check_dead_agents(at_ms(100), &mut net).unwrap();
     assert!(l.agent("agent-a").is_some());
 
@@ -79,7 +79,7 @@ fn network_blip_agent_unreachable() {
 
     // A is terug; zijn taken draaiden gewoon door.
     net.get("agent-a").down = false;
-    assert!(l.heartbeat("agent-a", "", 0, at_ms(200)));
+    assert!(l.heartbeat("agent-a", "", Default::default(), at_ms(200)));
     assert_eq!(net.total_tasks(), 20);
 }
 
@@ -91,11 +91,11 @@ fn network_blip_no_redistribution() {
     let a_runs = net.get("agent-a").run_calls;
     let b_runs = net.get("agent-b").run_calls;
 
-    l.heartbeat("agent-b", "", 0, at_ms(100));
-    l.heartbeat("agent-b", "", 0, at_ms(200));
+    l.heartbeat("agent-b", "", Default::default(), at_ms(100));
+    l.heartbeat("agent-b", "", Default::default(), at_ms(200));
     l.check_dead_agents(at_ms(300), &mut net).unwrap();
-    l.heartbeat("agent-a", "", 0, at_ms(320));
-    l.heartbeat("agent-b", "", 0, at_ms(320));
+    l.heartbeat("agent-a", "", Default::default(), at_ms(320));
+    l.heartbeat("agent-b", "", Default::default(), at_ms(320));
 
     assert_eq!(net.get("agent-a").run_calls, a_runs);
     assert_eq!(net.get("agent-b").run_calls, b_runs);

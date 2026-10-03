@@ -35,7 +35,7 @@ fn leader_heartbeat_registers_agent() {
     let mut net = FakeNet::new();
     let a = agent("remote-agent", "http://192.168.1.10:8080");
     assert!(l.register_agent(a, Map::new(), NOW, &mut net).unwrap());
-    assert!(l.heartbeat("remote-agent", "", 0, NOW));
+    assert!(l.heartbeat("remote-agent", "", Default::default(), NOW));
     assert_eq!(l.agents().len(), 1);
     assert_eq!(l.agents()[0].id, "remote-agent");
     assert_eq!(l.agents()[0].endpoint, "http://192.168.1.10:8080");
@@ -47,13 +47,22 @@ fn leader_heartbeat_updates_last_seen() {
     let mut net = FakeNet::new();
     join(&mut l, &mut net, "remote-agent", NOW);
     let first = l.agents()[0].last_seen;
-    assert!(l.heartbeat("remote-agent", "v2", 42_000, at(5)));
+    let beat = types::Telemetry {
+        temp_milli_c: 42_000,
+        hop: types::SysUsage {
+            cpu_percent: Some(7.0),
+            mem_bytes: 1 << 20,
+            ram_bytes: 32 << 20,
+        },
+        ..types::Telemetry::default()
+    };
+    assert!(l.heartbeat("remote-agent", "v2", beat, at(5)));
     let a = &l.agents()[0];
     assert!(a.last_seen > first);
     assert_eq!(a.version, "v2");
-    assert_eq!(a.temp_milli_c, 42_000);
+    assert_eq!(a.telemetry, beat);
     // Een onbekende agent krijgt `false` (de adapter maakt er 404 van).
-    assert!(!l.heartbeat("stranger", "", 0, at(5)));
+    assert!(!l.heartbeat("stranger", "", beat, at(5)));
 }
 
 #[test]
@@ -92,7 +101,7 @@ fn leader_concurrent_heartbeats() {
     }
     for n in 0..200u8 {
         let id = std::format!("agent-{}", char::from(b'a' + n % 10));
-        assert!(l.heartbeat(&id, "", 0, NOW));
+        assert!(l.heartbeat(&id, "", Default::default(), NOW));
     }
     assert_eq!(l.agents().len(), 10);
 }

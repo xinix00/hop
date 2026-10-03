@@ -17,6 +17,7 @@ use core::task::{Context, Poll, Waker};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use abi::systemapi::SlotInfo;
 use agent::{LeaseOp, LeaseReply, LinkError, Request as LinkRequest};
 use api::{Method, Request, TasksScope};
 use discovery::{Discovery, LeaseState};
@@ -680,7 +681,10 @@ fn queues() -> Queues {
 }
 
 fn clustered(clock: fn() -> bool) -> (TestNode, Queues) {
-    let k = FakeKern::new(4);
+    clustered_on(&FakeKern::new(4), clock)
+}
+
+fn clustered_on(k: &FakeKern, clock: fn() -> bool) -> (TestNode, Queues) {
     let sys = KernSys::new(k.client(), 4);
     let q = queues();
     let parts = ClusterParts {
@@ -854,7 +858,7 @@ fn a_free_lock_makes_the_node_leader_with_the_committed_state() {
     else {
         panic!("geen rondgang: {r:?}");
     };
-    assert_eq!(scope, TasksScope::All);
+    assert!(matches!(scope, TasksScope::All { .. }));
     assert!(auth.is_some());
     assert!(
         agents
@@ -973,6 +977,264 @@ fn a_held_lock_makes_the_node_follow_and_register_over_the_lan() {
     ));
 }
 
+/// De kern in slot 0 en Hop in zijn eigen slot (2 in [`boot_cfg`]) zoals
+/// de nep-kern ze meldt op kernklok `at_s` (seconden, vanaf 100): de kern
+/// 80 % idle (dus 20 % cpu), 3 MiB van 64 MiB RAM zonder partitie; Hop 90 %
+/// idle, 4 MiB in een partitie van 32 MiB.
+fn system_slots(k: &FakeKern, at_s: u64) {
+    let span = (at_s - 100) * SECOND;
+    let slot = |idle_ns, mem_sys, ram_size, partition| SlotInfo {
+        state: 2,
+        core_on: 1,
+        cores: 1,
+        at_ns: at_s * SECOND,
+        idle_ns,
+        mem_sys,
+        ram_size,
+        partition,
+        ..SlotInfo::default()
+    };
+    let mut s = k.0.borrow_mut();
+    s.system.insert(0, slot(span / 5 * 4, 3 << 20, 64 << 20, 0));
+    s.system
+        .insert(2, slot(span / 10 * 9, 4 << 20, 1 << 20, 32 << 20));
+}
+
+fn json(body: &[u8]) -> types::json::Value {
+    types::json::parse(body).unwrap()
+}
+
+fn num(v: &types::json::Value, key: &str) -> f64 {
+    let f = v.as_object().unwrap().get(key);
+    types::de::float(f.unwrap_or_else(|| panic!("geen {key} in {v:?}")), key).unwrap()
+}
+
+#[test]
+fn the_heartbeat_to_the_leader_carries_the_kernel_and_hop() {
+    let k = FakeKern::new(4);
+    system_slots(&k, 100);
+    let (mut n, q) = clustered_on(&k, || true);
+    n.cluster_boot(T0);
+    drain(q.lease);
+    n.on_mail(Mail::Lease(LeaseReply::Claimed(false)), T0);
+    // Elke tik meet (het monitor-interval is 5 s); de eerste stand geeft
+    // geheugen maar nog geen cpu.
+    block_on(n.tick(T0 + 11 * SECOND));
+    drain(q.lease);
+    n.on_mail(
+        Mail::Lease(LeaseReply::Read {
+            leader: Some(String::from("10.0.0.9:9080")),
+            ok: true,
+        }),
+        T0 + 11 * SECOND,
+    );
+    system_slots(&k, 105);
+    block_on(n.tick(T0 + 22 * SECOND));
+    let [LinkJob::Election { req, .. }] = &drain(q.link)[..] else {
+        panic!("geen register");
+    };
+    n.on_mail(
+        Mail::Link {
+            req: req.clone(),
+            result: Ok(()),
+        },
+        T0 + 22 * SECOND,
+    );
+    system_slots(&k, 110);
+    block_on(n.tick(T0 + 33 * SECOND));
+    let jobs = drain(q.link);
+    let [LinkJob::Election { url, body, .. }] = &jobs[..] else {
+        panic!("geen heartbeat: {jobs:?}");
+    };
+    assert_eq!(url, "http://10.0.0.9:9080/v1/heartbeat");
+    let v = json(body.as_bytes());
+    assert_eq!(
+        types::json::Value::as_str(v.as_object().unwrap().get("id").unwrap()),
+        Some("n1")
+    );
+    assert_eq!(num(&v, "kern_cpu_percent"), 20.0);
+    assert_eq!(num(&v, "kern_mem_bytes"), f64::from(3u32 << 20));
+    assert_eq!(num(&v, "kern_ram_bytes"), f64::from(64u32 << 20));
+    assert_eq!(num(&v, "hop_cpu_percent"), 10.0);
+    assert_eq!(num(&v, "hop_mem_bytes"), f64::from(4u32 << 20));
+    // De partitie van Hop is zijn limiet, niet de RAM-maat die hij meldt.
+    assert_eq!(num(&v, "hop_ram_bytes"), f64::from(32u32 << 20));
+    // Zonder kern-temperatuur (geen applib op de host) geen temp_milli_c.
+    assert!(!body.contains("temp_milli_c"), "{body}");
+}
+
+#[test]
+fn a_kernel_without_slot_0_leaves_the_kernel_out() {
+    let k = FakeKern::new(4);
+    system_slots(&k, 100);
+    // Een kern van vóór slot 0: de stand van slot 0 is leeg.
+    k.0.borrow_mut().system.remove(&0);
+    let (mut n, q) = clustered_on(&k, || true);
+    n.cluster_boot(T0);
+    n.on_mail(Mail::Lease(LeaseReply::Claimed(true)), T0);
+    n.on_mail(Mail::Loaded(Ok(None)), T0);
+    drain(q.state);
+    block_on(n.tick(T0 + SECOND));
+    let agents = signed_body(Method::Get, "/v1/agents", "");
+    let Routed::Reply(hop_http::Reply::Plain(r)) =
+        routed(&mut n, Port::Leader, &agents, T0 + SECOND)
+    else {
+        panic!("geen antwoord");
+    };
+    let body = String::from_utf8(r.body).unwrap();
+    assert!(!body.contains("kern_"), "{body}");
+    assert!(body.contains(r#""hop_mem_bytes":4194304"#), "{body}");
+}
+
+#[test]
+fn the_leader_shows_the_kernel_and_hop_of_every_agent() {
+    let k = FakeKern::new(4);
+    system_slots(&k, 100);
+    let (mut n, q) = clustered_on(&k, || true);
+    n.cluster_boot(T0);
+    n.on_mail(Mail::Lease(LeaseReply::Claimed(true)), T0);
+    n.on_mail(Mail::Loaded(Ok(None)), T0);
+    drain(q.state);
+    // Twee standen, 5 s uit elkaar: de eigen heartbeat draagt de cpu.
+    block_on(n.tick(T0 + SECOND));
+    system_slots(&k, 105);
+    block_on(n.tick(T0 + 6 * SECOND));
+
+    // n2 is een nieuwe Hop, n3 een oude zonder de velden.
+    for (id, ip) in [("n2", "10.0.0.6"), ("n3", "10.0.0.7")] {
+        let reg = format!(r#"{{"id":"{id}","endpoint":"http://{ip}:8080","placed":{{}}}}"#);
+        let r = routed(
+            &mut n,
+            Port::Leader,
+            &signed_body(Method::Post, "/v1/agents", &reg),
+            T0 + 6 * SECOND,
+        );
+        assert_eq!(status(&r), 200);
+    }
+    let hb = r#"{"id":"n2","endpoint":"http://10.0.0.6:8080","version":"3.0.7","temp_milli_c":51000,"kern_cpu_percent":1.5,"kern_mem_bytes":2097152,"kern_ram_bytes":16777216,"hop_cpu_percent":3,"hop_mem_bytes":1048576,"hop_ram_bytes":8388608}"#;
+    let r = routed(
+        &mut n,
+        Port::Leader,
+        &signed_body(Method::Post, "/v1/heartbeat", hb),
+        T0 + 7 * SECOND,
+    );
+    assert_eq!(status(&r), 200);
+    let hb = r#"{"id":"n3","endpoint":"http://10.0.0.7:8080","version":"3.0.6","temp_milli_c":0}"#;
+    let r = routed(
+        &mut n,
+        Port::Leader,
+        &signed_body(Method::Post, "/v1/heartbeat", hb),
+        T0 + 7 * SECOND,
+    );
+    assert_eq!(status(&r), 200);
+
+    // /v1/agents: naast temp_milli_c de vier (en de noemers).
+    let r = routed(
+        &mut n,
+        Port::Leader,
+        &signed_body(Method::Get, "/v1/agents", ""),
+        T0 + 7 * SECOND,
+    );
+    let Routed::Reply(hop_http::Reply::Plain(r)) = r else {
+        panic!("geen antwoord: {r:?}");
+    };
+    let v = json(&r.body);
+    let list = v.as_array().unwrap();
+    let agent = |id: &str| {
+        list.iter()
+            .find(|a| a.as_object().unwrap().get("id").and_then(|v| v.as_str()) == Some(id))
+            .unwrap()
+            .clone()
+    };
+    let n1 = agent("n1");
+    assert_eq!(num(&n1, "kern_cpu_percent"), 20.0);
+    assert_eq!(num(&n1, "kern_mem_bytes"), f64::from(3u32 << 20));
+    assert_eq!(num(&n1, "hop_cpu_percent"), 10.0);
+    assert_eq!(num(&n1, "hop_mem_bytes"), f64::from(4u32 << 20));
+    let n2 = agent("n2");
+    assert_eq!(num(&n2, "temp_milli_c"), 51_000.0);
+    assert_eq!(num(&n2, "kern_cpu_percent"), 1.5);
+    assert_eq!(num(&n2, "hop_ram_bytes"), 8_388_608.0);
+    let n3 = agent("n3");
+    assert!(n3.as_object().unwrap().get("kern_mem_bytes").is_none());
+
+    // /v1/tasks: de rondgang, en per agent die antwoordt zijn systeemtaken.
+    let r = routed(
+        &mut n,
+        Port::Leader,
+        &signed_body(Method::Get, "/v1/tasks", ""),
+        T0 + 7 * SECOND,
+    );
+    let Routed::Forward(Forward::Tasks {
+        agents,
+        auth,
+        scope,
+    }) = r
+    else {
+        panic!("geen rondgang: {r:?}");
+    };
+    let net = FakeNet::new(|_| (200, vec![], b"[]".to_vec()));
+    let resp = block_on(forward::tasks(
+        &mut net.client(),
+        agents,
+        auth.as_deref(),
+        &scope,
+    ));
+    assert_eq!(resp.status, 200);
+    let v = json(&resp.body);
+    let by = v.as_object().unwrap().get("tasks_by_agent").unwrap();
+    let tasks = |id: &str| {
+        by.as_object()
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .to_vec()
+    };
+    let n1 = tasks("n1");
+    assert_eq!(n1.len(), 2, "{n1:?}");
+    let t = |v: &types::json::Value| types::Task::from_value(v).unwrap();
+    let (kern, hop) = (t(&n1[0]), t(&n1[1]));
+    assert_eq!(
+        (
+            kern.job_name.as_str(),
+            kern.driver.as_str(),
+            kern.pid,
+            kern.state
+        ),
+        ("kern", "hop", 0, types::TaskState::System)
+    );
+    assert_eq!((kern.cpu_percent, kern.mem_percent), (20.0, 4.6));
+    assert_eq!(
+        (hop.job_name.as_str(), hop.pid, hop.state),
+        ("hop", 1, types::TaskState::System)
+    );
+    assert_eq!((hop.cpu_percent, hop.mem_percent), (10.0, 12.5));
+    let n2 = tasks("n2");
+    let (kern, hop) = (t(&n2[0]), t(&n2[1]));
+    assert_eq!((kern.cpu_percent, kern.mem_percent), (1.5, 12.5));
+    assert_eq!((hop.cpu_percent, hop.mem_percent), (3.0, 12.5));
+    assert!(
+        tasks("n3").is_empty(),
+        "een oude agent heeft geen systeemtaken"
+    );
+
+    // En nergens in de boeken: geen plaatsing, en de status telt niets.
+    let r = routed(
+        &mut n,
+        Port::Leader,
+        &signed_body(Method::Get, "/v1/status", ""),
+        T0 + 7 * SECOND,
+    );
+    let Routed::Reply(hop_http::Reply::Plain(r)) = r else {
+        panic!("geen antwoord: {r:?}");
+    };
+    let v = json(&r.body);
+    assert_eq!(num(&v, "total_placed"), 0.0);
+    assert!(n.agent().tasks().next().is_none());
+}
+
 #[test]
 fn a_displaced_leader_steps_down_and_forgets_its_calls() {
     let (mut n, q) = clustered(|| true);
@@ -1068,7 +1330,7 @@ fn the_tasks_round_asks_the_other_nodes_and_skips_the_silent_ones() {
         &mut net.client(),
         agents,
         Some("sig"),
-        &TasksScope::All,
+        &TasksScope::All { agents: Vec::new() },
     ));
     assert_eq!(resp.status, 200);
     let body = String::from_utf8(resp.body).unwrap();

@@ -151,7 +151,7 @@ fn failover_dispatch_failure_does_not_break_heartbeat() {
     net.get("rejecting-agent").run_status = Some(503);
     register(&mut l, &mut net, "rejecting-agent", Map::new(), NOW);
     assert_eq!(l.agents().len(), 2);
-    assert!(l.heartbeat("rejecting-agent", "", 0, NOW));
+    assert!(l.heartbeat("rejecting-agent", "", Default::default(), NOW));
     assert_eq!(l.placed("daemon").unwrap().len(), 1);
 }
 
@@ -254,9 +254,9 @@ fn failover_second_heartbeat_does_not_reschedule() {
     net.add("new-leader-id");
     net.get("new-leader-id").fail_runs = true;
     register(&mut l, &mut net, "new-leader-id", Map::new(), NOW);
-    assert!(l.heartbeat("new-leader-id", "", 0, NOW));
+    assert!(l.heartbeat("new-leader-id", "", Default::default(), NOW));
     net.get("new-leader-id").fail_runs = false;
-    assert!(l.heartbeat("new-leader-id", "", 0, at(1)));
+    assert!(l.heartbeat("new-leader-id", "", Default::default(), at(1)));
     assert_eq!(net.get("new-leader-id").run_calls, 0);
 }
 
@@ -276,7 +276,7 @@ fn failover_agent_dies_tasks_rescheduled() {
     let (mut l, mut net) = two_agents_twenty(200);
     net.get("agent-a").down = true;
     let later = Time(NOW.0 + 300 * MILLISECOND);
-    l.heartbeat("agent-b", "", 0, later);
+    l.heartbeat("agent-b", "", Default::default(), later);
     l.check_dead_agents(later, &mut net).unwrap();
     assert_eq!(net.get("agent-b").task_count(), 20);
     assert!(l.agent("agent-a").is_none());
@@ -288,8 +288,8 @@ fn failover_heartbeat_learns_wrong_placement_count() {
     let mut net = FakeNet::new();
     join(&mut l, &mut net, "agent-a", NOW);
     join(&mut l, &mut net, "agent-b", NOW);
-    assert!(l.heartbeat("agent-a", "", 0, NOW));
-    assert!(l.heartbeat("agent-b", "", 0, NOW));
+    assert!(l.heartbeat("agent-a", "", Default::default(), NOW));
+    assert!(l.heartbeat("agent-b", "", Default::default(), NOW));
     assert_eq!(l.agents().len(), 2);
     assert_eq!(placed_total(&l, "ticker"), 20);
 }
@@ -340,7 +340,12 @@ fn failover_agent_dies_realistic_heartbeat() {
     net.get("agent-a").down = true;
     // agent-b blijft kloppen, agent-a zwijgt.
     for ms in [100, 200, 300] {
-        l.heartbeat("agent-b", "", 0, Time(NOW.0 + ms * MILLISECOND));
+        l.heartbeat(
+            "agent-b",
+            "",
+            Default::default(),
+            Time(NOW.0 + ms * MILLISECOND),
+        );
     }
     l.check_dead_agents(Time(NOW.0 + 300 * MILLISECOND), &mut net)
         .unwrap();

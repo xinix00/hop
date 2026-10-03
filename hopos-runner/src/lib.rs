@@ -277,6 +277,11 @@ pub fn slot_status_of(info: &SlotInfo) -> SlotStatus {
         exit_code: info.exit_code,
         heartbeat: info.heartbeat,
         mem_sys: info.mem_sys,
+        mem_limit: if info.partition != 0 {
+            info.partition
+        } else {
+            info.ram_size
+        },
         cpu_pct: None,
         fault_vec: info.fault_vec,
         fault_esr: info.fault_esr,

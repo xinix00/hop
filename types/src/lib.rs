@@ -37,7 +37,7 @@ pub mod time;
 pub use error::{Error, NAME_BYTES, Name};
 pub use job::{Artifact, CheckType, Driver, HealthCheck, Job, UpdatePolicy};
 pub use map::Map;
-pub use task::{Agent, Task, TaskState};
+pub use task::{Agent, HOP_SLOT, KERN_SLOT, SysUsage, Task, TaskState, Telemetry};
 pub use time::{Nanos, Time};
 
 /// Het resultaat van elke faalbare handeling in deze crate.
@@ -138,6 +138,8 @@ mod tests {
         assert_eq!(TaskState::Queued.as_str(), "queued");
         assert_eq!(TaskState::Downloading.as_str(), "downloading");
         assert_eq!(TaskState::Stopping.as_str(), "stopping");
+        assert_eq!(TaskState::System.as_str(), "system");
+        assert_eq!(TaskState::parse("system"), Some(TaskState::System));
     }
 
     #[test]
@@ -219,6 +221,79 @@ mod tests {
         let data = agent.to_json().unwrap();
         let decoded = Agent::from_value(&json::parse_str(&data).unwrap()).unwrap();
         assert_eq!(decoded, agent);
+    }
+
+    /// De telemetrie van een heartbeat: plat op de draad, wat niet gemeten
+    /// is ontbreekt, en een cpu van 0 is een meting.
+    #[test]
+    fn agent_telemetry_roundtrip() {
+        let agent = Agent {
+            id: "n1".to_string(),
+            telemetry: Telemetry {
+                temp_milli_c: 59_800,
+                kern: SysUsage {
+                    cpu_percent: Some(0.0),
+                    mem_bytes: 3 << 20,
+                    ram_bytes: 64 << 20,
+                },
+                hop: SysUsage {
+                    cpu_percent: None,
+                    mem_bytes: 5 << 20,
+                    ram_bytes: 0,
+                },
+            },
+            ..Agent::default()
+        };
+        let data = agent.to_json().unwrap();
+        assert!(data.contains(r#""kern_cpu_percent":0"#), "{data}");
+        assert!(data.contains(r#""kern_mem_bytes":3145728"#), "{data}");
+        assert!(data.contains(r#""kern_ram_bytes":67108864"#), "{data}");
+        assert!(data.contains(r#""hop_mem_bytes":5242880"#), "{data}");
+        assert!(!data.contains("hop_cpu_percent"), "{data}");
+        assert!(!data.contains("hop_ram_bytes"), "{data}");
+        let decoded = Agent::from_value(&json::parse_str(&data).unwrap()).unwrap();
+        assert_eq!(decoded, agent);
+        // Een oude agent zonder de velden: niets gemeten.
+        let old = Agent::from_value(&json::parse_str(r#"{"id":"n2","temp_milli_c":1}"#).unwrap())
+            .unwrap();
+        assert_eq!(old.telemetry.kern, SysUsage::default());
+        assert!(old.system_tasks().unwrap().is_empty());
+        // De heartbeat leest dezelfde sleutels; de rest telt niet.
+        let hb = r#"{"id":"n1","version":"3","kern_mem_bytes":7,"hop_cpu_percent":12.5,"x":1}"#;
+        let t = Telemetry::from_value(&json::parse_str(hb).unwrap()).unwrap();
+        assert_eq!((t.kern.mem_bytes, t.hop.cpu_percent), (7, Some(12.5)));
+    }
+
+    /// `kern` en `hop` als taken: pid is het slot, staat `system`, het
+    /// geheugen tegen het RAM met één decimaal; alleen wat gemeten is.
+    #[test]
+    fn agent_system_tasks() {
+        let mut agent = Agent::default();
+        agent.telemetry.kern = SysUsage {
+            cpu_percent: Some(3.0),
+            mem_bytes: 3 << 20,
+            ram_bytes: 64 << 20,
+        };
+        let tasks = agent.system_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        let k = &tasks[0];
+        assert_eq!(
+            (k.id.as_str(), k.job_name.as_str(), k.driver.as_str(), k.pid),
+            ("kern", "kern", "hop", KERN_SLOT)
+        );
+        assert_eq!(k.state, TaskState::System);
+        assert_eq!((k.cpu_percent, k.mem_percent), (3.0, 4.6));
+        agent.telemetry.hop.mem_bytes = 1 << 20;
+        let tasks = agent.system_tasks().unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(
+            (tasks[1].job_name.as_str(), tasks[1].pid),
+            ("hop", HOP_SLOT)
+        );
+        // Zonder RAM geen noemer: 0, en geen cpu-meting ook 0.
+        assert_eq!((tasks[1].cpu_percent, tasks[1].mem_percent), (0.0, 0.0));
+        let back = Task::from_value(&tasks[0].to_value().unwrap()).unwrap();
+        assert_eq!(back, tasks[0]);
     }
 
     #[test]

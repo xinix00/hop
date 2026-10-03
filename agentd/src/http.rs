@@ -884,7 +884,12 @@ mod tests {
             (String::from("a1"), format!("http://{addr}")),
             (String::from("a2"), format!("http://{dead_addr}")),
         ];
-        let r = fan_out(&Http::new(), b"key", &agents, &api::TasksScope::All);
+        let r = fan_out(
+            &Http::new(),
+            b"key",
+            &agents,
+            &api::TasksScope::All { agents: Vec::new() },
+        );
         assert_eq!(r.status, 200);
         let body = String::from_utf8(r.body).unwrap();
         assert!(body.contains(r#""tasks_by_agent":{"a1":[{"#), "{body}");

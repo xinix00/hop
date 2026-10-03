@@ -62,6 +62,9 @@ pub struct FakeSlot {
 pub struct KernState {
     /// De bezette slots, op nummer.
     pub slots: BTreeMap<u64, FakeSlot>,
+    /// Slots die de kern zelf beantwoordt, met een vaste stand: de kern in
+    /// slot 0 en Hop in zijn eigen slot. Een start slaat ze over.
+    pub system: BTreeMap<u64, SlotInfo>,
     /// Hoeveel slots er tegelijk passen; daarboven "no free run".
     pub max_slots: usize,
     /// Elke op die binnenkwam, in volgorde.
@@ -297,7 +300,7 @@ impl FakeKern {
                     return err("no free run of 1 app core(s)");
                 }
                 let mut slot = 1;
-                while k.slots.contains_key(&slot) {
+                while k.slots.contains_key(&slot) || k.system.contains_key(&slot) {
                     slot += 1;
                 }
                 let Ok(mounts) = fake_mounts(&s) else {
@@ -353,6 +356,9 @@ impl FakeKern {
                 None => err("no such slot"),
             },
             Some(PrivOp::SlotStatus) => {
+                if let Some(info) = k.system.get(&req.off) {
+                    return ok(0, &info.encode());
+                }
                 let info = match k.slots.get(&req.off) {
                     Some(s) => SlotInfo {
                         state: if s.placed { 2 } else { 1 },

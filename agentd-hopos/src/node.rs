@@ -34,10 +34,11 @@ use api::{
 use hop_http::{Ask, Chunk, Reply, refuse};
 use leader::{Leader, MemStore};
 use runner::{
-    HopRunner, LogPolicy, RunState, Runner, StartRequest, Started, Stream, SystemApi, TaskRef,
+    HopRunner, LogPolicy, RunState, Runner, Slot, SlotState, StartRequest, Started, Stream,
+    SystemApi, TaskRef,
 };
 use types::time::{MILLISECOND, SECOND};
-use types::{Driver, Job, Map, Nanos, Time};
+use types::{Driver, Job, Map, Nanos, SysUsage, Telemetry, Time};
 
 use crate::VERSION;
 use crate::env::BootConfig;
@@ -175,6 +176,13 @@ pub struct Node<S, I> {
     /// De cluster: verkiezing, lease en de agents op andere nodes; `None`
     /// standalone (zie [`cluster`]).
     cluster: Option<Cluster>,
+    /// Het slot van Hop zelf.
+    own_slot: Slot,
+    /// Het gebruik van de kern en van Hop, voor de heartbeat; gemeten op
+    /// het ritme van de monitor ([`Node::measure_system`]).
+    kern: SysUsage,
+    hop: SysUsage,
+    next_measure: Nanos,
 }
 
 impl<S: SystemApi, I: Images> Node<S, I> {
@@ -240,6 +248,10 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             lines: Vec::new(),
             said: BTreeSet::new(),
             cluster: None,
+            own_slot: Slot(cfg.slot),
+            kern: SysUsage::default(),
+            hop: SysUsage::default(),
+            next_measure: now,
         }
     }
 
@@ -295,6 +307,44 @@ impl<S: SystemApi, I: Images> Node<S, I> {
         };
         if let Some(c) = cpu {
             self.agent.record_usage(task_id, f64::from(c), mem_pct);
+        }
+    }
+
+    /// Meet de kern (slot 0) en Hop zelf, één keer per monitor-interval.
+    ///
+    /// Dezelfde meetlat als een app ([`HopRunner::usage`]); de standen per
+    /// slot houdt de kern-verbinding bij, en een taak zit nooit in slot 0 of
+    /// in het slot van Hop. Een slot dat niet draait, of een kern die slot 0
+    /// nog niet kent (die geeft een fout), is niets gemeten.
+    async fn measure_system(&mut self, now: Nanos) {
+        if now < self.next_measure {
+            return;
+        }
+        self.next_measure = now.saturating_add(self.agent.settings().monitor_interval());
+        self.kern = self.slot_usage(Slot(0)).await;
+        self.hop = self.slot_usage(self.own_slot).await;
+    }
+
+    async fn slot_usage(&mut self, slot: Slot) -> SysUsage {
+        let s = self.runner.system_mut().slot_status(slot).await;
+        if s.state != SlotState::Running {
+            return SysUsage::default();
+        }
+        SysUsage {
+            cpu_percent: s.cpu_pct.map(f64::from),
+            mem_bytes: s.mem_sys,
+            ram_bytes: s.mem_limit,
+        }
+    }
+
+    /// Wat de heartbeat meldt: de temperatuur die de kern elke seconde op
+    /// de control-page zet (CTRL_TEMP, HopOS alpha.9; 0 is geen meting) en
+    /// het laatst gemeten gebruik van de kern en van Hop.
+    fn telemetry(&self) -> Telemetry {
+        Telemetry {
+            temp_milli_c: applib::app().map_or(0, |a| i64::from(a.ctrl().temp_milli_c())),
+            kern: self.kern,
+            hop: self.hop,
         }
     }
 
@@ -678,14 +728,13 @@ impl<S: SystemApi, I: Images> Node<S, I> {
     /// Laat de tijd verstrijken: heartbeat en tik van de leader, tik van de agent, de logpomp.
     pub async fn tick(&mut self, now: Nanos) {
         // De eigen agent is altijd levend zolang deze taak draait; zonder
-        // heartbeat zou de eigen leader hem na 30 s dood verklaren. De
-        // temperatuur komt van de kern: die zet hem elke seconde op de
-        // control-page (CTRL_TEMP, HopOS alpha.9); 0 is geen meting.
-        let temp = applib::app().map_or(0, |a| i64::from(a.ctrl().temp_milli_c()));
+        // heartbeat zou de eigen leader hem na 30 s dood verklaren.
+        self.measure_system(now).await;
         let leads = self.leads();
         if leads {
+            let telemetry = self.telemetry();
             self.leader
-                .heartbeat(self.agent.id(), VERSION, temp, Time(now));
+                .heartbeat(self.agent.id(), VERSION, telemetry, Time(now));
         }
         if leads && now >= self.next_leader_tick {
             self.next_leader_tick = now.saturating_add(LEADER_TICK);

@@ -251,7 +251,7 @@ fn node_leave_with_mixed_task_states() {
 
     // A sterft, met een draaiende en een gefaalde taak.
     net.get("a").down = true;
-    l.heartbeat("b", "", 0, at_ms(300));
+    l.heartbeat("b", "", Default::default(), at_ms(300));
     l.check_dead_agents(at_ms(300), &mut net).unwrap();
 
     // A's hele telling (3) is weg en gaat naar B.
@@ -314,7 +314,7 @@ fn node_leave_during_rolling_update() {
         &mut net,
     );
 
-    l.heartbeat("a1", "", 0, at_ms(300));
+    l.heartbeat("a1", "", Default::default(), at_ms(300));
     l.check_dead_agents(at_ms(300), &mut net).unwrap();
     assert!(net.get("a1").task_count() >= 6);
     assert_eq!(placed_total(&l, "api"), 6);

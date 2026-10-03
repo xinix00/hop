@@ -647,12 +647,11 @@ impl Node {
             }
             LinkRequest::SelfHeartbeat { .. } => {
                 let known = self.leader.as_mut().map(|l| {
-                    l.heartbeat(
-                        self.agent.id(),
-                        VERSION,
-                        crate::boot::cpu_temp_milli_c(),
-                        Time(now),
-                    )
+                    let telemetry = types::Telemetry {
+                        temp_milli_c: crate::boot::cpu_temp_milli_c(),
+                        ..types::Telemetry::default()
+                    };
+                    l.heartbeat(self.agent.id(), VERSION, telemetry, Time(now))
                 });
                 let result = match known {
                     Some(true) => Ok(()),

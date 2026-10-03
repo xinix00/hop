@@ -24,7 +24,7 @@ fn leader_check_dead_agents() {
         &mut net,
     )
     .unwrap();
-    assert!(l.heartbeat("dying-agent", "", 0, NOW));
+    assert!(l.heartbeat("dying-agent", "", Default::default(), NOW));
     assert_eq!(l.agents().len(), 1);
 
     l.check_dead_agents(at_ms(100), &mut net).unwrap();
@@ -51,7 +51,7 @@ fn leader_redispatch_jobs_from_dead_agent() {
     force_placed(&mut l, "dying-agent", "test-job", 1);
     assert_eq!(net.get("healthy-agent").run_calls, 0);
 
-    l.heartbeat("healthy-agent", "", 0, at_ms(100));
+    l.heartbeat("healthy-agent", "", Default::default(), at_ms(100));
     l.check_dead_agents(at_ms(100), &mut net).unwrap();
     assert_eq!(net.get("healthy-agent").run_calls, 1);
     assert_eq!(placed_total(&l, "test-job"), 1);

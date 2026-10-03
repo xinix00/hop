@@ -3,7 +3,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types::{Agent, Job, Map, Nanos, Time, try_string};
+use types::{Agent, Job, Map, Nanos, Telemetry, Time, try_string};
 
 use crate::events::{Event, Events};
 use crate::{DEFAULT_AGENT_TIMEOUT, Error, JobStore, MAX_AGENTS, Result, Transport};
@@ -173,7 +173,7 @@ impl<S: JobStore> Leader<S> {
     /// Puur liveness, geen job-uitwisseling (gesloopt 16-07): de leider is
     /// de enige auteur van gewenste staat, en de oude bidirectionele sync
     /// hier was de kraamkamer van de delete-storm-zombies van 15-07.
-    pub fn heartbeat(&mut self, id: &str, version: &str, temp_milli_c: i64, now: Time) -> bool {
+    pub fn heartbeat(&mut self, id: &str, version: &str, telemetry: Telemetry, now: Time) -> bool {
         let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) else {
             return false;
         };
@@ -185,7 +185,7 @@ impl<S: JobStore> Leader<S> {
             }
         }
         // Telemetrie, geen scheduling-input.
-        agent.temp_milli_c = temp_milli_c;
+        agent.telemetry = telemetry;
         true
     }
 

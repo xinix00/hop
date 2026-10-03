@@ -53,8 +53,8 @@ fn get_placed_counts_pre_existing_jobs() {
         "agent-2",
         counts(&[("webapp", 1), ("api", 1)]),
     );
-    assert!(l.heartbeat("agent-1", "", 0, NOW));
-    assert!(l.heartbeat("agent-2", "", 0, NOW));
+    assert!(l.heartbeat("agent-1", "", Default::default(), NOW));
+    assert!(l.heartbeat("agent-2", "", Default::default(), NOW));
 
     assert_eq!(placed_of(&l, "webapp"), 3);
     assert_eq!(placed_of(&l, "api"), 2);
