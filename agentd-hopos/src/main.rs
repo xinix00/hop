@@ -919,12 +919,13 @@ async fn resident(app: &'static App) {
         }
     }
     log!(
-        "hop: agent up node={} cluster={} agent=:{} leader=:{} cores={} HOP_UP",
+        "hop: agent up node={} cluster={} agent=:{} leader=:{} cores={} system={} HOP_UP",
         cfg.node_id,
         cfg.cluster,
         cfg.port,
         cfg.leader_port(),
-        cfg.cores
+        cfg.cores,
+        u8::from(cfg.system_core)
     );
 
     let tick_ns = u64::try_from(TICK.as_nanos()).unwrap_or(u64::MAX);

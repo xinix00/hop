@@ -56,6 +56,15 @@ pub use settings::Settings;
 /// begrensd; een leader die meer stuurt, krijgt een weigering.
 pub const MAX_TASKS: usize = 1024;
 
+/// De sharegroup van Hop's eigen core op HopOS: de kern zet een job in deze
+/// groep bij Hop, op een core die Hop niet uitdeelt.
+pub const HOP_GROUP: &str = "hop";
+
+/// De sharegroup van de OS-core op HopOS, als de kern zijn core deelt
+/// (`HOPOS_SYSTEM_CORE`). Daar komt ook een job zonder groep van één core
+/// die geen vrije core vindt (`HOPOS_PLACE_SYSTEM` in de kern).
+pub const SYSTEM_GROUP: &str = "system";
+
 /// Het maximum aantal jobs dat de node kent (op de leader-node is dit de hele store).
 pub const MAX_JOBS: usize = 1024;
 

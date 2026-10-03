@@ -576,6 +576,7 @@ fn handle_run_replace_vervang_eigen_taak_binnen_volle_node() {
     let old = run_ok(&mut a, T0, j.clone());
     // Zonder replace past de opvolger niet naast zijn voorganger.
     assert_eq!(a.run(T0, j.clone(), false, None), Err(Error::NoCapacity));
+    assert_eq!(refusals(&a.take_actions()), [("web".to_string(), "cpu")]);
     let new = a.run(T0, j, true, None).unwrap();
     let acts = a.take_actions();
     // Eerst de voorganger weg, dan pas de opvolger starten.
@@ -604,6 +605,81 @@ fn hop_job_larger_than_the_largest_hole_is_refused() {
         a.run(T0, hop_job("fits", 28 << 20), false, Some(32 << 20))
             .is_ok()
     );
+}
+
+fn refusals(actions: &[Action]) -> Vec<(String, &'static str)> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Refused { job, why } => Some((job.clone(), *why)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn in_group(name: &str, group: &str) -> Job {
+    let mut j = hop_job(name, 8 << 20);
+    j.tags = map(&[("sharegroup", group.to_string())]);
+    j
+}
+
+/// De LicheeRV van 03-10: Hop op de enige app-core, de kern deelt de
+/// OS-core. Geen eigen core uit te delen, en toch past alles van één core.
+#[test]
+fn a_system_core_takes_what_has_no_core_of_its_own() {
+    let mut s = settings();
+    s.cap_cpu_shares = 0;
+    s.cpu_cores = 0;
+    s.free_groups = alloc::vec![HOP_GROUP.into(), SYSTEM_GROUP.into()];
+    let mut a = Agent::new(s);
+    // Zonder groep: de kern zet hem bij geen vrije core op de OS-core.
+    let welcome = run_ok(&mut a, T0, hop_job("welcome", 8 << 20));
+    run_ok(&mut a, T0, in_group("sys", SYSTEM_GROUP));
+    run_ok(&mut a, T0, in_group("near-hop", HOP_GROUP));
+    // De terugval telt als core tot de kern zegt waar hij staat; de groepen nooit.
+    assert_eq!(a.resource_usage(), (1024, 3 * (8 << 20)));
+    a.record_usage(&welcome, 0.0, 0.0, 1, Some(0));
+    assert_eq!(a.resource_usage().0, 0);
+    run_ok(&mut a, T0, hop_job("second", 8 << 20));
+
+    // Twee cores, of een core-class, kan de terugval niet: één regel per job.
+    let mut wide = hop_job("wide", 8 << 20);
+    wide.cpu_shares = 2048;
+    let mut classy = hop_job("classy", 8 << 20);
+    classy.tags = map(&[("core-class", "big".to_string())]);
+    for j in [wide.clone(), classy, wide.clone()] {
+        assert_eq!(a.run(T0, j, false, None), Err(Error::NoCapacity));
+    }
+    assert_eq!(
+        refusals(&a.take_actions()),
+        [("wide".to_string(), "cpu"), ("classy".to_string(), "cpu")]
+    );
+    // Na een verwijdering zegt een nieuwe weigering het weer.
+    a.delete_job_definition(T0, "wide");
+    assert_eq!(a.run(T0, wide, false, None), Err(Error::NoCapacity));
+    assert_eq!(refusals(&a.take_actions()).len(), 1);
+    // Geheugen telt gewoon.
+    let mut fat = in_group("fat", SYSTEM_GROUP);
+    fat.memory_limit = 2 << 30;
+    assert_eq!(a.run(T0, fat, false, None), Err(Error::NoCapacity));
+    assert_eq!(refusals(&a.take_actions()), [("fat".to_string(), "memory")]);
+}
+
+/// Een oude kern (geen `HOPOS_SYSTEM_CORE`): `system` is een groep als elke
+/// andere en er is geen terugval; `hop` past altijd.
+#[test]
+fn without_a_system_core_system_is_just_a_group() {
+    let mut s = settings();
+    s.cap_cpu_shares = 0;
+    s.cpu_cores = 1;
+    s.free_groups = alloc::vec![HOP_GROUP.into()];
+    let mut a = Agent::new(s);
+    run_ok(&mut a, T0, hop_job("welcome", 8 << 20));
+    run_ok(&mut a, T0, in_group("near-hop", HOP_GROUP));
+    for j in [in_group("sys", SYSTEM_GROUP), hop_job("second", 8 << 20)] {
+        assert_eq!(a.run(T0, j, false, None), Err(Error::NoCapacity));
+    }
+    assert_eq!(refusals(&a.take_actions()).len(), 2);
 }
 
 #[test]

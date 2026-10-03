@@ -7,6 +7,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use types::{Nanos, try_string};
@@ -30,6 +31,11 @@ pub struct Settings {
     pub cap_cpu_shares: i64,
     /// Een lagere geheugengrens in bytes; 0 = geen.
     pub cap_memory: u64,
+    /// De sharegroups op een core die de node niet uitdeelt: hun leden
+    /// kosten geen CPU uit de boekhouding en passen altijd (op HopOS
+    /// [`crate::HOP_GROUP`], en [`crate::SYSTEM_GROUP`] als de kern zijn
+    /// core deelt). Leeg buiten HopOS.
+    pub free_groups: Vec<String>,
     /// Hoe vaak de monitor taken nakijkt; 0 = 5 s.
     pub monitor_interval: Nanos,
     /// De standaard-timeout van een probe; 0 = 5 s.
@@ -78,6 +84,7 @@ impl Settings {
             memory_bytes: 0,
             cap_cpu_shares: i64::try_from(cfg.capacity.cpu_shares).unwrap_or(i64::MAX),
             cap_memory: cfg.capacity.memory,
+            free_groups: Vec::new(),
             monitor_interval: cfg.timeouts.health_check_interval,
             health_timeout: cfg.timeouts.health_check_timeout,
             seed: 0,

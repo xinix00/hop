@@ -6,7 +6,7 @@
 //! iets wil, roept een methode en voert de acties uit die terugkomen.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -16,7 +16,9 @@ use crate::action::{Action, Event, Outcome, StartError, StartOk, Status};
 use crate::health::{self, Check, Verdict};
 use crate::ids::Ids;
 use crate::settings::Settings;
-use crate::{DEFAULT_MAX_RESTARTS, DEFAULT_RESTART_WINDOW, Error, MAX_JOBS, MAX_TASKS, Result};
+use crate::{
+    DEFAULT_MAX_RESTARTS, DEFAULT_RESTART_WINDOW, Error, MAX_JOBS, MAX_TASKS, Result, SYSTEM_GROUP,
+};
 
 /// HopOS deelt partities uit in blokken van 2 MB (de kooi-map werkt per blok).
 const HOP_BLOCK_BYTES: u64 = 2 << 20;
@@ -66,6 +68,8 @@ pub struct Agent {
     lease_expires_at: Time,
     ids: Ids,
     out: Vec<Action>,
+    /// De jobs die al een [`Action::Refused`] kregen en sindsdien niet pasten.
+    refused: BTreeSet<String>,
     next_monitor: Nanos,
     shutting_down: bool,
 }
@@ -83,6 +87,7 @@ impl Agent {
             lease_expires_at: Time::ZERO,
             ids,
             out: Vec::new(),
+            refused: BTreeSet::new(),
             next_monitor: 0,
             shutting_down: false,
         }
@@ -215,6 +220,21 @@ impl Agent {
             .filter(|g| !g.is_empty())
     }
 
+    /// Of `grp` op een core woont die de node niet uitdeelt ([`Settings::free_groups`]).
+    fn free_group(&self, grp: &str) -> bool {
+        self.settings.free_groups.iter().any(|g| g == grp)
+    }
+
+    /// Of een taak geen core uit de boekhouding kost: zijn groep is vrij, of
+    /// hij heeft geen groep en de kern zette hem op de OS-core (core 0, de
+    /// terugval naar [`SYSTEM_GROUP`]). Tot de kern zijn core meldt, telt hij.
+    fn costs_no_core(&self, grp: Option<&str>, task: &Task) -> bool {
+        match grp {
+            Some(g) => self.free_group(g),
+            None => task.core == Some(0) && self.free_group(SYSTEM_GROUP),
+        }
+    }
+
     /// Of er al een taak in sharegroup `grp` is: dan is de pool-CPU al gereserveerd.
     fn sharegroup_running(&self, grp: &str) -> bool {
         self.tasks
@@ -231,8 +251,9 @@ impl Agent {
     /// een node met 3 cores plat).
     ///
     /// CPU telt sharegroup-leden één keer (ze delen een pool; "2 apps in pool
-    /// web van 2" is 2 cores, niet 4). Geheugen telt per lid: elke app heeft
-    /// een eigen partitie.
+    /// web van 2" is 2 cores, niet 4), en een taak op een core die de node
+    /// niet uitdeelt niet ([`Agent::costs_no_core`]). Geheugen telt per lid:
+    /// elke app heeft een eigen partitie.
     pub fn resource_usage_excluding(&self, exclude: Option<&str>) -> (i64, u64) {
         let mut cpu: i64 = 0;
         let mut mem: u64 = 0;
@@ -242,7 +263,11 @@ impl Agent {
                 continue;
             }
             mem = mem.saturating_add(e.task.memory_limit);
-            if let Some(grp) = self.sharegroup_of(&e.task) {
+            let group = self.sharegroup_of(&e.task);
+            if self.costs_no_core(group, &e.task) {
+                continue;
+            }
+            if let Some(grp) = group {
                 if seen.contains(&grp) {
                     continue;
                 }
@@ -317,7 +342,11 @@ impl Agent {
         if !self.jobs.contains_key(&job.name) && self.jobs.len() >= MAX_JOBS {
             return Err(Error::TooManyJobs);
         }
-        self.admit(&job, replace, pool_largest)?;
+        if let Err(why) = self.admit(&job, replace, pool_largest) {
+            self.refuse(&job.name, why);
+            return Err(Error::NoCapacity);
+        }
+        self.refused.remove(&job.name);
 
         let task = self.new_task(now, &job)?;
         let id = task.id.clone();
@@ -341,25 +370,58 @@ impl Agent {
         Ok(id)
     }
 
-    /// Toetst of `job` erbij past; zie [`Agent::run`].
-    fn admit(&self, job: &Job, replace: bool, pool_largest: Option<u64>) -> Result {
+    /// Eén [`Action::Refused`] per job, tot hij weer past of weg is: de
+    /// vangnet-reconcile vraagt elke 30 s opnieuw, en dat hoort niet elke
+    /// keer op de console.
+    fn refuse(&mut self, job: &str, why: &'static str) {
+        if self.refused.contains(job) {
+            return;
+        }
+        let Ok(name) = types::try_string(job) else {
+            return;
+        };
+        if self.refused.len() < MAX_JOBS {
+            self.refused.insert(name.clone());
+        }
+        self.push(Action::Refused { job: name, why });
+    }
+
+    /// Toetst of `job` erbij past; zie [`Agent::run`]. De fout zegt wat er op is.
+    fn admit(
+        &self,
+        job: &Job,
+        replace: bool,
+        pool_largest: Option<u64>,
+    ) -> core::result::Result<(), &'static str> {
         let exclude = replace.then_some(job.name.as_str());
         let (used_cpu, used_mem) = self.resource_usage_excluding(exclude);
+        let group = job
+            .tags
+            .get("sharegroup")
+            .map(String::as_str)
+            .filter(|g| !g.is_empty());
         // Een lid dat een al lopende pool joint, kost geen extra cores.
         let mut new_cpu = job.cpu_shares;
-        if let Some(grp) = job.tags.get("sharegroup").filter(|g| !g.is_empty())
-            && self.sharegroup_running(grp)
-        {
+        if group.is_some_and(|g| self.sharegroup_running(g)) {
             new_cpu = 0;
         }
-        if job.cpu_shares > 0
-            && used_cpu.saturating_add(new_cpu) > self.settings.effective_cpu_shares()
-        {
-            return Err(Error::NoCapacity);
+        let cpu_full = job.cpu_shares > 0
+            && used_cpu.saturating_add(new_cpu) > self.settings.effective_cpu_shares();
+        // Een groep op een core die de node niet uitdeelt, past altijd. Een
+        // job zonder groep van één core zet de kern bij geen vrije core op de
+        // OS-core (HOPOS_PLACE_SYSTEM), dus die mag door als de node die
+        // heeft; niet met een `core-class`, want die kan de OS-core uitsluiten
+        // en een weigering van de kern is een hand-back-lus.
+        let falls_back = group.is_none()
+            && job.cpu_shares <= 1024
+            && !job.tags.contains_key("core-class")
+            && self.free_group(SYSTEM_GROUP);
+        if cpu_full && !group.is_some_and(|g| self.free_group(g)) && !falls_back {
+            return Err("cpu");
         }
         let mem_cap = self.settings.effective_memory_bytes();
         if job.memory_limit > 0 && used_mem.saturating_add(job.memory_limit) > mem_cap {
-            return Err(Error::NoCapacity);
+            return Err("memory");
         }
         // Een som is geen gat. Op een pool van meerdere regio's kunnen de bytes
         // vrij zijn zonder dat één stuk groot genoeg is (GEMETEN 19-08 op een
@@ -371,7 +433,7 @@ impl Agent {
             && job.driver == Some(Driver::Hop)
             && pool_largest.is_some_and(|l| l > 0 && job.memory_limit > l)
         {
-            return Err(Error::NoCapacity);
+            return Err("partition");
         }
         Ok(())
     }
@@ -808,6 +870,7 @@ impl Agent {
     /// Verwijdert een job en stopt al zijn taken; geeft het aantal.
     pub fn delete_job(&mut self, now: Nanos, name: &str) -> usize {
         self.jobs.remove(name);
+        self.refused.remove(name);
         // De klok mee: zonder deze bump geldt een sync-payload van vóór deze
         // delete nog als nieuwer en importeert hij de job opnieuw (15-07).
         self.state_time = Time(now);
@@ -932,6 +995,7 @@ impl Agent {
     /// Verwijdert alleen de job-definitie.
     pub fn delete_job_definition(&mut self, now: Nanos, name: &str) {
         self.jobs.remove(name);
+        self.refused.remove(name);
         self.state_time = Time(now);
     }
 

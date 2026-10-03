@@ -224,6 +224,7 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             attributes: attributes.clone(),
             cpu_cores: cfg.cores,
             memory_bytes: cfg.memory,
+            free_groups: free_groups(cfg.system_core),
             // Het zaad van de taak-id's: de klok en het node-id. Geen
             // entropiebron in een app; uniek genoeg op één node.
             seed: now ^ fnv(cfg.node_id.as_bytes()),
@@ -803,6 +804,16 @@ impl<S: SystemApi, I: Images> Node<S, I> {
                         "hop: health probes are not wired on HopOS yet; tasks with a health_check stay unprobed HOP_PROBE_SKIPPED",
                     ),
                 ),
+                Action::Refused { job, why } => {
+                    let c = self.agent.capacity();
+                    self.lines.push(format!(
+                        "hop: job {job} refused here: no capacity ({why}; cpu {}/{} shares, memory {}/{} bytes) HOP_NO_CAPACITY",
+                        c.cpu_used_shares,
+                        u64::from(c.cpu_cores) * 1024,
+                        c.memory_used_bytes,
+                        c.memory_bytes
+                    ));
+                }
                 Action::Notify { job, event } => self.notify(now, &job, event),
             }
         }
@@ -993,4 +1004,15 @@ fn fnv(b: &[u8]) -> u64 {
     b.iter().fold(0xcbf2_9ce4_8422_2325, |h, &c| {
         (h ^ u64::from(c)).wrapping_mul(0x0100_0000_01b3)
     })
+}
+
+/// De groepen op een core die Hop niet uitdeelt: altijd `hop` (Hop heeft
+/// een core, eigen of gedeeld met de kern), en `system` als de kern zijn
+/// core deelt (`HOPOS_SYSTEM_CORE=1`).
+fn free_groups(system_core: bool) -> Vec<String> {
+    let mut g = Vec::from([String::from(agent::HOP_GROUP)]);
+    if system_core {
+        g.push(String::from(agent::SYSTEM_GROUP));
+    }
+    g
 }

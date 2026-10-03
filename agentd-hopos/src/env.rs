@@ -14,7 +14,8 @@
 //! | `HOPOS_CLUSTER` | de clusternaam | `hopos` |
 //! | `HOPOS_NODE_IP` | het LAN-adres in het endpoint dat de leader ziet | het slot-IP |
 //! | `HOPOS_PORT` | de agent-poort; de leader luistert op poort + 1000 | `8080` |
-//! | `HOPOS_CORES` | de app-cores waar Hop tegen plant | `1` |
+//! | `HOPOS_CORES` | de eigen app-cores die Hop uitdeelt; 0 mag alleen met `HOPOS_SYSTEM_CORE=1` | `1` |
+//! | `HOPOS_SYSTEM_CORE` | `1`: de kern deelt zijn core als sharegroup `system`; die telt niet in `HOPOS_CORES`, een job in `system` past altijd en een job zonder groep van één core mag bij een volle node door (de kern zet hem dan op de OS-core) | uit |
 //! | `HOPOS_MEMORY` | het app-geheugen in bytes waar Hop tegen plant | 256 MiB |
 //! | `HOPOS_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_KEY`, `_SECRET`, `_PATHSTYLE` | de bucket van de node: de object-store van de apps, en met `HOPOS_LOCK_TYPE=s3` de lock van de cluster | geen |
 //! | `HOPOS_INIT_JOBS` | de init-jobs als één JSON-array (`hopos.init[]`) | [`INIT_JOBS_FILE`] als die er is |
@@ -52,6 +53,8 @@ pub const ENV_NODE_IP: &str = "HOPOS_NODE_IP";
 pub const ENV_PORT: &str = "HOPOS_PORT";
 /// De app-cores.
 pub const ENV_CORES: &str = "HOPOS_CORES";
+/// `1`: de node heeft een `system`-core.
+pub const ENV_SYSTEM_CORE: &str = "HOPOS_SYSTEM_CORE";
 /// Het app-geheugen.
 pub const ENV_MEMORY: &str = "HOPOS_MEMORY";
 /// De init-jobs als JSON-array.
@@ -134,8 +137,10 @@ pub struct BootConfig {
     pub node_ip: String,
     /// De agent-poort; de leader op poort + 1000.
     pub port: u16,
-    /// De app-cores.
+    /// De eigen app-cores; 0 kan alleen met `system_core`.
     pub cores: u32,
+    /// De kern deelt zijn core als sharegroup `system` (`HOPOS_SYSTEM_CORE=1`).
+    pub system_core: bool,
     /// Het app-geheugen in bytes.
     pub memory: u64,
     /// Of `HOPOS_MEMORY` ontbrak (de bewoner meldt dat luid).
@@ -158,6 +163,7 @@ impl fmt::Debug for BootConfig {
             .field("node_ip", &self.node_ip)
             .field("port", &self.port)
             .field("cores", &self.cores)
+            .field("system_core", &self.system_core)
             .field("memory", &self.memory)
             .field("memory_defaulted", &self.memory_defaulted)
             .field("s3", &self.s3)
@@ -245,6 +251,11 @@ impl BootConfig {
             });
         }
         let memory_raw = get(ENV_MEMORY);
+        let system_core = get(ENV_SYSTEM_CORE).as_deref() == Some("1");
+        // Zonder system-core minstens één core, zoals altijd: een oude kern
+        // gaf nooit 0. Met system-core is 0 de waarheid (de LicheeRV: Hop op
+        // de enige app-core), en plaatst alles via `system`.
+        let cores: u32 = number(&get, ENV_CORES, 1)?;
         Ok(Self {
             node_id: get(ENV_NODE).unwrap_or_else(|| alloc::format!("hopos-{slot}")),
             slot: u32::try_from(slot).unwrap_or(u32::MAX),
@@ -254,7 +265,8 @@ impl BootConfig {
             cluster: get(ENV_CLUSTER).unwrap_or_else(|| String::from("hopos")),
             node_ip: get(ENV_NODE_IP).unwrap_or_else(|| String::from(slot_ip)),
             port,
-            cores: number(&get, ENV_CORES, 1)?.max(1),
+            cores: if system_core { cores } else { cores.max(1) },
+            system_core,
             memory: number(&get, ENV_MEMORY, DEFAULT_MEMORY)?,
             memory_defaulted: memory_raw.is_none(),
             s3: s3(&get),

@@ -342,6 +342,36 @@ fn boot_config_fails_closed_without_a_key() {
 }
 
 #[test]
+fn the_system_core_comes_from_the_env() {
+    let with = |pairs: &[(&str, &'static str)]| {
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| String::from(*v))
+        };
+        let c = BootConfig::from_env(get, 2, "x").unwrap();
+        (c.cores, c.system_core)
+    };
+    let open = ("HOPOS_INSECURE", "1");
+    // De kern zegt het: 0 eigen cores is dan de waarheid.
+    assert_eq!(
+        with(&[open, ("HOPOS_CORES", "0"), ("HOPOS_SYSTEM_CORE", "1")]),
+        (0, true)
+    );
+    assert_eq!(
+        with(&[open, ("HOPOS_CORES", "2"), ("HOPOS_SYSTEM_CORE", "1")]),
+        (2, true)
+    );
+    // Een oude kern: geen system-core, en minstens één core zoals altijd.
+    assert_eq!(with(&[open, ("HOPOS_CORES", "0")]), (1, false));
+    assert_eq!(
+        with(&[open, ("HOPOS_CORES", "3"), ("HOPOS_SYSTEM_CORE", "0")]),
+        (3, false)
+    );
+}
+
+#[test]
 fn the_hub_carries_a_request_and_its_answer() {
     let hub = Hub::new(2);
     let req = Request::new(Method::Get, "/health", b"");

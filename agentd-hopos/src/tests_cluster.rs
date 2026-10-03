@@ -685,6 +685,10 @@ fn clustered(clock: fn() -> bool) -> (TestNode, Queues) {
 }
 
 fn clustered_on(k: &FakeKern, clock: fn() -> bool) -> (TestNode, Queues) {
+    clustered_as(k, &boot_cfg(), clock)
+}
+
+fn clustered_as(k: &FakeKern, cfg: &BootConfig, clock: fn() -> bool) -> (TestNode, Queues) {
     let sys = KernSys::new(k.client(), 4);
     let q = queues();
     let parts = ClusterParts {
@@ -698,10 +702,7 @@ fn clustered_on(k: &FakeKern, clock: fn() -> bool) -> (TestNode, Queues) {
         init_jobs: None,
         node_dead: 20 * SECOND,
     };
-    (
-        Node::new_clustered(&boot_cfg(), sys, NoImages, T0, parts),
-        q,
-    )
+    (Node::new_clustered(cfg, sys, NoImages, T0, parts), q)
 }
 
 fn drain<T, const N: usize>(q: &Mailbox<T, N>) -> Vec<T> {
@@ -732,6 +733,65 @@ fn status(r: &Routed) -> u16 {
 
 fn said(n: &mut TestNode, marker: &str) -> bool {
     n.take_lines().iter().any(|l| l.contains(marker))
+}
+
+/// Een nagebootste LicheeRV (Hop op de enige app-core, dus `HOPOS_CORES=0`)
+/// mét en zonder de OS-core van de kern als `system`; een leader op een
+/// andere node stuurt `POST /run`. Geeft per job de status, en de regels.
+fn run_on_licheerv(system: bool, jobs: &[&str]) -> (Vec<u16>, Vec<String>) {
+    let mut pairs = alloc::vec![
+        ("HOPOS_APIKEY", "test-key"),
+        ("HOPOS_NODE", "lichee"),
+        ("HOPOS_CORES", "0"),
+        ("HOPOS_MEMORY", "268435456"),
+    ];
+    if system {
+        pairs.push(("HOPOS_SYSTEM_CORE", "1"));
+    }
+    let cfg = BootConfig::from_env(env(&pairs), 2, "10.100.0.2").unwrap();
+    assert_eq!((cfg.cores, cfg.system_core), (u32::from(!system), system));
+    let (mut n, _q) = clustered_as(&FakeKern::new(4), &cfg, || true);
+    let codes = jobs
+        .iter()
+        .map(|j| {
+            let req = signed_body(Method::Post, "/run", j);
+            status(&routed(&mut n, Port::Agent, &req, T0))
+        })
+        .collect();
+    (codes, n.take_lines())
+}
+
+const WELCOME: &str = r#"{"name":"welcome","driver":"hop","artifacts":[{"url":"http://x/w.elf"}],"memory_limit":8388608}"#;
+const SECOND_JOB: &str = r#"{"name":"cpu","driver":"hop","artifacts":[{"url":"http://x/c.elf"}],"memory_limit":8388608}"#;
+const SYSTEM_JOB: &str = r#"{"name":"sys","driver":"hop","artifacts":[{"url":"http://x/s.elf"}],"memory_limit":8388608,"tags":{"sharegroup":"system"}}"#;
+const HOP_JOB: &str = r#"{"name":"near","driver":"hop","artifacts":[{"url":"http://x/n.elf"}],"memory_limit":8388608,"tags":{"sharegroup":"hop"}}"#;
+const WIDE_JOB: &str = r#"{"name":"wide","driver":"hop","artifacts":[{"url":"http://x/w2.elf"}],"cpu_shares":2048,"memory_limit":8388608}"#;
+
+#[test]
+fn a_system_core_places_what_has_no_core_of_its_own() {
+    let jobs = [WELCOME, SECOND_JOB, SYSTEM_JOB, HOP_JOB, WIDE_JOB, WIDE_JOB];
+    let (codes, lines) = run_on_licheerv(true, &jobs);
+    assert_eq!(codes, [202, 202, 202, 202, 503, 503]);
+    let refused: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("HOP_NO_CAPACITY"))
+        .collect();
+    assert_eq!(refused.len(), 1, "{lines:?}");
+    assert!(
+        refused[0].contains("job wide refused here: no capacity (cpu;"),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn without_a_system_core_one_core_is_all_there_is() {
+    // Een oude kern: HOPOS_CORES=0 wordt 1, `system` is een gewone groep,
+    // `hop` past altijd (Hop's eigen core).
+    let jobs = [WELCOME, SECOND_JOB, SYSTEM_JOB, HOP_JOB];
+    let (codes, lines) = run_on_licheerv(false, &jobs);
+    assert_eq!(codes, [202, 503, 503, 202]);
+    let refused = lines.iter().filter(|l| l.contains("HOP_NO_CAPACITY"));
+    assert_eq!(refused.count(), 2, "{lines:?}");
 }
 
 #[test]

@@ -48,6 +48,14 @@ pub enum Action {
         /// Wat er gecontroleerd wordt.
         probe: Probe,
     },
+    /// Een job paste niet (503): één regel op het log, één keer per job tot
+    /// hij weer past of weg is.
+    Refused {
+        /// De jobnaam.
+        job: String,
+        /// Wat er op is: `cpu`, `memory` of `partition`.
+        why: &'static str,
+    },
     /// Meld de leader een taakgebeurtenis (`POST /v1/notify`).
     Notify {
         /// De jobnaam.

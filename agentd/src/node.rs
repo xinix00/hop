@@ -479,6 +479,9 @@ impl Node {
                 Action::Probe { task_id, probe } => {
                     let _ = self.probes.send(ProbeJob { task_id, probe });
                 }
+                Action::Refused { job, why } => {
+                    eprintln!("hop: job {job} refused here: no capacity ({why}) HOP_NO_CAPACITY");
+                }
                 Action::Notify { job, event } => self.notify(now, &job, event),
                 // Op de host is er geen overdracht: een herstart van de daemon
                 // begint schoon (Go: `Init`), want de processen van de vorige
