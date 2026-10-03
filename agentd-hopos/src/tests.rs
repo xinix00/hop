@@ -230,6 +230,120 @@ fn post_a_job_and_the_kernel_places_it() {
     );
 }
 
+/// Een node met web geplaatst en een kernbundel op de server; de nep-kern
+/// neemt de FLIP aan als `flip_ok`.
+fn placed_for_a_flip(flip_ok: bool) -> (TestNode, FakeKern) {
+    let k = FakeKern::new(4);
+    k.0.borrow_mut().flip_ok = flip_ok;
+    let sys = KernSys::new(k.client(), 4);
+    let mut images = BTreeMap::new();
+    images.insert(String::from("http://images/web.elf"), ELF.to_vec());
+    images.insert(
+        String::from("http://images/k.flip"),
+        b"\x7fELF-a-kernel-bundle".to_vec(),
+    );
+    let mut n = Node::new(&cfg(), sys, MemImages::new(images), T0);
+    http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
+    assert!(k.0.borrow().slots[&1].placed);
+    n.take_lines();
+    (n, k)
+}
+
+fn cold_flip(n: &mut TestNode) -> (u16, String) {
+    let sum = "ab".repeat(32);
+    let body = format!(r#"{{"url":"http://images/k.flip","sha256":"{sum}","cold":true}}"#);
+    http(n, Port::Agent, wire("POST", "/flip", &body))
+}
+
+/// Wat de leader geplaatst telt en wat de agent heeft, moet hetzelfde zijn.
+fn placed_matches_the_agent(n: &mut TestNode) {
+    let (_, body) = http(n, Port::Agent, wire("GET", "/v1/status", ""));
+    assert!(body.contains("\"web\":1"), "{body}");
+    assert_eq!(n.agent().placed_task_counts().get("web"), Some(&1));
+}
+
+/// De Pi 5 (03-10): de kern weigert de koude flip ná de stop van de
+/// taken. Ze komen terug, en de leader telt niets wat de agent niet heeft.
+#[test]
+fn a_refused_cold_flip_restarts_the_stopped_tasks() {
+    let (mut n, k) = placed_for_a_flip(false);
+    let (status, body) = cold_flip(&mut n);
+    assert_eq!(status, 502, "{body}");
+    let lines = n.take_lines();
+    let at = |m: &str| lines.iter().position(|l| l.contains(m));
+    assert!(at("HOP_FLIP_COLD_STOP stopped=1").is_some(), "{lines:?}");
+    assert!(at("HOP_FLIP_FAIL").is_some(), "{lines:?}");
+    let back = lines
+        .iter()
+        .find(|l| l.contains("HOP_FLIP_COLD_BACK"))
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert!(back.contains("1 stopped task(s) restart"), "{back}");
+    // Gestopt, en weer geplaatst; het bundelslot is opgeruimd.
+    assert!(k.0.borrow().ops.contains(&PrivOp::StopSlot.op()));
+    let slots: Vec<String> = k.0.borrow().slots.values().map(|s| s.job.clone()).collect();
+    assert_eq!(slots, ["web"]);
+    assert_eq!(
+        n.agent().tasks().next().unwrap().state,
+        types::TaskState::Running
+    );
+    placed_matches_the_agent(&mut n);
+}
+
+/// De kern nam de koude flip aan (202) maar sprong niet: een Hop die na
+/// de wachttijd nog leeft, herstart de gestopte taken.
+#[test]
+fn an_accepted_cold_flip_that_never_jumps_brings_the_tasks_back() {
+    let (mut n, k) = placed_for_a_flip(true);
+    let (status, body) = cold_flip(&mut n);
+    assert_eq!(status, 202, "{body}");
+    let lines = n.take_lines();
+    assert!(
+        lines.iter().any(|l| l.contains("HOP_FLIP_ACCEPTED")),
+        "{lines:?}"
+    );
+    // Gestopt bij de kern, maar het record blijft: de leader telt hem nog,
+    // en terecht.
+    assert!(k.0.borrow().slots.is_empty());
+    assert_eq!(
+        n.agent().tasks().next().unwrap().state,
+        types::TaskState::Stopping
+    );
+    placed_matches_the_agent(&mut n);
+    // Binnen de wachttijd: niets.
+    block_on(n.tick(T0 + 29 * types::time::SECOND));
+    assert!(k.0.borrow().slots.is_empty());
+    assert!(
+        !n.take_lines()
+            .iter()
+            .any(|l| l.contains("HOP_FLIP_COLD_BACK"))
+    );
+    // Erna: de kern sprong niet, dus de taak herstart.
+    block_on(n.tick(T0 + 31 * types::time::SECOND));
+    let lines = n.take_lines();
+    assert!(
+        lines.iter().any(|l| l.contains("HOP_FLIP_COLD_BACK")),
+        "{lines:?}"
+    );
+    assert!(
+        k.0.borrow()
+            .slots
+            .values()
+            .any(|s| s.job == "web" && s.placed)
+    );
+    assert_eq!(
+        n.agent().tasks().next().unwrap().state,
+        types::TaskState::Running
+    );
+    placed_matches_the_agent(&mut n);
+    // Eén keer: de volgende tik zegt het niet opnieuw.
+    block_on(n.tick(T0 + 62 * types::time::SECOND));
+    assert!(
+        !n.take_lines()
+            .iter()
+            .any(|l| l.contains("HOP_FLIP_COLD_BACK"))
+    );
+}
+
 /// Een vervangen artifact onder dezelfde URL: de volgende plaatsing krijgt het nieuwe image.
 ///
 /// Hop houdt geen image vast; elke plaatsing haalt de URL opnieuw (GEMETEN

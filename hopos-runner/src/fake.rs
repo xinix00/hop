@@ -95,6 +95,9 @@ pub struct KernState {
     /// storage layer on board", zoals `kern::system` zonder hopfs (de Pi's
     /// zonder NVMe).
     pub no_storage: bool,
+    /// De FLIP lukt: de kern neemt de bundel aan en geeft het slot terug,
+    /// zoals `kern::system` vóór de sprong. Zonder: een weigering.
+    pub flip_ok: bool,
 }
 
 /// Eén store-call van een app in de nep-kern. De bestanden van de app zijn
@@ -395,6 +398,7 @@ impl FakeKern {
                 k.clock = req.n;
                 ok(0, b"")
             }
+            Some(PrivOp::Flip) if k.flip_ok && k.slots.remove(&req.off).is_some() => ok(0, b""),
             Some(PrivOp::Flip) => err("flip not in the fake kernel"),
             Some(PrivOp::NextStore) => {
                 let Some(c) = k.store_queue.pop_front() else {

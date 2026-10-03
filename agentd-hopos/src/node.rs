@@ -72,6 +72,13 @@ const DYNAMIC_PORT_BASE: u16 = 20_000;
 /// oneindige lus, de volgende tik pakt de rest op.
 const ACTION_ROUNDS: usize = 16;
 
+/// Hoe lang een koude flip die de kern aannam, mag duren voordat Hop hem
+/// geweigerd noemt. Een koude sprong start Hop opnieuw, dus een Hop die
+/// dan nog leeft, sprong niet mee. De kern doet er na zijn antwoord een
+/// halve seconde, de bevriezing van hopfs (hoogstens 2 s), elke bewoner
+/// die Hop liet staan (hoogstens 3 s per stuk) en de app-cores (1 s) over.
+const COLD_FLIP_WAIT: Nanos = 30 * SECOND;
+
 /// Welke API een verzoek krijgt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Port {
@@ -183,6 +190,9 @@ pub struct Node<S, I> {
     kern: SysUsage,
     hop: SysUsage,
     next_measure: Nanos,
+    /// Een koude flip die de kern aannam: leeft deze Hop op dit moment nog,
+    /// dan sprong de kern niet ([`COLD_FLIP_WAIT`]).
+    cold_flip_until: Option<Nanos>,
 }
 
 impl<S: SystemApi, I: Images> Node<S, I> {
@@ -253,6 +263,7 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             kern: SysUsage::default(),
             hop: SysUsage::default(),
             next_measure: now,
+            cold_flip_until: None,
         }
     }
 
@@ -507,10 +518,12 @@ impl<S: SystemApi, I: Images> Node<S, I> {
     /// op deze node, en vraag de kern de flip (crate::flip).
     ///
     /// De taken stoppen pas ná de download: een URL die niet werkt, laat
-    /// alles draaien. Ze stoppen via de agent (`stop_all`, dezelfde
-    /// Stop-acties als een preemptie), dus de jobs blijven in de staat op
-    /// hopfs en de koud herstarte Hop plaatst ze opnieuw; weigert de kern,
-    /// dan doet deze Hop dat bij zijn volgende tik.
+    /// alles draaien. Ze stoppen via de agent (`hold_for_flip`, dezelfde
+    /// Stop-acties als een preemptie, maar de records blijven), dus de jobs
+    /// blijven in de staat op hopfs en de koud herstarte Hop plaatst ze
+    /// opnieuw. Weigert de kern (de FLIP geeft een fout, of deze Hop leeft
+    /// na [`COLD_FLIP_WAIT`] nog), dan herstarten ze hier
+    /// ([`Node::cold_flip_back`]).
     async fn flip(&mut self, url: &str, sha256: &str, cold: bool, now: Nanos) -> Result<(), String>
     where
         S: crate::flip::KernFlip,
@@ -520,14 +533,30 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             "hop: kernel flip{how} requested from {url} HOP_FLIP"
         ));
         let slot = crate::flip::fetch(self.runner.system_mut(), &mut self.images, url).await?;
-        if cold {
-            let n = self.agent.stop_all();
-            self.drain(now).await;
-            self.lines.push(format!(
-                "hop: cold flip: {n} task(s) on this node stopped, their jobs come back after the new kernel HOP_FLIP_COLD_STOP stopped={n}"
-            ));
+        if !cold {
+            return crate::flip::ask(self.runner.system_mut(), slot, sha256, false).await;
         }
-        crate::flip::ask(self.runner.system_mut(), slot, sha256, cold).await
+        let n = self.agent.hold_for_flip();
+        self.drain(now).await;
+        self.lines.push(format!(
+            "hop: cold flip: {n} task(s) on this node stopped, their jobs come back after the new kernel HOP_FLIP_COLD_STOP stopped={n}"
+        ));
+        let r = crate::flip::ask(self.runner.system_mut(), slot, sha256, true).await;
+        match r {
+            Ok(()) => self.cold_flip_until = Some(now.saturating_add(COLD_FLIP_WAIT)),
+            Err(_) => self.cold_flip_back(now).await,
+        }
+        r
+    }
+
+    /// De koude flip ging niet door: de taken die hij stopte, herstarten.
+    async fn cold_flip_back(&mut self, now: Nanos) {
+        self.cold_flip_until = None;
+        let n = self.agent.resume_after_flip(now);
+        self.lines.push(format!(
+            "hop: cold flip refused by the kernel, {n} stopped task(s) restart HOP_FLIP_COLD_BACK"
+        ));
+        self.drain(now).await;
     }
 
     /// Een verzoek aan de leader, met de eigen agent als transport.
@@ -755,6 +784,9 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             if let Err(e) = self.leader.tick(Time(now), &mut net) {
                 self.lines.push(format!("hop: leader tick: {e}"));
             }
+        }
+        if self.cold_flip_until.is_some_and(|t| now >= t) {
+            self.cold_flip_back(now).await;
         }
         let actions = self.agent.tick(now);
         self.run_actions(now, actions).await;

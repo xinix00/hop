@@ -218,6 +218,33 @@ fn agent_stop_all_tasks() {
 }
 
 #[test]
+fn a_cold_flip_holds_the_tasks_and_a_refusal_restarts_them() {
+    let mut a = agent();
+    let id = run_ok(&mut a, T0, job("a"));
+    let mut j = job("dead");
+    j.max_restarts = Some(0);
+    let dead = run_ok(&mut a, T0, j);
+    a.on_status(T0, &dead, Status::Failed);
+    a.take_actions();
+    // Elke taak stopt bij de runner, maar het record blijft: de reservering
+    // en de telling van de leader (`placed_task_counts`) kloppen.
+    assert_eq!(a.hold_for_flip(), 2);
+    assert_eq!(stops(&a.take_actions()).len(), 2);
+    assert_eq!(a.task(&id).unwrap().state, TaskState::Stopping);
+    assert_eq!(a.placed_task_counts().get("a"), Some(&1));
+    // Een tik herstart niets en pollt niets zolang de flip in de lucht is.
+    assert!(a.tick(T0 + 60 * S).is_empty());
+    // De kern sprong niet: de vastgehouden taak herstart, de mislukte niet.
+    assert_eq!(a.resume_after_flip(T0 + 61 * S), 1);
+    let acts = a.take_actions();
+    assert_eq!(starts(&acts).len(), 1);
+    assert!(a.task(&id).is_none(), "replaced by a fresh attempt");
+    assert_eq!(a.task(&dead).unwrap().state, TaskState::Failed);
+    assert_eq!(a.placed_task_counts().get("a"), Some(&1));
+    assert_eq!(a.resume_after_flip(T0 + 62 * S), 0);
+}
+
+#[test]
 fn agent_delete_job_with_multiple_tasks() {
     let mut a = agent();
     for _ in 0..3 {

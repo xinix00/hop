@@ -34,6 +34,9 @@ pub(crate) struct Entry {
     pub(crate) first_start: bool,
     /// Of de runner hem op dit moment start.
     pub(crate) starting: bool,
+    /// Gestopt voor een koude flip ([`Agent::hold_for_flip`]): het record
+    /// blijft tot de kern springt of weigert.
+    pub(crate) held: bool,
 }
 
 /// De capaciteit van de node zoals `/capacity` hem meldt.
@@ -473,6 +476,7 @@ impl Agent {
                 restart_at: None,
                 first_start,
                 starting: false,
+                held: false,
             },
         );
     }
@@ -893,6 +897,53 @@ impl Agent {
             self.remove_and_stop(id);
         }
         ids.len()
+    }
+
+    /// De koude flip: elke taak stopt bij de runner, maar het record blijft
+    /// staan, als `Stopping` zonder herstart; geeft het aantal.
+    ///
+    /// Niet [`Agent::stop_all`]: die haalt de records weg zonder dat de
+    /// leader het hoort, en weigert de kern de sprong, dan telt de leader
+    /// taken als geplaatst die hier niet meer zijn en plaatst hij ze nooit
+    /// opnieuw (de Pi 5, 03-10). Zo houdt elke taak zijn reservering en
+    /// klopt de telling. Springt de kern, dan is deze agent er niet meer;
+    /// weigert hij, dan zet [`Agent::resume_after_flip`] ze terug. Een
+    /// mislukte taak zonder herstart blijft mislukt.
+    pub fn hold_for_flip(&mut self) -> usize {
+        let mut stops = Vec::new();
+        for e in self.tasks.values_mut() {
+            stops.push(stop_action(&e.task));
+            if e.task.state == TaskState::Failed && e.restart_at.is_none() {
+                continue;
+            }
+            e.task.state = TaskState::Stopping;
+            e.restart_at = None;
+            e.held = true;
+        }
+        let n = stops.len();
+        for s in stops {
+            self.push(s);
+        }
+        n
+    }
+
+    /// De koude flip ging niet door: elke taak van [`Agent::hold_for_flip`]
+    /// is mislukt en herstart langs de gewone weg; geeft het aantal.
+    pub fn resume_after_flip(&mut self, now: Nanos) -> usize {
+        let held: Vec<String> = self
+            .tasks
+            .iter()
+            .filter(|(_, e)| e.held)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &held {
+            if let Some(e) = self.tasks.get_mut(id) {
+                e.held = false;
+                e.task.state = TaskState::Failed;
+            }
+            self.restart_fire(now, id);
+        }
+        held.len()
     }
 
     /// Sluit af: geen nieuwe herstarts meer, en elke taak één stoppoging.

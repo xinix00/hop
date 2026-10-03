@@ -25,8 +25,10 @@
 //! vóór de FLIP stopt Hop zijn eigen taken op deze node (`node.rs`), zodat
 //! de kern alleen nog stopt wat Hop niet kende. De kern springt dan zonder
 //! bewoners over te dragen en start Hop koud; de jobs staan in de
-//! agent-staat op hopfs en worden daarna opnieuw geplaatst. Weigert de kern
-//! (een bundel die ook koud niet kan), dan plaatst de agent ze gewoon weer.
+//! agent-staat op hopfs en worden daarna opnieuw geplaatst. De agent houdt
+//! de gestopte taken vast tot dan: weigert de kern (de FLIP geeft een fout,
+//! of hij nam hem aan en sprong toch niet, de Pi 5 op 03-10), dan herstarten
+//! ze (`HOP_FLIP_COLD_BACK`) en klopt de telling van de leader nog.
 
 use alloc::format;
 use alloc::string::String;
