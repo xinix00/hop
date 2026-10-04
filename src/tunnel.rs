@@ -52,7 +52,6 @@ use crate::config::MAX_CONNECTIONS;
 use crate::edge::{self, DialError, Rand};
 use crate::edgeproto::{self, Bundle, Source};
 use crate::ingress::{self, Table, Update};
-use crate::json;
 use crate::origin;
 use crate::register::{self, Answer, ClientInfo, Refusal, Token, Uuid};
 
@@ -612,7 +611,7 @@ async fn config_update(req: &mut Request<'_>, res: &mut Response<'_>) -> leanh2:
         let mut msg = String::new();
         let _ = write!(msg, "{e}");
         let _ = out.write_str(",\"err\":");
-        let _ = json::write_string(&mut out, &msg);
+        let _ = applib::text::json_str(&mut out, &msg);
     }
     out.push('}');
     res.write_header(200, &[("content-type", "application/json")])?;

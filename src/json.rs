@@ -379,23 +379,6 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Schrijft `s` als JSON-tekenreeks, met aanhalingstekens, naar `out`.
-pub(crate) fn write_string(out: &mut impl fmt::Write, s: &str) -> fmt::Result {
-    out.write_char('"')?;
-    for c in s.chars() {
-        match c {
-            '"' => out.write_str("\\\"")?,
-            '\\' => out.write_str("\\\\")?,
-            '\n' => out.write_str("\\n")?,
-            '\r' => out.write_str("\\r")?,
-            '\t' => out.write_str("\\t")?,
-            c if u32::from(c) < 0x20 => write!(out, "\\u{:04x}", u32::from(c))?,
-            c => out.write_char(c)?,
-        }
-    }
-    out.write_char('"')
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,12 +474,5 @@ mod tests {
         })
         .unwrap();
         assert_eq!(got, Some(&br#"{"a": [1, 2]}"#[..]));
-    }
-
-    #[test]
-    fn write_string_escapes() {
-        let mut out = String::new();
-        write_string(&mut out, "a\"b\\c\nd\u{1}é").unwrap();
-        assert_eq!(out, "\"a\\\"b\\\\c\\nd\\u0001é\"");
     }
 }
