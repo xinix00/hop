@@ -12,11 +12,11 @@ types = { path = "../types" }
 config = { path = "../config" }
 discovery = { path = "../discovery" }
 hostnet = { path = "../hostnet" }
-leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.6" }
+leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.9" }
 
 [dev-dependencies]
 # De nep-servers van de tests: leanhttp::serve over een std-socket.
-leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.6" }
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.9" }
 
 [lints]
 workspace = true
