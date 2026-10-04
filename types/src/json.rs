@@ -232,10 +232,15 @@ impl TryClone for Value {
 /// Weigert invoer boven [`MAX_INPUT`], nesting boven [`MAX_DEPTH`], dubbele
 /// sleutels, ongeldige UTF-8 en alles wat na het document nog staat.
 pub fn parse(input: &[u8]) -> Result<Value> {
-    if input.len() > MAX_INPUT {
+    parse_with_limit(input, MAX_INPUT)
+}
+
+/// Parse met een expliciet bytebudget; alle structuurcontroles blijven gelden.
+pub fn parse_with_limit(input: &[u8], limit: usize) -> Result<Value> {
+    if input.len() > limit {
         return Err(Error::TooLarge {
             len: input.len(),
-            max: MAX_INPUT,
+            max: limit,
         });
     }
     let mut p = Parser { b: input, pos: 0 };
@@ -759,6 +764,30 @@ mod tests {
                 max: MAX_INPUT
             })
         );
+    }
+
+    #[test]
+    fn explicit_budget_keeps_the_default_and_structural_limits() {
+        let mut big = alloc::vec![b' '; MAX_INPUT];
+        big.extend_from_slice(b"null");
+        assert!(matches!(parse(&big), Err(Error::TooLarge { .. })));
+        assert_eq!(parse_with_limit(&big, big.len()), Ok(Value::Null));
+        assert!(matches!(
+            parse_with_limit(&big, big.len() - 1),
+            Err(Error::TooLarge { .. })
+        ));
+        for bad in [
+            b"{\"a\":1,\"a\":2}".as_slice(),
+            b"\"\xff\"",
+            b"null trailing",
+        ] {
+            assert!(parse_with_limit(bad, MAX_INPUT * 2).is_err());
+        }
+        let deep = "[".repeat(MAX_DEPTH + 1) + &"]".repeat(MAX_DEPTH + 1);
+        assert!(matches!(
+            parse_with_limit(deep.as_bytes(), MAX_INPUT * 2),
+            Err(Error::TooDeep { .. })
+        ));
     }
 
     #[test]
