@@ -29,7 +29,7 @@ agentd-hopos/  Hop as the HopOS resident: agent + leader in a slot (lib + no_std
 hostnet/    the host side of the net (std): std sockets for leanhttp, block_on, HTTP(S) client, S3 transport
 store/      the lease and the committed cluster state on the host: S3, hoplockserver, a file
 agentd/     the daemon binary (Linux, macOS): agent, election, leader, both APIs, processes and docker
-cli/        the `hop` command: apply, jobs, status, agents, logs, events, delete, flip
+cli/        the `hop` command: apply, jobs, status, agents, logs, events, delete, flip, image
 ```
 
 ## On a host
@@ -50,6 +50,21 @@ the leader to that agent (`/v1/agents/{id}/logs/...`, `/capacity`). An agent
 may sit on an address the CLI cannot reach (a HopOS slot LAN, a private
 network behind the leader); the leader reaches them all. Only `flip` goes to
 an agent itself (`--agent`).
+
+`hop image` talks to no one: it is the HopOS imager. Every HopOS kernel
+carries its node config (`hopos.cfg`) in a 16 KiB config window (a
+`#HOPCFG1 window=16384 len=...` head line, the config, `#` padding: HopOS
+`board/src/cfgwin.rs`); `hop image` finds it in an image, a flip bundle or
+on a card and rewrites it in place, with the Sophgo FIP checksums of the
+LicheeRV fixed up:
+
+```
+hop image hopos-rpi4-headless.img                                   # show the config
+hop image hopos-rpi4-headless.img --config my-node.cfg              # put mine in
+hop image hopos-rpi4-headless.img --config my-node.cfg --write /dev/rdisk4   # and write the card, verified
+hop image hopos-rpi4-headless.img --keep --write /dev/rdisk4        # new image, the card keeps its config
+hop image hopos-o6n-headless.flip --config my-node.cfg              # a bundle: prints the new sha256
+```
 
 Streams (`hop events`, `hop logs -f`) hold a connection thread on the node
 while they run, so a node allows only a few at once (4 on a host, 2 on

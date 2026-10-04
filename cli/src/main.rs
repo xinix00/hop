@@ -3,8 +3,11 @@
 //!
 //! Commando's: `apply` (een jobspec-bestand of vlaggen), `jobs`, `status`,
 //! `agents [id]`, `logs <job|taak>` (met `--follow` een levende tail),
-//! `events`, `delete <job>`, `flip <url> <sha256> [--cold]`. Alles gaat naar de
-//! leader (`--leader`, standaard `localhost:9080`, of `HOP_LEADER`): de
+//! `events`, `delete <job>`, `flip <url> <sha256> [--cold]`, en `image`: de
+//! node-config in het config-venster van een HopOS-image, een flipbundel of
+//! een kaart, en een kaart schrijven (`image.rs`, de Hop-imager van v2, de
+//! enige zonder netwerk). De rest gaat naar de leader (`--leader`,
+//! standaard `localhost:9080`, of `HOP_LEADER`): de
 //! taken via `/v1/tasks`, logs en de capaciteit van een agent via de
 //! doorgifte `/v1/agents/{id}/...`. Alleen de flip gaat naar een agent zelf
 //! (`--agent`). Alles is ondertekend met `--api-key` (of `HOP_API_KEY`); de
@@ -27,6 +30,7 @@
 #![forbid(unsafe_code)]
 
 mod client;
+mod image;
 mod jobspec;
 mod sse;
 mod table;
@@ -57,6 +61,7 @@ Commands:
   events                 Follow the cluster events (SSE /v1/events)
   delete <job>           Delete a job and all its tasks
   flip <url> <sha256>    Replace the kernel of a HopOS node (--agent; --cold stops the apps first)
+  image <file|device>    Show or set the node config in a HopOS image, bundle or card; write a card (hop image --help)
 
 Environment: HOP_LEADER, HOP_AGENT, HOP_API_KEY";
 
@@ -126,6 +131,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "events" => events(&client),
         "delete" => delete(&client, args),
         "flip" => flip(&client, args),
+        "image" => image::run(args),
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
             Ok(())
