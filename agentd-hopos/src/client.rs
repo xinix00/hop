@@ -35,10 +35,6 @@ use leantls::Entropy;
 
 use crate::fetch::{Connect, Resolve, Tcp, Trace, Web};
 
-/// De grootste S3-body van [`Client::s3`]: één byte boven de grens van een
-/// gebufferde GET, zodat leans3 zelf zegt dat een object te groot is.
-const S3_BODY: usize = leans3::MAX_BUFFERED_GET as usize + 1;
-
 /// De zin als `https` wacht op de klok.
 const NO_CLOCK: &str = "no trusted wall clock (SNTP has not succeeded), so certificate dates cannot be checked; https refused";
 
@@ -184,10 +180,10 @@ impl<C: Connect, R: Resolve> Client<C, R> {
     ///
     /// Eén poging binnen `budget` (verbinden, verzoek en hele body), en de
     /// kop ook binnen `budget`: een lease-aanroep heeft één budget, en de
-    /// verkiezing is zelf de herkansing (elke tien seconden). De body hoogstens
-    /// zo groot als leans3 een gebufferde GET toestaat, zodat een lease of
-    /// snapshot nooit meer dan dat in de heap van Hop zet.
-    pub fn s3<K: leans3http::Clock>(
+    /// verkiezing is zelf de herkansing (elke tien seconden). De body streamt
+    /// sinds lean 3.1.12 met dezelfde termijn als voortgangsgrens; de maat van
+    /// een gebufferde GET bewaakt leans3 zelf.
+    pub fn s3<K: leans3http::Clock + Clone>(
         &mut self,
         clock: K,
         budget: Duration,
@@ -196,8 +192,9 @@ impl<C: Connect, R: Resolve> Client<C, R> {
         http.limits = leans3http::Limits {
             deadline: budget,
             header: budget,
-            body: S3_BODY,
+            progress: budget,
             attempts: 1,
+            ..leans3http::Limits::default()
         };
         http
     }

@@ -60,8 +60,8 @@ impl leans3http::Clock for HostClock {
 ///
 /// Eén poging per verzoek: een lease-schrijf die na een 412 nog een HEAD en
 /// een tweede PUT doet, deelt één budget, en de verkiezing is zelf de
-/// herkansing. De body hoogstens zo groot als leans3 een gebufferde GET
-/// toestaat.
+/// herkansing. De body streamt (lean 3.1.12) met `timeout` als
+/// voortgangsgrens; de maat van een gebufferde GET bewaakt leans3 zelf.
 pub fn s3_http(timeout: Duration, until: Instant) -> impl leans3::Transport {
     let mut http = leans3http::Http::new(
         web(Tcp::new(timeout, Some(until), None)),
@@ -70,10 +70,9 @@ pub fn s3_http(timeout: Duration, until: Instant) -> impl leans3::Transport {
     http.limits = leans3http::Limits {
         deadline: timeout,
         header: timeout,
-        body: usize::try_from(leans3::MAX_BUFFERED_GET)
-            .unwrap_or(usize::MAX)
-            .saturating_add(1),
+        progress: timeout,
         attempts: 1,
+        ..leans3http::Limits::default()
     };
     http
 }

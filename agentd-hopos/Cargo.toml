@@ -27,24 +27,24 @@ api = { path = "../api" }
 runner = { path = "../runner" }
 hopos-runner = { path = "../hopos-runner" }
 hop-http = { path = "../hop-http" }
-applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.12" }
+applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.13" }
 # De bouwstenen van het handboek (§2): de rijen van de cluster tussen de
 # eigenaar en de taken die het net op gaan (`sync::mpsc::Mailbox`). Dezelfde
 # tag als applib, dat ze zelf ook gebruikt: één `sync` in het image.
-sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.12" }
+sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.13" }
 # De opcodes, vlaggen en de partitie-indeling van de system-API (de flip).
-abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.12" }
+abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.13" }
 discovery = { path = "../discovery" }
 # De clusterlock op S3 (`HOPOS_S3_*`): de getekende verzoeken, over
 # leans3http (de lease en de staat) of over het eigen stroomtransport van de
 # object-store (`objstore::bucket`, de body op de verbinding).
-leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.11" }
-leans3http = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.11" }
-leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.11" }
+leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
+leans3http = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
 # HTTPS voor artifacts (GitHub releases), de cluster en de bucket:
 # `leanhttps::WebDial` met ketenverificatie tegen `leantls::MOZILLA_ROOTS`.
-leanhttps = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.11", features = ["mozilla-roots"] }
-leantls = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.11", features = ["mozilla-roots"] }
+leanhttps = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12", features = ["mozilla-roots"] }
+leantls = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12", features = ["mozilla-roots"] }
 
 [lints]
 workspace = true
