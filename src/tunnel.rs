@@ -185,6 +185,14 @@ fn stop(index: u8) -> &'static Signal {
     STOPS.get(usize::from(index)).unwrap_or(&STOPS[0])
 }
 
+/// Elke verbinding dicht: de stop van de app. De taken breken hun
+/// verbinding af en komen niet terug ([`keep_connected`]).
+pub(crate) fn close_all() {
+    for s in &STOPS {
+        s.set();
+    }
+}
+
 /// Wat alle verbindingen delen: gezet in `main` vóór de eerste spawn en
 /// daarna alleen gelezen.
 pub(crate) struct Shared {
@@ -254,6 +262,9 @@ pub(crate) async fn keep_connected(sh: &'static Shared, index: u8) {
             .get((usize::from(index) + attempt) % edges)
             .map_or("", String::as_str);
         let (was_up, why) = connect_once(sh, index, name, &mut rand).await;
+        if sh.app.stop().is_set() {
+            return; // De stop van de app: niet opnieuw verbinden.
+        }
         if was_up {
             backoff = BACKOFF_MIN;
         }
@@ -279,7 +290,9 @@ pub(crate) async fn keep_connected(sh: &'static Shared, index: u8) {
             wait.as_millis(),
             UP.load(Relaxed)
         );
-        sh.exec.after(wait).await;
+        if let Either::Left(()) = select(sh.app.stopped(), sh.exec.after(wait)).await {
+            return; // De stop van de app kwam in de backoff.
+        }
         backoff = (backoff * 2).min(BACKOFF_MAX);
     }
 }

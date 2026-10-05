@@ -17,7 +17,9 @@
 //! repo. Markers op de console: `HOPOS_CFTUNNEL_UP` per geregistreerde
 //! verbinding (met het edge-adres en de verbindings-id), `HOPOS_CFTUNNEL_REQ`
 //! voor de eerste zestien verzoeken en daarna elk honderdste,
-//! `HOPOS_CFTUNNEL_FAIL <reden>` als de tunnel stopt. De README heeft de
+//! `HOPOS_CFTUNNEL_FAIL <reden>` als de tunnel stopt, `HOPOS_CFTUNNEL_STOP`
+//! als de kern de app vraagt te stoppen (elke verbinding gaat dan dicht). De
+//! README heeft de
 //! jobspec.
 
 #![cfg_attr(target_os = "none", no_std, no_main)]
@@ -51,6 +53,7 @@ use core::fmt;
 use applib::appnet;
 use applib::rt::Exec;
 use applib::{App, EXEC, log};
+use sync::{Either, select};
 
 use crate::config::Config;
 use crate::register::Uuid;
@@ -111,15 +114,23 @@ async fn cloudflared(app: &'static App) {
             return fail(app, Reason("spawning a connection task", &e)).await;
         }
     }
-    // De taken lopen tot de kern het slot opruimt; alleen als de edge élke
-    // verbinding "niet opnieuw" zei (een ingetrokken token), stopt de app,
-    // want dan is stoppen eerlijker dan blijven hangen.
-    GAVE_UP.wait().await;
-    fail(
-        app,
-        "the edge refused every connection and said not to retry",
-    )
-    .await;
+    // De taken lopen tot de kern vraagt te stoppen (dan gaat elke verbinding
+    // dicht en doet de main-schil het net-afscheid); alleen als de edge
+    // élke verbinding "niet opnieuw" zei (een ingetrokken token), stopt de
+    // app zelf, want dan is stoppen eerlijker dan blijven hangen.
+    match select(app.stopped(), GAVE_UP.wait()).await {
+        Either::Left(()) => {
+            log!("cloudflared-lean: stopping, closing the tunnel HOPOS_CFTUNNEL_STOP");
+            tunnel::close_all();
+        }
+        Either::Right(()) => {
+            fail(
+                app,
+                "the edge refused every connection and said not to retry",
+            )
+            .await;
+        }
+    }
 }
 
 /// Een reden met de fout die erbij hoort.
