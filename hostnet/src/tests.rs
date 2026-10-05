@@ -106,11 +106,6 @@ fn dial_failure_says_where() {
     );
 }
 
-#[test]
-fn roots_parse() {
-    assert!(Http::new().root_count() > 100);
-}
-
 /// Een server die de kop meteen stuurt en de body van `len` bytes daarna
 /// byte voor byte druppelt, één per `every`.
 fn dripping(len: usize, every: Duration) -> String {

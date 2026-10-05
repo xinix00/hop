@@ -236,8 +236,7 @@ pub(crate) fn download_s3(
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result {
     let (client, key) = s3_client(a)?;
-    let http = Http::new();
-    let mut transport = S3Transport::new(&http, DOWNLOAD_TIMEOUT);
+    let mut transport = S3Transport::new(DOWNLOAD_TIMEOUT);
     let mut w = S3Sink {
         out: sink,
         written: 0,

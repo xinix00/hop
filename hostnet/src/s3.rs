@@ -1,60 +1,93 @@
-//! Het leans3-transport van de host: één getekend verzoek over een verse verbinding.
+//! Het S3-transport van de host: `leans3http` voor de lease en de staat, en één gestroomd transport voor downloads.
 //!
-//! Bezit per verzoek één verbinding en geeft die met het antwoord mee: de
-//! body wordt uit dezelfde socket gelezen. Een getekend verzoek volgt nooit
-//! een redirect (de handtekening dekt host en pad), daarom `leanhttp::send`
-//! op een zelf gedialde verbinding en geen `fetch`.
+//! [`s3_http`] is het transport van één backend-aanroep (`store`): leans3http
+//! over de webdialer van de host, één poging per verzoek, alles binnen de
+//! totale grens van de aanroep (de std-verbinding draagt hem, zie
+//! [`StdConn::with_limit`](crate::StdConn::with_limit)).
+//!
+//! [`S3Transport`] blijft voor `get_to` van grote objecten (een artifact van
+//! de runner): leans3http leest elke antwoordbody eerst helemaal in het
+//! geheugen (tot `Limits::body`, 32 MiB), en een download van honderden MB
+//! moet hap voor hap naar de schijf. Dit transport geeft het antwoord met
+//! de body nog op de verbinding. Een getekend verzoek volgt nooit een
+//! redirect (de handtekening dekt host en pad), daarom `leanhttp::send` op
+//! een zelf gedialde verbinding en geen `fetch`.
 
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use leanhttp::Target;
 use leans3::IoError;
-use leantls::Trust;
 
-use crate::client::{Dialer, HostConn, Http, OUT_OF_TIME};
+use crate::client::{HostConn, Tcp, web};
 
-/// `leans3::Transport` over de host-client.
+/// De klok van leans3http op de host: monotoon vanaf het maken van het transport.
 #[derive(Clone, Copy, Debug)]
-pub struct S3Transport<'h> {
-    http: &'h Http,
-    timeout: Duration,
-    /// De totale grens van elk verzoek over dit transport.
-    until: Option<Instant>,
+struct HostClock {
+    origin: Instant,
 }
 
-impl<'h> S3Transport<'h> {
-    /// Een transport over `http` met termijn `timeout` per fase.
-    pub fn new(http: &'h Http, timeout: Duration) -> Self {
+impl Default for HostClock {
+    fn default() -> Self {
         Self {
-            http,
-            timeout,
-            until: None,
+            origin: Instant::now(),
         }
     }
+}
 
-    /// Zet een totale grens: elk verzoek over dit transport (verbinden,
-    /// TLS, kop en body) is klaar vóór `at`, of faalt met een termijnfout.
-    ///
-    /// Eén transport per backend-aanroep, dus één grens per aanroep: een
-    /// lease-schrijf die na een 412 nog een HEAD en een tweede PUT doet,
-    /// deelt één budget in plaats van er drie te krijgen.
-    #[must_use]
-    pub fn until(mut self, at: Instant) -> Self {
-        self.until = Some(at);
-        self
+impl leans3http::Clock for HostClock {
+    fn now(&self) -> Duration {
+        self.origin.elapsed()
     }
 
-    /// De kop-termijn: de fasetermijn, maar niet voorbij de grens.
-    fn header_timeout(&self) -> Duration {
-        match self.until {
-            Some(at) => self
-                .timeout
-                .min(at.saturating_duration_since(Instant::now())),
-            None => self.timeout,
-        }
+    /// Een wekker die [`crate::block_on`] pollt; de verbindingen blokkeren,
+    /// dus de termijn van een poging dragen hun sockets.
+    fn sleep(&self, d: Duration) -> impl Future<Output = ()> {
+        let at = Instant::now() + d;
+        poll_fn(move |_| {
+            if Instant::now() >= at {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+    }
+}
+
+/// Een transport met `timeout` per fase en alles klaar vóór `until`.
+///
+/// Eén poging per verzoek: een lease-schrijf die na een 412 nog een HEAD en
+/// een tweede PUT doet, deelt één budget, en de verkiezing is zelf de
+/// herkansing. De body hoogstens zo groot als leans3 een gebufferde GET
+/// toestaat.
+pub fn s3_http(timeout: Duration, until: Instant) -> impl leans3::Transport {
+    let mut http = leans3http::Http::new(
+        web(Tcp::new(timeout, Some(until), None)),
+        HostClock::default(),
+    );
+    http.limits = leans3http::Limits {
+        deadline: timeout,
+        header: timeout,
+        body: usize::try_from(leans3::MAX_BUFFERED_GET)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1),
+        attempts: 1,
+    };
+    http
+}
+
+/// `leans3::Transport` met de body op de verbinding, voor gestroomde GET's.
+#[derive(Clone, Copy, Debug)]
+pub struct S3Transport {
+    timeout: Duration,
+}
+
+impl S3Transport {
+    /// Een transport met termijn `timeout` per fase.
+    pub fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 }
 
@@ -94,15 +127,15 @@ fn split_host(host: &str, https: bool) -> (&str, u16) {
     }
 }
 
-impl leans3::Transport for S3Transport<'_> {
+impl leans3::Transport for S3Transport {
     type Response = S3Response;
 
     async fn send(&mut self, req: leans3::Request<'_, '_>) -> Result<S3Response, IoError> {
         let body = match req.body {
             leans3::Body::None => None,
             leans3::Body::Bytes(b) => Some(b),
-            // De gebruikers van deze crate schrijven alleen kleine objecten
-            // (lease, snapshot); een gestroomde PUT heeft nog geen klant.
+            // Dit transport is voor gestroomde GET's; een gestroomde PUT
+            // heeft geen klant (de kleine objecten gaan over [`s3_http`]).
             leans3::Body::Stream { .. } => {
                 return Err(IoError::Other("hostnet: streamed PUT is not supported"));
             }
@@ -116,29 +149,21 @@ impl leans3::Transport for S3Transport<'_> {
                 .map_err(|_| IoError::Other("invalid header"))?;
         }
         let (host, port) = split_host(req.host, req.https);
-        let verifier = self.http.verifier();
-        let trust = verifier.as_ref().map(|v| Trust::Chain(v));
-        let mut dial = Dialer::new(trust, self.timeout).with_limit(self.until);
-        let conn = dial
-            .hop(Target {
-                https: req.https,
-                host,
-                port,
-            })
+        let mut dial = web(Tcp::new(self.timeout, None, None));
+        let target = Target {
+            https: req.https,
+            host,
+            port,
+        };
+        let conn = leanhttp::Dial::dial(&mut dial, target)
             .await
-            .map_err(|why| {
-                if why.ends_with(OUT_OF_TIME) {
-                    IoError::TimedOut
-                } else {
-                    IoError::Other("dial failed")
-                }
-            })?;
+            .map_err(|e| io_error(&e))?;
         let call = leanhttp::Call {
             method: req.method,
             url: &url,
             header,
             body,
-            header_timeout: Some(self.header_timeout()),
+            header_timeout: Some(self.timeout),
             no_follow: true,
             ..leanhttp::Call::default()
         };

@@ -20,6 +20,7 @@ use std::rc::Rc;
 use abi::systemapi::SlotInfo;
 use agent::{LeaseOp, LeaseReply, LinkError, Request as LinkRequest};
 use api::{Method, Request, TasksScope};
+use applib::rand::Rng;
 use discovery::{Discovery, LeaseState};
 use hopos_runner::KernSys;
 use hopos_runner::fake::FakeKern;
@@ -28,7 +29,6 @@ use leanhttp::{AsyncRead, AsyncWrite, Close, IoError};
 use sync::mpsc::Mailbox;
 
 use crate::client::Client;
-use crate::entropy::Pool;
 use crate::env::{BootConfig, BootError, S3Config};
 use crate::fetch::{Connect, IpOnly};
 use crate::forward::{self, Forward, Routed, Source};
@@ -113,7 +113,7 @@ impl FakeNet {
     }
 
     fn client(&self) -> Client<FakeNet, IpOnly> {
-        Client::new(self.clone(), IpOnly, Pool::new(b"test"), || None)
+        Client::new(self.clone(), IpOnly, Rng::from_seed(b"test", || 0), || None)
     }
 }
 
@@ -1425,7 +1425,7 @@ fn a_failed_forward_is_a_loud_502() {
             Err(String::from("connection refused"))
         }
     }
-    let mut c = Client::new(Refused, IpOnly, Pool::new(b"t"), || None);
+    let mut c = Client::new(Refused, IpOnly, Rng::from_seed(b"t", || 0), || None);
     let resp = block_on(forward::to_agent(
         &mut c,
         "http://10.0.0.6:8080",

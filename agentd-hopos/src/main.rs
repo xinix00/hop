@@ -61,7 +61,6 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::future::{Future, poll_fn};
 use core::pin::pin;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -70,18 +69,17 @@ use core::time::Duration;
 
 use agentd_hopos::client::{Client, Idle};
 use agentd_hopos::download::{self, Orders, Piece, PieceRx, Pieces};
-use agentd_hopos::entropy::{HARVEST_ROUNDS, Pool};
 use agentd_hopos::env::INIT_JOBS_FILE;
 use agentd_hopos::forward::{self, Routed, STREAM_IDLE};
 use agentd_hopos::lock::{self, ClusterConfig};
 use agentd_hopos::mail::{DispatchQueue, Inbox, LeaseQueue, LinkQueue, Mail, Nap, StateQueue};
 use agentd_hopos::sntp::{self, NtpLink, PACKET};
 use agentd_hopos::{
-    Answer, BootConfig, Clock, ClusterParts, Connect, Handoff, HttpImages, Hub, Images, Node, Port,
+    Answer, BootConfig, ClusterParts, Connect, Handoff, HttpImages, Hub, Images, Node, Port,
     Question, Resolve,
 };
 use applib::appnet::{self, Endpoint, Net, NetError, TcpListener, TcpStream};
-use applib::rand::{Origin, Rng};
+use applib::rand::{JITTER_ROUNDS, Origin, Rng};
 use applib::rt::Exec;
 use applib::{App, EXEC, log};
 use discovery::Discovery;
@@ -259,26 +257,6 @@ impl Resolve for SlotResolver {
     }
 }
 
-/// De klok van de downloader: de wandklok van de kern, maar alleen
-/// vertrouwd na SNTP.
-struct SlotClock {
-    app: &'static App,
-    exec: &'static Exec,
-}
-
-impl Clock for SlotClock {
-    fn trusted_unix_secs(&self) -> Option<u64> {
-        if !CLOCK_SYNCED.load(Relaxed) {
-            return None;
-        }
-        self.app.wall_ns().map(|ns| ns / 1_000_000_000)
-    }
-
-    fn mono_ns(&self) -> u64 {
-        self.exec.now()
-    }
-}
-
 /// SNTP over een UDP-socket van het slot, naar `port` van de server.
 struct UdpLink {
     net: &'static Net,
@@ -397,17 +375,13 @@ async fn store_task(
             secret: c.secret,
             path_style: c.path_style,
         };
-        // Een eigen pool: de handshakes van de store delen geen staat met
-        // die van de downloader (de waarschuwing over de bron gaf entropy()).
-        let mut pool = Pool::new(&app.slot().to_le_bytes());
-        pool.stir(&exec.now().to_le_bytes());
-        pool.harvest(applib::clock::now_ns, HARVEST_ROUNDS);
-        kernel_seed(app, &mut pool);
+        // Een eigen DRBG: de handshakes van de store delen geen staat met
+        // die van de downloader (de regel over de bron gaf entropy()).
         let b = bucket::S3Bucket::new(
             &cfg,
             SlotConnect { net, exec },
             SlotResolver,
-            pool,
+            quiet_rng(app, 6),
             wall_secs,
             trusted_secs,
         );
@@ -469,52 +443,33 @@ async fn store_task(
     }
 }
 
-/// De willekeur voor TLS: het slot, de klok, de jitter van de teller, en
-/// het zaad dat de kern op de control-page legt (`applib::rand`). Eén
-/// regel over de bron: `HOP_TLS_ENTROPY_HW` als dat zaad uit een
+/// De willekeur voor TLS: de DRBG van applib (`applib::rand::Rng`), gezaaid
+/// uit het zaad dat de kern op de control-page legt en de jitter van de
+/// teller, en bij elke trekking herzaaid als de kern een nieuw zaad legde.
+/// Eén regel over de bron: `HOP_TLS_ENTROPY_HW` als dat zaad uit een
 /// hardware-RNG komt, anders `HOP_TLS_ENTROPY_WEAK` met de reden.
-fn entropy(app: &App, exec: &'static Exec) -> Pool {
-    let mut seed = Vec::new();
-    seed.extend_from_slice(&app.slot().to_le_bytes());
-    seed.extend_from_slice(&app.wall_ns().unwrap_or(0).to_le_bytes());
-    seed.extend_from_slice(&exec.now().to_le_bytes());
-    let mut pool = Pool::new(&seed);
-    pool.harvest(applib::clock::now_ns, HARVEST_ROUNDS);
-    match kernel_seed(app, &mut pool) {
+fn entropy(app: &App) -> Rng {
+    let rng = Rng::open(app);
+    match rng.origin() {
         o if o.is_hardware() => log!(
-            "hop: TLS randomness from the kernel seed ({o}, hardware) mixed with timer jitter ({HARVEST_ROUNDS} samples) HOP_TLS_ENTROPY_HW source={o}"
+            "hop: TLS randomness from the kernel seed ({o}, hardware) mixed with timer jitter ({JITTER_ROUNDS} samples) HOP_TLS_ENTROPY_HW source={o}"
         ),
         Origin::None => log!(
-            "hop: TLS randomness from timer jitter only ({HARVEST_ROUNDS} samples): the kernel put no seed on the control page (an older kernel) HOP_TLS_ENTROPY_WEAK"
+            "hop: TLS randomness from timer jitter only ({JITTER_ROUNDS} samples): the kernel put no seed on the control page (an older kernel) HOP_TLS_ENTROPY_WEAK"
         ),
         o => log!(
-            "hop: TLS randomness from the kernel seed and timer jitter ({HARVEST_ROUNDS} samples), but the kernel seeds itself from {o}: this node has no hardware RNG HOP_TLS_ENTROPY_WEAK"
+            "hop: TLS randomness from the kernel seed and timer jitter ({JITTER_ROUNDS} samples), but the kernel seeds itself from {o}: this node has no hardware RNG HOP_TLS_ENTROPY_WEAK"
         ),
     }
-    pool
+    rng
 }
 
-/// Mengt 32 bytes uit de DRBG van applib (het zaad van de kern plus
-/// jitter) in `pool` en geeft de bron van dat zaad.
-fn kernel_seed(app: &App, pool: &mut Pool) -> Origin {
+/// Een eigen DRBG voor een client van de cluster, de flip of de store
+/// (`tag` mengt de eigenaar erin); dezelfde bron, zonder de regel opnieuw.
+fn quiet_rng(app: &App, tag: u8) -> Rng {
     let mut rng = Rng::open(app);
-    let mut b = rng.array::<32>();
-    pool.stir(&b);
-    b.fill(0);
-    rng.origin()
-}
-
-/// Een eigen pool voor een client van de cluster of de flip (`tag` maakt hem anders
-/// dan die van de downloader); dezelfde bron, zonder de regel opnieuw.
-fn quiet_pool(app: &App, exec: &'static Exec, tag: u8) -> Pool {
-    let mut seed = Vec::new();
-    seed.push(tag);
-    seed.extend_from_slice(&app.slot().to_le_bytes());
-    seed.extend_from_slice(&exec.now().to_le_bytes());
-    let mut pool = Pool::new(&seed);
-    pool.harvest(applib::clock::now_ns, HARVEST_ROUNDS);
-    kernel_seed(app, &mut pool);
-    pool
+    rng.stir(&[tag]);
+    rng
 }
 
 /// Een HTTP-client van de cluster over de netstack van het slot.
@@ -528,7 +483,7 @@ fn cluster_client(
     Client::new(
         ClusterConnect { net, exec, idle },
         SlotResolver,
-        quiet_pool(app, exec, tag),
+        quiet_rng(app, tag),
         trusted_secs,
     )
 }
@@ -892,12 +847,9 @@ async fn resident(app: &'static App) {
     let images = HttpImages::new(
         SlotConnect { net, exec },
         SlotResolver,
-        SlotClock { app, exec },
-        entropy(app, exec),
+        trusted_secs,
+        entropy(app),
     );
-    if images.root_count() == 0 {
-        log!("hop: the built-in root certificates did not parse; https refused HOP_TLS_NO_ROOTS");
-    }
     // De artifacts haalt de downloadtaak; de node houdt een eigen
     // downloader voor de kernbundel van een flip (zeldzaam, en die wacht op
     // de kern zelf, crate::flip).
@@ -912,8 +864,8 @@ async fn resident(app: &'static App) {
     let images = HttpImages::new(
         SlotConnect { net, exec },
         SlotResolver,
-        SlotClock { app, exec },
-        quiet_pool(app, exec, 5),
+        trusted_secs,
+        quiet_rng(app, 5),
     );
     // Het adres zoals de andere nodes deze node zien (achter een NAT anders
     // dan het slot-adres); de listeners blijven op de poorten van `cfg`.

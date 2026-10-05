@@ -1,10 +1,11 @@
-//! De HTTP(S)-client van de host: leanhttp over [`StdConn`], TLS via leanhttps.
+//! De HTTP(S)-client van de host: leanhttp over [`StdConn`], TLS via `leanhttps::WebDial`.
 //!
-//! Bezit de wortels (één keer gelezen) en per verzoek een dialer. Elke hop
-//! (ook na een redirect) zoekt zijn host op met de resolver van het OS,
-//! opent TCP met een termijn, en kiest dan zelf: kaal voor `http://`, TLS
-//! met ketenverificatie voor `https://`. leanhttp volgt redirects alleen
-//! voor GET en HEAD en weigert `https` naar `http`.
+//! Bezit per verzoek een dialer: de kale std-dial ([`Tcp`]: opzoeken met de
+//! resolver van het OS, TCP met een termijn, elke mislukking een eigen zin)
+//! en daarboven `leanhttps::WebDial`: kaal voor `http://`, TLS met
+//! ketenverificatie tegen `leantls::MOZILLA_ROOTS` voor `https://`, met SNI
+//! per hop en verse entropie van het OS per handshake. leanhttp volgt
+//! redirects alleen voor GET en HEAD en weigert `https` naar `http`.
 //!
 //! De datum van de ketentoets is de systeemklok. Op HopOS wacht de
 //! downloader op SNTP; een host heeft een klok die het OS bijhoudt, en een
@@ -13,31 +14,20 @@
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use leanhttp::{AsyncRead, AsyncWrite, Close, IoError, Target};
-use leanhttps::{TlsConn, TlsDial};
-use leantls::{ChainVerifier, Entropy, Roots, Trust};
+use leanhttp::{IoError, Target};
+use leanhttps::{Link, WebDial};
+use leantls::Entropy;
 
 use crate::conn::StdConn;
 use crate::exec::block_on;
 
-/// De vertrouwde wortels: de Mozilla-set (NSS `certdata.txt`) van juli 2026,
-/// 119 certificaten als aaneengeschakelde DER.
-///
-/// Dezelfde bytes als de HopOS-bewoner (`agentd-hopos/roots.der`, gekopieerd
-/// op 29-09-2026 uit lean v3.1.1, commit db67247); één bestand in de repo,
-/// zodat host en bewoner niet uiteenlopen. Vervangen is een nieuwe kopie
-/// daar, met de datum mee.
-pub const ROOTS_DER: &[u8] = include_bytes!("../../agentd-hopos/roots.der");
-
 /// Hoeveel van een foutbody bewaard wordt voor de melding: 4 KiB.
 const ERROR_BODY: usize = 4 << 10;
 
-/// De zin van een dial die geen tijd meer had binnen de totale grens; het
-/// S3-transport herkent hem en meldt een termijn in plaats van "dial failed".
-pub(crate) const OUT_OF_TIME: &str = "the call ran out of its total time";
+/// De zin van een dial die geen tijd meer had binnen de totale grens.
+const OUT_OF_TIME: &str = "the call ran out of its total time";
 
 /// De leesbuffer van een gestroomde download.
 const STREAM_BUF: usize = 64 << 10;
@@ -143,219 +133,140 @@ pub fn entropy() -> std::io::Result<[u8; Entropy::LEN]> {
     Ok(out)
 }
 
-/// Een verbinding van de client: kaal of in TLS.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "één verbinding per verzoek, en TLS is het gewone geval; boxen kost een allocatie per hop voor niets"
-)]
-pub enum HostConn {
-    /// `http://`.
-    Plain(StdConn<TcpStream>),
-    /// `https://`.
-    Tls(TlsConn<StdConn<TcpStream>>),
-}
+/// Een verbinding van de client: kaal of in TLS (`leanhttps::Link`).
+pub type HostConn = Link<StdConn<TcpStream>>;
 
-impl AsyncRead for HostConn {
-    fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<Result<usize, IoError>> {
-        match self {
-            Self::Plain(c) => c.poll_read(cx, buf),
-            Self::Tls(c) => c.poll_read(cx, buf),
-        }
-    }
-
-    fn set_read_timeout(&mut self, t: Option<Duration>) -> Result<(), IoError> {
-        match self {
-            Self::Plain(c) => c.set_read_timeout(t),
-            Self::Tls(c) => c.set_read_timeout(t),
-        }
-    }
-}
-
-impl AsyncWrite for HostConn {
-    fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, IoError>> {
-        match self {
-            Self::Plain(c) => c.poll_write(cx, buf),
-            Self::Tls(c) => c.poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
-        match self {
-            Self::Plain(c) => c.poll_flush(cx),
-            Self::Tls(c) => c.poll_flush(cx),
-        }
-    }
-
-    fn set_write_timeout(&mut self, t: Option<Duration>) -> Result<(), IoError> {
-        match self {
-            Self::Plain(c) => c.set_write_timeout(t),
-            Self::Tls(c) => c.set_write_timeout(t),
-        }
-    }
-}
-
-impl Close for HostConn {
-    fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
-        match self {
-            Self::Plain(c) => c.poll_close(cx),
-            Self::Tls(c) => c.poll_close(cx),
-        }
-    }
-}
-
-/// Een dialer die één al geopende verbinding geeft: de TCP-kant onder
-/// leanhttps, zodat die alleen de handshake doet.
-struct Ready(Option<StdConn<TcpStream>>);
-
-impl leanhttp::Dial for Ready {
-    type Conn = StdConn<TcpStream>;
-
-    async fn dial(&mut self, _target: Target<'_>) -> leanhttp::Result<Self::Conn> {
-        self.0.take().ok_or(leanhttp::Error::Connect)
-    }
-}
-
-/// De dialer van één verzoek; onthoudt waarom de laatste dial faalde.
-pub(crate) struct Dialer<'t> {
-    trust: Option<Trust<'t>>,
-    timeout: Duration,
-    /// De totale grens van de aanroep; de verbinding krijgt hem mee.
-    limit: Option<Instant>,
+/// Wat de std-dial van de laatste hop zag: de host, en waarom hij faalde.
+#[derive(Debug, Default)]
+pub(crate) struct Trace {
+    host: String,
     why: Option<String>,
 }
 
-impl<'t> Dialer<'t> {
-    pub(crate) fn new(trust: Option<Trust<'t>>, timeout: Duration) -> Self {
-        Self {
-            trust,
-            timeout,
-            limit: None,
-            why: None,
-        }
-    }
+/// De kale TCP-dial van de host: opzoeken met de resolver van het OS, TCP
+/// met een termijn, binnen de totale grens van de aanroep.
+pub(crate) struct Tcp<'t> {
+    timeout: Duration,
+    /// De totale grens van de aanroep; de verbinding krijgt hem mee.
+    limit: Option<Instant>,
+    /// Waar de zin van een mislukking heen gaat; `None` als niemand hem leest.
+    trace: Option<&'t mut Trace>,
+}
 
-    /// Zet de totale grens van de aanroep (zie [`StdConn::with_limit`]).
-    pub(crate) fn with_limit(mut self, at: Option<Instant>) -> Self {
-        self.limit = at;
-        self
+impl<'t> Tcp<'t> {
+    /// Een dial met `timeout` per fase, binnen `limit`, die in `trace` schrijft.
+    pub(crate) fn new(
+        timeout: Duration,
+        limit: Option<Instant>,
+        trace: Option<&'t mut Trace>,
+    ) -> Self {
+        Self {
+            timeout,
+            limit,
+            trace,
+        }
     }
 
     /// De verbindtermijn: de fasetermijn, maar niet voorbij de grens.
-    fn connect_timeout(&self) -> Result<Duration, String> {
+    fn connect_timeout(&self) -> Option<Duration> {
         let Some(at) = self.limit else {
-            return Ok(self.timeout);
+            return Some(self.timeout);
         };
         let left = at.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(String::from(OUT_OF_TIME));
-        }
-        Ok(self.timeout.min(left))
+        (!left.is_zero()).then(|| self.timeout.min(left))
     }
 
-    /// Waarom de laatste dial faalde, en wist het.
-    pub(crate) fn take_why(&mut self) -> Option<String> {
-        self.why.take()
-    }
-
-    /// Eén hop: opzoeken, TCP, en TLS als de hop `https` is.
-    pub(crate) async fn hop(&mut self, target: Target<'_>) -> Result<HostConn, String> {
-        let host = target.host;
-        if target.https && self.trust.is_none() {
-            return Err(String::from(
-                "the built-in root certificates did not parse; https refused",
-            ));
-        }
-        let addrs = (host, target.port)
+    /// Opzoeken en verbinden; de zin van een mislukking als `Err`.
+    fn open(&self, host: &str, port: u16) -> Result<TcpStream, (leanhttp::Error, String)> {
+        let connect = leanhttp::Error::Connect;
+        let addrs = (host, port)
             .to_socket_addrs()
-            .map_err(|e| format!("resolve {host}: {e}"))?;
+            .map_err(|e| (connect, format!("resolve {host}: {e}")))?;
         let mut last = format!("resolve {host}: no addresses");
-        let mut stream = None;
         for a in addrs {
-            let t = self
-                .connect_timeout()
-                .map_err(|why| format!("connect {host}: {why}"))?;
+            let Some(t) = self.connect_timeout() else {
+                let out = leanhttp::Error::Io(IoError::TimedOut);
+                return Err((out, format!("connect {host}: {OUT_OF_TIME}")));
+            };
             match TcpStream::connect_timeout(&a, t) {
-                Ok(s) => {
-                    stream = Some(s);
-                    break;
-                }
+                Ok(s) => return Ok(s),
                 Err(e) => last = format!("connect {host} ({a}): {e}"),
             }
         }
-        let stream = stream.ok_or(last)?;
-        // Verzoeken zijn klein en praterig; Nagle zou elke kop laten wachten.
-        let _ = stream.set_nodelay(true);
-        let raw = StdConn::new(stream, Some(self.timeout)).with_limit(self.limit);
-        let Some(trust) = self.trust.filter(|_| target.https) else {
-            return Ok(HostConn::Plain(raw));
-        };
-        let seed = entropy().map_err(|e| format!("tls {host}: no entropy: {e}"))?;
-        let mut seed = Some(seed);
-        let mut tls = TlsDial::new(Ready(Some(raw)), trust, move || {
-            // De dialer vraagt één keer per dial, en Ready dialt één keer.
-            Entropy::new(seed.take().unwrap_or([0u8; Entropy::LEN]))
-        });
-        match leanhttp::Dial::dial(&mut tls, target).await {
-            Ok(c) => Ok(HostConn::Tls(c)),
-            Err(e) => Err(match tls.last_error() {
-                Some(why) => format!("tls {host}: {why}"),
-                None => format!("tls {host}: {e}"),
-            }),
-        }
+        Err((connect, last))
     }
 }
 
-impl leanhttp::Dial for Dialer<'_> {
-    type Conn = HostConn;
+impl leanhttp::Dial for Tcp<'_> {
+    type Conn = StdConn<TcpStream>;
 
-    async fn dial(&mut self, target: Target<'_>) -> leanhttp::Result<HostConn> {
-        match self.hop(target).await {
-            Ok(c) => {
-                self.why = None;
-                Ok(c)
-            }
-            Err(why) => {
-                self.why = Some(why);
-                Err(leanhttp::Error::Connect)
-            }
+    async fn dial(&mut self, target: Target<'_>) -> leanhttp::Result<Self::Conn> {
+        let opened = self.open(target.host, target.port);
+        if let Some(trace) = self.trace.as_deref_mut() {
+            trace.host.clear();
+            trace.host.push_str(target.host);
+            trace.why = opened.as_ref().err().map(|(_, why)| why.clone());
         }
+        let stream = opened.map_err(|(e, _)| e)?;
+        // Verzoeken zijn klein en praterig; Nagle zou elke kop laten wachten.
+        let _ = stream.set_nodelay(true);
+        Ok(StdConn::new(stream, Some(self.timeout)).with_limit(self.limit))
     }
+}
 
-    /// Versleutelt als de hop `https` is; de keuze valt per hop.
-    fn is_encrypted(&self) -> bool {
-        true
+/// De webdialer van de host: [`Tcp`] eronder, TLS met de Mozilla-wortels
+/// op de systeemklok en entropie van het OS.
+pub(crate) type Web<'t> = WebDial<Tcp<'t>, fn() -> Option<u64>, fn() -> Option<Entropy>>;
+
+/// Nu als wandklok voor de keten: de systeemklok.
+#[expect(clippy::unnecessary_wraps, reason = "de vorm van de klok van WebDial")]
+fn wall() -> Option<u64> {
+    Some(unix_secs())
+}
+
+/// Verse entropie van het OS voor één handshake; zonder geen handshake.
+fn os_entropy() -> Option<Entropy> {
+    entropy().ok().map(Entropy::new)
+}
+
+/// Een webdialer over `tcp`.
+pub(crate) fn web(tcp: Tcp<'_>) -> Web<'_> {
+    WebDial::new(tcp, leantls::MOZILLA_ROOTS, wall, os_entropy)
+}
+
+/// Een mislukt verzoek als [`Error`]: de TLS-reden, of de stap van de
+/// std-dial, of (zonder beide) de fout van leanhttp.
+fn failure(e: leanhttp::Error, tls: Option<leanhttps::Error>, trace: &mut Trace) -> Error {
+    match (tls, trace.why.take()) {
+        (Some(t @ leanhttps::Error::ChainWithoutName), _) => Error::Dial(format!("tls: {t}")),
+        (Some(t), _) => Error::Dial(format!("tls {}: {t}", trace.host)),
+        (None, Some(why)) => Error::Dial(why),
+        // `WebDial` faalt zo vóór de verbinding: geen entropie (of geen wortels).
+        (None, None) if e == leanhttp::Error::Connect => Error::Dial(String::from(
+            "no entropy from the OS (/dev/urandom); https refused",
+        )),
+        (None, None) => Error::Http(e),
     }
+}
+
+/// Opent `call` met redirects (GET en HEAD) en geeft het antwoord zodra de kop binnen is.
+async fn send(call: &Call<'_>, until: Option<Instant>) -> Result<leanhttp::Response<HostConn>> {
+    let lc = leanhttp_call(call)?;
+    let mut trace = Trace::default();
+    let mut dial = web(Tcp::new(call.timeout, until, Some(&mut trace)));
+    let got = leanhttp::fetch(&mut dial, lc).await;
+    let tls = dial.last_error();
+    got.map_err(|e| failure(e, tls, &mut trace))
 }
 
 /// De HTTP(S)-client van de host.
-#[derive(Clone, Copy, Debug)]
-pub struct Http {
-    /// De wortels; `None` als de ingebakken set niet las (dan weigert elke `https`).
-    roots: Option<Roots<'static>>,
-}
-
-impl Default for Http {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Http;
 
 impl Http {
-    /// Een client met de ingebakken wortels.
+    /// Een client.
     pub fn new() -> Self {
-        Self {
-            roots: Roots::from_concatenated_der(ROOTS_DER).ok(),
-        }
-    }
-
-    /// Hoeveel wortels de client vertrouwt (0: de set las niet).
-    pub fn root_count(&self) -> usize {
-        self.roots.map_or(0, |r| r.len())
-    }
-
-    /// De ketentoets van nu, als er wortels zijn.
-    pub(crate) fn verifier(&self) -> Option<ChainVerifier<'static>> {
-        self.roots.map(|r| ChainVerifier::new(r, unix_secs()))
+        Self
     }
 
     /// Doet één verzoek en buffert de body tot `limit` bytes.
@@ -384,13 +295,7 @@ impl Http {
         limit: usize,
         until: Option<Instant>,
     ) -> Result<Reply> {
-        let verifier = self.verifier();
-        let trust = verifier.as_ref().map(|v| Trust::Chain(v));
-        let mut dial = Dialer::new(trust, call.timeout).with_limit(until);
-        let lc = leanhttp_call(call)?;
-        let mut resp = leanhttp::fetch(&mut dial, lc)
-            .await
-            .map_err(|e| dial.take_why().map_or(Error::Http(e), Error::Dial))?;
+        let mut resp = send(call, until).await?;
         let body = resp.read_to_end(limit).await.map_err(Error::Http)?;
         let headers = resp
             .header
@@ -426,13 +331,7 @@ impl Http {
         sink: &mut W,
         progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<u64> {
-        let verifier = self.verifier();
-        let trust = verifier.as_ref().map(|v| Trust::Chain(v));
-        let mut dial = Dialer::new(trust, call.timeout);
-        let lc = leanhttp_call(call)?;
-        let mut resp = leanhttp::fetch(&mut dial, lc)
-            .await
-            .map_err(|e| dial.take_why().map_or(Error::Http(e), Error::Dial))?;
+        let mut resp = send(call, None).await?;
         if resp.status != 200 {
             let body = resp.read_to_end(ERROR_BODY).await.unwrap_or_default();
             return Err(Error::Status {
@@ -465,13 +364,7 @@ impl Http {
     /// een antwoord; GET volgt redirects.
     pub fn open(&self, call: &Call<'_>) -> Result<Open> {
         block_on(async {
-            let verifier = self.verifier();
-            let trust = verifier.as_ref().map(|v| Trust::Chain(v));
-            let mut dial = Dialer::new(trust, call.timeout);
-            let lc = leanhttp_call(call)?;
-            let resp = leanhttp::fetch(&mut dial, lc)
-                .await
-                .map_err(|e| dial.take_why().map_or(Error::Http(e), Error::Dial))?;
+            let resp = send(call, None).await?;
             Ok(Open { resp })
         })
     }

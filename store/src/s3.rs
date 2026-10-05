@@ -1,9 +1,9 @@
 //! De lease en de clusterstaat in een S3-compatibele bucket (Go: `hoplock/s3`).
 //!
-//! Bezit per backend één leans3-client (configuratie, geen verbinding), de
-//! host-client die de verbindingen maakt, en voor de lease de laatst geziene
-//! "ghost". De verbinding zelf leeft één verzoek: [`hostnet::S3Transport`]
-//! dialt vers en tekent met de systeemklok.
+//! Bezit per backend één leans3-client (configuratie, geen verbinding) en
+//! voor de lease de laatst geziene "ghost". Het transport leeft één
+//! backend-aanroep: [`hostnet::s3_http`] (leans3http over de webdialer van de
+//! host) dialt vers, tekent met de systeemklok en deelt één budget.
 //!
 //! Het CAS-protocol: een PUT met `If-None-Match: *` maakt alleen aan als er
 //! niets is, een PUT of DELETE met `If-Match: <etag>` slaagt alleen als de
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use config::S3LockConfig;
 use discovery::{Backend, LeaseState};
-use hostnet::{Http, S3Transport, block_on, unix_secs};
+use hostnet::{block_on, s3_http, unix_secs};
 use leans3::{DeleteOptions, PutOptions};
 
 use crate::{Error, Result, StateStore, redact_url, state_key, wire};
@@ -54,7 +54,6 @@ fn wall_ms() -> u64 {
 #[derive(Debug)]
 pub struct S3Lease {
     client: leans3::Client,
-    http: Http,
     key: String,
     timeout: Duration,
     takeover_after_ms: u64,
@@ -78,7 +77,6 @@ impl S3Lease {
     pub fn new(s3: &S3LockConfig, key: &str, timeout: Duration, takeover_after_ms: u64) -> Self {
         Self {
             client: client_for(s3),
-            http: Http::new(),
             key: key.to_string(),
             timeout,
             takeover_after_ms,
@@ -137,7 +135,7 @@ impl S3Lease {
                 ..PutOptions::default()
             }
         };
-        let mut t = S3Transport::new(&self.http, self.timeout).until(until);
+        let mut t = s3_http(self.timeout, until);
         let result = block_on(self.client.put(&mut t, &self.key, body, &opt));
         match result {
             Ok(Some(etag)) if !etag.is_empty() => Ok(etag),
@@ -182,7 +180,7 @@ impl S3Lease {
         if self.takeover_after_ms == 0 {
             return None;
         }
-        let mut t = S3Transport::new(&self.http, self.timeout).until(until);
+        let mut t = s3_http(self.timeout, until);
         let etag = match block_on(self.client.head(&mut t, &self.key)) {
             Ok(e) if !e.is_empty() => e,
             _ => return None,
@@ -213,7 +211,7 @@ impl S3Lease {
 
     /// Eén voorwaardelijke DELETE op `handle`.
     fn remove(&mut self, handle: &str, until: Instant) -> discovery::Result {
-        let mut t = S3Transport::new(&self.http, self.timeout).until(until);
+        let mut t = s3_http(self.timeout, until);
         let opt = DeleteOptions { if_match: handle };
         match block_on(self.client.delete(&mut t, &self.key, &opt)) {
             Ok(()) => Ok(()),
@@ -241,7 +239,7 @@ pub(crate) fn deadline(timeout: Duration) -> Instant {
 
 impl Backend for S3Lease {
     fn read(&mut self) -> discovery::Result<(LeaseState, String)> {
-        let mut t = S3Transport::new(&self.http, self.timeout).until(deadline(self.timeout));
+        let mut t = s3_http(self.timeout, deadline(self.timeout));
         let result = block_on(self.client.get(&mut t, &self.key));
         let (body, etag) = match result {
             Ok(r) => r,
@@ -328,7 +326,6 @@ impl Backend for S3Lease {
 #[derive(Debug)]
 pub struct S3StateStore {
     client: leans3::Client,
-    http: Http,
     key: String,
     timeout: Duration,
 }
@@ -338,7 +335,6 @@ impl S3StateStore {
     pub fn new(s3: &S3LockConfig, cluster: &str, timeout: Duration) -> Self {
         Self {
             client: client_for(s3),
-            http: Http::new(),
             key: state_key(cluster),
             timeout,
         }
@@ -355,7 +351,7 @@ impl S3StateStore {
 
 impl StateStore for S3StateStore {
     fn save(&mut self, snapshot: &[u8]) -> Result {
-        let mut t = S3Transport::new(&self.http, self.timeout).until(deadline(self.timeout));
+        let mut t = s3_http(self.timeout, deadline(self.timeout));
         let opt = PutOptions {
             content_type: JSON,
             ..PutOptions::default()
@@ -366,7 +362,7 @@ impl StateStore for S3StateStore {
     }
 
     fn load(&mut self) -> Result<Option<Vec<u8>>> {
-        let mut t = S3Transport::new(&self.http, self.timeout).until(deadline(self.timeout));
+        let mut t = s3_http(self.timeout, deadline(self.timeout));
         match block_on(self.client.get(&mut t, &self.key)) {
             Ok((data, _)) => Ok(Some(data)),
             Err(leans3::Error::NotFound) => Ok(None),

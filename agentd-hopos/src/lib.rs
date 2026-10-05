@@ -46,7 +46,6 @@ extern crate alloc;
 
 pub mod client;
 pub mod download;
-pub mod entropy;
 pub mod env;
 pub mod fetch;
 pub mod flip;
@@ -66,7 +65,7 @@ pub mod s3;
 pub mod sntp;
 
 pub use env::{BootConfig, BootError};
-pub use fetch::{Clock, Connect, HttpImages, Resolve};
+pub use fetch::{Connect, HttpImages, Resolve};
 pub use handoff::Handoff;
 pub use hub::{Answer, Hub, Question};
 pub use node::{Cluster, ClusterParts, Images, Node, Port, Sink};

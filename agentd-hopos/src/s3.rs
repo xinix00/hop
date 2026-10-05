@@ -1,4 +1,4 @@
-//! De lease en de clusterstaat in een S3-compatibele bucket, async: leans3 over leanhttps met de wortels.
+//! De lease en de clusterstaat in een S3-compatibele bucket, async: leans3 over leans3http over `WebDial`.
 //!
 //! Hetzelfde CAS-protocol als `store::S3Lease` op de host: een PUT met
 //! `If-None-Match: *` maakt alleen aan als er niets is, een PUT of DELETE met
@@ -8,30 +8,44 @@
 //! (Hetzner, Ceph), en de overname van een "ghost" (GET 404, HEAD 200) die
 //! een lease-TTL onveranderd bleef (Bunny Storage, 08-09-2026).
 //!
-//! Het transport ([`SlotTransport`]) is de [`Client`] van de eigenaar-taak:
-//! één getekend verzoek over een verse verbinding, TLS met de Mozilla-wortels
-//! zoals de artifacts, en nooit een redirect (de handtekening dekt host en
-//! pad). Tekenen vraagt een wandklok: zonder SNTP (of de RTC van QEMU)
-//! weigert S3 de handtekening, en dat staat dan in de fout.
+//! Het transport is `leans3http::Http` over de webdialer van de [`Client`]
+//! van de eigenaar-taak ([`Client::s3`]): TLS met de Mozilla-wortels zoals de
+//! artifacts, nooit een redirect (de handtekening dekt host en pad), één
+//! poging per verzoek binnen het budget van de aanroep. Tekenen vraagt een
+//! wandklok: zonder SNTP (of de RTC van QEMU) weigert S3 de handtekening, en
+//! dat staat dan in de fout.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::future::Future;
-use core::pin::{Pin, pin};
-use core::task::{Context, Poll};
 use core::time::Duration;
 
 use discovery::{LeaseState, wire};
-use leans3::{DeleteOptions, IoError, PutOptions};
+use leans3::{DeleteOptions, PutOptions};
 
-use crate::client::{Client, Open, Req, redact};
+use crate::client::{Client, redact};
 use crate::env::S3Config;
 use crate::fetch::{Connect, Resolve};
 use crate::lock::{LeaseBackend, StateBackend};
 
 /// Het inhoudstype van lease en snapshot.
 const JSON: &str = "application/json";
+
+/// De klok van leans3http in de bewoner: de monotone klok van applib en
+/// het timerwiel van de app-core.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExecClock;
+
+impl leans3http::Clock for ExecClock {
+    fn now(&self) -> Duration {
+        Duration::from_nanos(applib::clock::now_ns())
+    }
+
+    fn sleep(&self, d: Duration) -> impl Future<Output = ()> {
+        applib::EXEC.get().after(d)
+    }
+}
 
 /// Een leans3-client uit de S3-sectie, tekenend met `wall_secs`.
 fn client_for(s3: &S3Config, wall_secs: fn() -> u64) -> leans3::Client {
@@ -53,100 +67,11 @@ fn client_for(s3: &S3Config, wall_secs: fn() -> u64) -> leans3::Client {
     }
 }
 
-/// `leans3::Transport` over de client van een eigenaar-taak.
-pub struct SlotTransport<'c, C, R> {
-    client: &'c mut Client<C, R>,
-    timeout: Duration,
-}
-
-/// Het antwoord: status, koppen, en de body op de verbinding.
-pub struct SlotResponse<C> {
-    inner: Open<C>,
-}
-
-/// Een fout van leanhttp in de taal van leans3.
-fn io_error(e: &leanhttp::Error) -> IoError {
-    match e {
-        leanhttp::Error::Io(leanhttp::IoError::TimedOut) => IoError::TimedOut,
-        leanhttp::Error::Io(leanhttp::IoError::Closed) => IoError::Closed,
-        leanhttp::Error::UnexpectedEof | leanhttp::Error::Eof => IoError::UnexpectedEof,
-        _ => IoError::Other("http failed"),
-    }
-}
-
-impl<C: Connect, R: Resolve> leans3::Transport for SlotTransport<'_, C, R> {
-    type Response = SlotResponse<C::Conn>;
-
-    async fn send(&mut self, req: leans3::Request<'_, '_>) -> Result<Self::Response, IoError> {
-        let body = match req.body {
-            leans3::Body::None => None,
-            leans3::Body::Bytes(b) => Some(b),
-            // Lease en snapshot zijn klein; een gestroomde PUT heeft hier
-            // geen klant (zoals op de host, `hostnet::S3Transport`).
-            leans3::Body::Stream { .. } => {
-                return Err(IoError::Other(
-                    "hop on HopOS: streamed PUT is not supported",
-                ));
-            }
-        };
-        let scheme = if req.https { "https" } else { "http" };
-        let url = format!("{scheme}://{}{}", req.host, req.target);
-        let mut headers: Vec<(&str, &str)> = Vec::new();
-        headers
-            .try_reserve_exact(req.headers.len())
-            .map_err(|_| IoError::Other("out of memory"))?;
-        for h in req.headers {
-            headers.push((h.name, &h.value));
-        }
-        let r = Req {
-            method: req.method,
-            url: &url,
-            headers: &headers,
-            body,
-            timeout: self.timeout,
-        };
-        match self.client.open(r).await {
-            Ok(inner) => Ok(SlotResponse { inner }),
-            // De reden (DNS, verbinding, TLS, keten) staat in de tekst; leans3
-            // kent alleen een vaste zin, dus de eigenaar logt hem via
-            // `last_error` niet: de fout van leans3 zegt "dial failed".
-            Err(_) => Err(IoError::Other("dial failed")),
-        }
-    }
-}
-
-impl<C: leanhttp::Conn + Unpin> leans3::AsyncRead for SlotResponse<C> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<Result<usize, IoError>> {
-        // Een verse future per poll: de brug van applib houdt buiten die ene
-        // poll niets vast (de waker staat op het handvat in de stack), dus
-        // wegvallen na `Pending` verliest geen bytes.
-        let this = self.get_mut();
-        match pin!(this.inner.read(buf)).poll(cx) {
-            Poll::Ready(r) => Poll::Ready(r.map_err(|e| io_error(&e))),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl<C: leanhttp::Conn + Unpin> leans3::Response for SlotResponse<C> {
-    fn status(&self) -> u16 {
-        self.inner.status
-    }
-
-    fn reason(&self) -> &str {
-        &self.inner.reason
-    }
-
-    fn header(&self, name: &str) -> Option<&str> {
-        self.inner.header.get(name)
-    }
-
-    fn content_length(&self) -> Option<u64> {
-        self.inner.length
+/// De tekst van een leans3-fout, met de stap van de kale dial erbij als die faalde.
+fn say<C: Connect, R: Resolve>(client: &mut Client<C, R>, e: &leans3::Error) -> String {
+    match client.dial_why() {
+        Some(why) => format!("{e} ({why})"),
+        None => format!("{e}"),
     }
 }
 
@@ -196,11 +121,8 @@ impl<C: Connect, R: Resolve> S3Lease<C, R> {
 
     /// De leans3-client, een transport over onze client, en de sleutel:
     /// drie leningen van verschillende velden tegelijk.
-    fn parts(&mut self) -> (&leans3::Client, SlotTransport<'_, C, R>, &str) {
-        let t = SlotTransport {
-            client: &mut self.client,
-            timeout: self.timeout,
-        };
+    fn parts(&mut self) -> (&leans3::Client, impl leans3::Transport + '_, &str) {
+        let t = self.client.s3(ExecClock, self.timeout);
         (&self.s3, t, &self.key)
     }
 
@@ -211,7 +133,7 @@ impl<C: Connect, R: Resolve> S3Lease<C, R> {
     }
 
     fn s3_error(&mut self, op: &str, e: &leans3::Error) -> discovery::Error {
-        let why = format!("s3 {op} {}: {e}", self.key);
+        let why = format!("s3 {op} {}: {}", self.key, say(&mut self.client, e));
         self.unreachable(why)
     }
 
@@ -232,6 +154,7 @@ impl<C: Connect, R: Resolve> S3Lease<C, R> {
         };
         let (s3, mut t, key) = self.parts();
         let result = s3.put(&mut t, key, body, &opt).await;
+        drop(t);
         match result {
             Ok(Some(etag)) if !etag.is_empty() => Ok(etag),
             Ok(_) => {
@@ -258,7 +181,9 @@ impl<C: Connect, R: Resolve> S3Lease<C, R> {
             return None;
         }
         let (s3, mut t, key) = self.parts();
-        let etag = match s3.head(&mut t, key).await {
+        let head = s3.head(&mut t, key).await;
+        drop(t);
+        let etag = match head {
             Ok(e) if !e.is_empty() => e,
             _ => return None,
         };
@@ -279,7 +204,9 @@ impl<C: Connect, R: Resolve> S3Lease<C, R> {
     async fn remove(&mut self, handle: &str) -> discovery::Result {
         let opt = DeleteOptions { if_match: handle };
         let (s3, mut t, key) = self.parts();
-        match s3.delete(&mut t, key, &opt).await {
+        let got = s3.delete(&mut t, key, &opt).await;
+        drop(t);
+        match got {
             Ok(()) => Ok(()),
             Err(leans3::Error::NotFound) => Err(discovery::Error::NoLease),
             Err(leans3::Error::PreconditionFailed) => Err(discovery::Error::LeaseHeld),
@@ -291,7 +218,9 @@ impl<C: Connect, R: Resolve> S3Lease<C, R> {
 impl<C: Connect, R: Resolve> LeaseBackend for S3Lease<C, R> {
     async fn read(&mut self) -> discovery::Result<(LeaseState, String)> {
         let (s3, mut t, key) = self.parts();
-        let (body, etag) = match s3.get(&mut t, key).await {
+        let got = s3.get(&mut t, key).await;
+        drop(t);
+        let (body, etag) = match got {
             Ok(r) => r,
             Err(leans3::Error::NotFound) => {
                 self.last_error = None;
@@ -383,11 +312,8 @@ impl<C: Connect, R: Resolve> S3State<C, R> {
 
     /// De leans3-client, een transport over onze client, en de sleutel:
     /// drie leningen van verschillende velden tegelijk.
-    fn parts(&mut self) -> (&leans3::Client, SlotTransport<'_, C, R>, &str) {
-        let t = SlotTransport {
-            client: &mut self.client,
-            timeout: self.timeout,
-        };
+    fn parts(&mut self) -> (&leans3::Client, impl leans3::Transport + '_, &str) {
+        let t = self.client.s3(ExecClock, self.timeout);
         (&self.s3, t, &self.key)
     }
 }
@@ -399,18 +325,24 @@ impl<C: Connect, R: Resolve> StateBackend for S3State<C, R> {
             ..PutOptions::default()
         };
         let (s3, mut t, key) = self.parts();
-        s3.put(&mut t, key, snapshot, &opt)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("s3 PUT {key}: {e}"))
+        let got = s3.put(&mut t, key, snapshot, &opt).await;
+        drop(t);
+        got.map(|_| ())
+            .map_err(|e| format!("s3 PUT {}: {}", self.key, say(&mut self.client, &e)))
     }
 
     async fn load(&mut self) -> Result<Option<Vec<u8>>, String> {
         let (s3, mut t, key) = self.parts();
-        match s3.get(&mut t, key).await {
+        let got = s3.get(&mut t, key).await;
+        drop(t);
+        match got {
             Ok((data, _)) => Ok(Some(data)),
             Err(leans3::Error::NotFound) => Ok(None),
-            Err(e) => Err(format!("s3 GET {key}: {e}")),
+            Err(e) => Err(format!(
+                "s3 GET {}: {}",
+                self.key,
+                say(&mut self.client, &e)
+            )),
         }
     }
 

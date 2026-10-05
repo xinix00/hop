@@ -11,9 +11,9 @@ description = "De taak-backends achter één trait: HopOS-slots (via de bevoegde
 types = { path = "../types" }
 # Alleen met de feature `std` (de host-backends): het net van de host.
 hostnet = { path = "../hostnet", optional = true }
-leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.9", optional = true }
+leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.11", optional = true }
 # De Docker-API over de unix-socket: één verzoek per verbinding (`leanhttp::send`).
-leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.9", optional = true }
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.11", optional = true }
 
 [features]
 # De host-backends (processen, docker, downloads, isolatie); zonder deze

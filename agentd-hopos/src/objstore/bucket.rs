@@ -12,11 +12,21 @@
 //! verbinding met de kern (`&mut S`) zit IN die future en komt met het
 //! antwoord terug. Eén eigenaar, geen slot.
 //!
-//! Het transport ([`Transport`]) is één verzoek over een verse verbinding,
-//! zoals de artifacts ([`crate::fetch::ArtifactDial`]): opzoeken, TCP, en
-//! TLS met de Mozilla-wortels als het endpoint `https` is. Een `http`-
-//! endpoint mag (de nep-S3 van de QEMU-toets heeft geen certificaat), luid
-//! bij de start: getekend, maar onderweg leesbaar.
+//! Het transport ([`Transport`]) is één verzoek over een verse verbinding
+//! van de webdialer van een [`Client`] (opzoeken, TCP, en TLS met
+//! `leantls::MOZILLA_ROOTS` als het endpoint `https` is), en het antwoord
+//! houdt zijn body op die verbinding. Een `http`-endpoint mag (de nep-S3 van
+//! de QEMU-toets heeft geen certificaat), luid bij de start: getekend, maar
+//! onderweg leesbaar.
+//!
+//! Waarom niet `leans3http::Http` zoals de lease ([`crate::s3`]): die leest
+//! elke antwoordbody eerst helemaal in het geheugen (tot `Limits::body`,
+//! 32 MiB) voordat leans3 hem ziet. Een pull van een app-object is precies
+//! de stroom die dat niet mag: een object groter dan de grens faalt dan, en
+//! een kleiner zet zijn hele maat in de heap van Hop in plaats van één hap
+//! van [`super::CHUNK`]. Tot leans3http een antwoord met de body op de
+//! verbinding kan geven, blijft dit transport; het draagt ook push, list en
+//! delete, zodat één bucket één transport en één beleid heeft.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -28,12 +38,12 @@ use core::task::{Context, Poll};
 use core::time::Duration;
 
 use leanhttp::Target;
+use leanhttps::Link;
 use leans3::{DeleteOptions, IoError, PutOptions};
-use leantls::{ChainVerifier, Roots, Trust};
 use runner::{StoreTask, SysError, SystemApi};
 
-use crate::entropy::Pool;
-use crate::fetch::{ArtConn, ArtifactDial, Connect, ROOTS_DER, Resolve};
+use crate::client::Client;
+use crate::fetch::{Connect, Resolve};
 
 use super::{Bucket, CHUNK};
 
@@ -63,12 +73,8 @@ pub struct Config {
 /// De bucket van de apps op S3.
 pub struct S3Bucket<C, R> {
     client: leans3::Client,
-    connect: C,
-    resolver: R,
-    pool: Pool,
-    roots: Option<Roots<'static>>,
-    /// Nu in Unix-seconden, alleen als de klok vertrouwd is (voor de keten).
-    trusted: fn() -> Option<u64>,
+    /// De verbindingen: de webdialer, de willekeur en de vertrouwde klok.
+    http: Client<C, R>,
 }
 
 impl<C: Connect, R: Resolve> S3Bucket<C, R> {
@@ -77,7 +83,7 @@ impl<C: Connect, R: Resolve> S3Bucket<C, R> {
         cfg: &Config,
         connect: C,
         resolver: R,
-        pool: Pool,
+        rng: applib::rand::Rng,
         wall: fn() -> u64,
         trusted: fn() -> Option<u64>,
     ) -> Self {
@@ -98,11 +104,7 @@ impl<C: Connect, R: Resolve> S3Bucket<C, R> {
                 path_style: cfg.path_style,
                 now: Some(wall),
             },
-            connect,
-            resolver,
-            pool,
-            roots: Roots::from_concatenated_der(ROOTS_DER).ok(),
-            trusted,
+            http: Client::new(connect, resolver, rng, trusted),
         }
     }
 
@@ -115,20 +117,12 @@ impl<C: Connect, R: Resolve> S3Bucket<C, R> {
     }
 }
 
-/// Doet `$body` met een transport `t` over de verbinders van de bucket; de
-/// keten krijgt de tijd van nu (of geen, en dan weigert https).
+/// Doet `$body` met een transport `t` over de client van de bucket, en
+/// geeft de uitkomst met de reden van een mislukte dial.
 macro_rules! with_transport {
     ($self:ident, $t:ident, $body:expr) => {{
-        let verifier = $self
-            .roots
-            .zip(($self.trusted)())
-            .map(|(roots, now)| ChainVerifier::new(roots, now));
-        let trust = verifier.as_ref().map(|v| Trust::Chain(v));
         let mut $t = Transport {
-            connect: &mut $self.connect,
-            resolver: &mut $self.resolver,
-            trust,
-            pool: &mut $self.pool,
+            http: &mut $self.http,
             why: None,
         };
         let r = $body;
@@ -224,12 +218,9 @@ impl<C: Connect, R: Resolve> Bucket for S3Bucket<C, R> {
     }
 }
 
-/// `leans3::Transport` over één verse verbinding per verzoek.
-pub struct Transport<'a, 't, C, R> {
-    connect: &'a mut C,
-    resolver: &'a mut R,
-    trust: Option<Trust<'t>>,
-    pool: &'a mut Pool,
+/// `leans3::Transport` over één verse verbinding per verzoek, met de body op de verbinding.
+pub struct Transport<'a, C, R> {
+    http: &'a mut Client<C, R>,
     /// Waarom de laatste dial faalde (leans3 kent alleen een vaste zin).
     why: Option<String>,
 }
@@ -268,7 +259,7 @@ impl leanhttp::AsyncRead for Body<'_> {
     }
 }
 
-impl<C: Connect, R: Resolve> leans3::Transport for Transport<'_, '_, C, R> {
+impl<C: Connect, R: Resolve> leans3::Transport for Transport<'_, C, R> {
     type Response = Response<C::Conn>;
 
     async fn send(&mut self, req: leans3::Request<'_, '_>) -> Result<Self::Response, IoError> {
@@ -286,12 +277,7 @@ impl<C: Connect, R: Resolve> leans3::Transport for Transport<'_, '_, C, R> {
             leans3::Body::Stream { source, len } => (None, Some(Body(source)), len),
         };
         let (host, port) = split_host(req.host, req.https);
-        let mut dial = ArtifactDial::new(
-            &mut *self.connect,
-            &mut *self.resolver,
-            self.trust,
-            &mut *self.pool,
-        );
+        let mut dial = self.http.web();
         let conn = leanhttp::Dial::dial(
             &mut dial,
             Target {
@@ -301,10 +287,12 @@ impl<C: Connect, R: Resolve> leans3::Transport for Transport<'_, '_, C, R> {
             },
         )
         .await;
+        let tls = dial.last_error();
+        drop(dial);
         let conn = match conn {
             Ok(c) => c,
-            Err(_) => {
-                self.why = dial.why().map(String::from);
+            Err(e) => {
+                self.why = Some(self.http.reason(e, tls));
                 return Err(IoError::Other("dial failed"));
             }
         };
@@ -326,7 +314,7 @@ impl<C: Connect, R: Resolve> leans3::Transport for Transport<'_, '_, C, R> {
 
 /// Het antwoord: status, koppen, en de body op de verbinding.
 pub struct Response<C> {
-    inner: leanhttp::Response<ArtConn<C>>,
+    inner: leanhttp::Response<Link<C>>,
 }
 
 impl<C: leanhttp::Conn + Unpin> leans3::AsyncRead for Response<C> {

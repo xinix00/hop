@@ -4,7 +4,7 @@
 //! `pkg/agentboot` op github.com/xinix00/hop, tag v1.0.7). Deze bewoner
 //! spreekt beide protocollen van de host (`store`): een hoplockserver
 //! (`HOPOS_LOCK_URL`, het CAS-protocol over http) en S3 (`HOPOS_S3_*`,
-//! leans3 over leanhttps met de wortels). De keuze is die van de daemon
+//! leans3 over leans3http en `WebDial`). De keuze is die van de daemon
 //! (`store::open_lease`): het type van de lock kiest de lease, zonder type
 //! is een URL een hoplockserver, en zonder lock blijft de node de
 //! standalone leader die hij was. De staat (`state/<cluster>`) gaat waar

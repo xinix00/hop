@@ -13,8 +13,9 @@ use std::rc::Rc;
 
 use leanhttp::{AsyncRead, AsyncWrite, Close, IoError};
 
-use crate::entropy::Pool;
-use crate::fetch::{Clock, Connect, HttpImages, IpOnly, Resolve, Scheme, scheme_of};
+use applib::rand::Rng;
+
+use crate::fetch::{Connect, HttpImages, IpOnly, Resolve, Scheme, scheme_of};
 use crate::sntp::{self, NtpLink, PACKET, SntpError};
 use crate::{Images, Sink};
 
@@ -290,16 +291,9 @@ impl Connect for FakeNet {
     }
 }
 
-/// Een klok met of zonder vertrouwde tijd.
-struct TestClock(Option<u64>);
-
-impl Clock for TestClock {
-    fn trusted_unix_secs(&self) -> Option<u64> {
-        self.0
-    }
-    fn mono_ns(&self) -> u64 {
-        42
-    }
+/// Een vaste DRBG voor de handshakes van een toets.
+fn rng() -> Rng {
+    Rng::from_seed(b"test", || 42)
 }
 
 /// Een sink die alles bewaart.
@@ -322,21 +316,31 @@ impl Sink for Keep {
 
 /// Haalt `url` op met een nep-net dat `script` speelt; de uitkomst, de
 /// sink en wat het net zag.
-fn fetch(url: &str, script: &[&[u8]], clock: Option<u64>) -> (Result<(), String>, Keep, Seen) {
+fn fetch(
+    url: &str,
+    script: &[&[u8]],
+    clock: fn() -> Option<u64>,
+) -> (Result<(), String>, Keep, Seen) {
     let seen: Seen = Rc::default();
     let net = FakeNet {
         script: script.iter().map(|s| s.to_vec()).collect(),
         seen: seen.clone(),
     };
-    let mut images = HttpImages::new(net, names(), TestClock(clock), Pool::new(b"test"));
-    assert_eq!(images.root_count(), 119, "de ingebakken Mozilla-set leest");
+    let mut images = HttpImages::new(net, names(), clock, rng());
     let mut sink = Keep::default();
     let r = block_on(images.fetch(url, &mut sink));
     (r, sink, seen)
 }
 
 const OK: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n\x7fELF-image";
-const NOW: Option<u64> = Some(1_790_640_000);
+/// Een vertrouwde klok: 2026-09-29.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "de vorm van de klok van de downloader"
+)]
+fn now() -> Option<u64> {
+    Some(1_790_640_000)
+}
 
 #[test]
 fn urls_and_schemes() {
@@ -345,14 +349,14 @@ fn urls_and_schemes() {
     for bad in ["ftp://x/y", "github.com/x", "https://", "https:///x"] {
         assert!(scheme_of(bad).is_err(), "{bad}");
     }
-    let (r, _, seen) = fetch("ftp://artifacts.local/a.elf", &[OK], NOW);
+    let (r, _, seen) = fetch("ftp://artifacts.local/a.elf", &[OK], now);
     assert!(r.unwrap_err().contains("not supported"));
     assert!(seen.borrow().is_empty());
 }
 
 #[test]
 fn http_by_name_goes_plain_through_the_resolver() {
-    let (r, sink, seen) = fetch("http://artifacts.local:8000/a.elf", &[OK], None);
+    let (r, sink, seen) = fetch("http://artifacts.local:8000/a.elf", &[OK], no_clock);
     r.unwrap();
     assert_eq!(
         (sink.len, sink.bytes.as_slice()),
@@ -374,7 +378,7 @@ fn the_same_url_is_fetched_whole_every_time() {
         script: vec![OK.to_vec(), NEW.to_vec()],
         seen: seen.clone(),
     };
-    let mut images = HttpImages::new(net, names(), TestClock(NOW), Pool::new(b"test"));
+    let mut images = HttpImages::new(net, names(), now, rng());
     let url = "http://artifacts.local/a.elf";
     let mut first = Keep::default();
     block_on(images.fetch(url, &mut first)).unwrap();
@@ -402,7 +406,7 @@ fn https_goes_through_tls_with_the_name_as_sni() {
     let (r, _, seen) = fetch(
         "https://github.com/xinix00/HopOS/releases/download/apps/welcome.elf",
         &[b"HTTP/1.1 400 Bad Request\r\n\r\n"],
-        NOW,
+        now,
     );
     let e = r.unwrap_err();
     assert!(e.contains("tls github.com"), "{e}");
@@ -416,23 +420,23 @@ fn https_goes_through_tls_with_the_name_as_sni() {
 
 #[test]
 fn https_is_refused_without_clock_or_name_and_says_why() {
-    let (r, _, seen) = fetch("https://github.com/x.elf", &[OK], None);
+    let (r, _, seen) = fetch("https://github.com/x.elf", &[OK], no_clock);
     let e = r.unwrap_err();
     assert!(e.contains("SNTP") && e.contains("https refused"), "{e}");
     assert!(seen.borrow().is_empty(), "geen verbinding zonder klok");
 
-    let (r, _, seen) = fetch("https://10.0.2.2/x.elf", &[OK], NOW);
+    let (r, _, seen) = fetch("https://10.0.2.2/x.elf", &[OK], now);
     assert!(r.unwrap_err().contains("bare address"));
     assert!(seen.borrow().is_empty());
 
-    let (r, _, _) = fetch("http://nowhere.example/x.elf", &[OK], NOW);
+    let (r, _, _) = fetch("http://nowhere.example/x.elf", &[OK], now);
     let e = r.unwrap_err();
     assert!(
         e.contains("resolve nowhere.example") && e.contains("NXDOMAIN"),
         "{e}"
     );
 
-    let (r, _, _) = fetch("http://artifacts.local/x.elf", &[], NOW);
+    let (r, _, _) = fetch("http://artifacts.local/x.elf", &[], now);
     let e = r.unwrap_err();
     assert!(
         e.contains("connect artifacts.local (10.0.2.2:80): refused"),
@@ -444,7 +448,7 @@ fn https_is_refused_without_clock_or_name_and_says_why() {
 fn a_redirect_to_https_switches_to_tls_per_hop() {
     // Zoals een GitHub-release: 302 naar een andere host op https.
     const REDIRECT: &[u8] = b"HTTP/1.1 302 Found\r\nLocation: https://objects.githubusercontent.com/o/1?sig=x\r\nContent-Length: 0\r\n\r\n";
-    let (r, _, seen) = fetch("http://artifacts.local/a.elf", &[REDIRECT, b"not tls"], NOW);
+    let (r, _, seen) = fetch("http://artifacts.local/a.elf", &[REDIRECT, b"not tls"], now);
     let e = r.unwrap_err();
     assert!(e.contains("tls objects.githubusercontent.com"), "{e}");
     {
@@ -454,7 +458,7 @@ fn a_redirect_to_https_switches_to_tls_per_hop() {
         assert_eq!(seen[1].2.borrow()[0], 0x16);
     }
     // Zonder klok: de tweede hop weigert met de reden, na de eerste.
-    let (r, _, seen) = fetch("http://artifacts.local/a.elf", &[REDIRECT, OK], None);
+    let (r, _, seen) = fetch("http://artifacts.local/a.elf", &[REDIRECT, OK], no_clock);
     let e = r.unwrap_err();
     assert!(e.contains("SNTP"), "{e}");
     assert_eq!(seen.borrow().len(), 1);
@@ -518,20 +522,19 @@ impl Resolve for StdDns {
     }
 }
 
-struct StdClock;
+/// De systeemklok als vertrouwde wandklok.
+fn std_secs() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
 
-impl Clock for StdClock {
-    fn trusted_unix_secs(&self) -> Option<u64> {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .map(|d| d.as_secs())
-    }
-    fn mono_ns(&self) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos() as u64)
-    }
+/// De systeemklok in ns, voor de jitter van de DRBG.
+fn std_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64)
 }
 
 /// De echte GitHub-download: dezelfde `HttpImages` als op de node (TLS 1.3,
@@ -542,13 +545,13 @@ impl Clock for StdClock {
 #[ignore = "heeft internet nodig; tools/github-download.sh"]
 fn real_github_release_download() {
     let url = std::env::var("HOP_TEST_URL").unwrap_or_else(|_| {
-        String::from(
-            "https://github.com/xinix00/HopOS/releases/download/apps/welcome-arm64-tamago.elf",
-        )
+        String::from("https://github.com/xinix00/HopOS/releases/download/apps/welcome-arm64.elf")
     });
-    let mut pool = Pool::new(b"real-download");
-    pool.harvest(|| StdClock.mono_ns(), 512);
-    let mut images = HttpImages::new(StdNet, StdDns, StdClock, pool);
+    let mut seed = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut seed))
+        .unwrap();
+    let mut images = HttpImages::new(StdNet, StdDns, std_secs, Rng::from_seed(&seed, std_ns));
     let mut sink = Keep::default();
     let r = block_on(images.fetch(&url, &mut sink));
     std::println!(
@@ -597,7 +600,7 @@ fn serve_two(crowded: bool) -> String {
         script: Vec::new(),
         seen: Rc::new(RefCell::new(Vec::new())),
     };
-    let mut client = crate::client::Client::new(net, names(), Pool::new(b"test"), no_clock);
+    let mut client = crate::client::Client::new(net, names(), rng(), no_clock);
     let mut none = NoStreams;
     block_on(serve(
         conn,

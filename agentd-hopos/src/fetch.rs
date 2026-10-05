@@ -1,51 +1,38 @@
-//! Artifacts ophalen over `http://` en `https://`, met echte certificaatketens.
+//! Artifacts ophalen over `http://` en `https://`, en de kale dial van de bewoner.
 //!
 //! Een job wijst naar een ELF op een URL; op een echt net is dat meestal
 //! een GitHub-release (`https://github.com/.../releases/download/...`), en
 //! GitHub stuurt door naar `objects.githubusercontent.com`. Dit module
-//! bezit de dialer van die download ([`ArtifactDial`]) en de downloader
-//! ([`HttpImages`]):
+//! bezit de downloader ([`HttpImages`]) en de platformkant onder elke
+//! uitgaande verbinding van de bewoner ([`Tcp`]):
 //!
 //! - elke hop (ook na een redirect) zoekt zijn host op met een
-//!   [`Resolve`], opent TCP met een [`Connect`], en kiest dan zelf: kaal
-//!   voor `http://`, TLS voor `https://`. leanhttp volgt de redirects en
-//!   weigert `https` naar `http`;
-//! - TLS is `leanhttps` met [`Trust::Chain`]: een [`ChainVerifier`] op de
-//!   ingebakken Mozilla-wortels ([`ROOTS_DER`]) en de tijd van de
-//!   [`Clock`]. Zonder vertrouwde tijd (SNTP lukte nog niet) weigert de
-//!   dialer `https` met die reden, want een keten zonder datumtoets is
-//!   geen keten;
-//! - de willekeur van elke handshake komt uit de [`Pool`] van de
-//!   downloader.
+//!   [`Resolve`] en opent TCP met een [`Connect`]: dat is [`Tcp`], de kale
+//!   dial. Elke mislukking (de naam, de verbinding) krijgt een eigen zin in
+//!   een [`Trace`], in plaats van leanhttp's ene `Connect`;
+//! - daarboven `leanhttps::WebDial` (in [`crate::client::Client::web`]):
+//!   kaal voor `http://`, TLS met ketenverificatie tegen
+//!   `leantls::MOZILLA_ROOTS` op de vertrouwde wandklok voor `https://`,
+//!   met SNI per hop. Zonder vertrouwde tijd (SNTP lukte nog niet) weigert
+//!   hij `https` vóór er een verbinding opengaat, want een keten zonder
+//!   datumtoets is geen keten. leanhttp volgt de redirects en weigert
+//!   `https` naar `http`.
 //!
-//! Waarom de TCP-verbinding hier geopend wordt en niet in de dialer van
-//! leanhttps: zo heeft elke mislukking (de naam, de verbinding, de
-//! handshake, de keten) een eigen zin in de log van de taak, in plaats van
-//! leanhttp's ene `Connect`.
+//! Waarom de bewoner zijn eigen [`Tcp`] houdt en niet `applib::tcp::Dialer`
+//! neemt: die geeft bij elke mislukking dezelfde `Connect`, en de log van
+//! een taak zegt hier welke stap faalde (`resolve x: NXDOMAIN`,
+//! `connect x (ip:poort): refused`); en de toetsen draaien de hele keten
+//! tegen een nep-netstack ([`Connect`] en [`Resolve`] uit het geheugen).
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::future::Future;
-use core::task::{Context, Poll};
-use core::time::Duration;
 
-use leanhttp::{AsyncRead, AsyncWrite, Close, IoError, Target};
-use leanhttps::{TlsConn, TlsDial};
-use leantls::{ChainVerifier, Roots, Trust};
+use leanhttp::Target;
 
-use crate::entropy::Pool;
+use crate::client::Client;
 use crate::node::{Images, Sink};
-
-/// De vertrouwde wortels: de Mozilla-set (NSS `certdata.txt`) van juli
-/// 2026, 119 certificaten als aaneengeschakelde DER.
-///
-/// Gekopieerd op 29-09-2026 uit `lean/leantls/testdata/github/mozilla-roots.der`
-/// (lean v3.1.1, commit db67247), waar leantls er de echte ketens van
-/// github.com, api.github.com en objects.githubusercontent.com (augustus
-/// 2026) tegen toetst. Vervangen is een nieuwe kopie van een nieuwere set,
-/// met deze datum mee.
-pub const ROOTS_DER: &[u8] = include_bytes!("../roots.der");
 
 /// De leesbuffer van een download: één hap die de runner in brokken naar de kern stroomt.
 pub const DOWNLOAD_BUF: usize = 64 << 10;
@@ -66,14 +53,6 @@ pub trait Connect {
         ip: [u8; 4],
         port: u16,
     ) -> impl Future<Output = Result<Self::Conn, String>>;
-}
-
-/// De klok van de downloader.
-pub trait Clock {
-    /// Nu in Unix-seconden, alleen als de tijd vertrouwd is (SNTP lukte).
-    fn trusted_unix_secs(&self) -> Option<u64>;
-    /// De monotone klok (ns), voor de willekeur.
-    fn mono_ns(&self) -> u64;
 }
 
 /// Een resolver voor namen die al een adres zijn; een echte naam faalt met
@@ -118,242 +97,96 @@ pub fn scheme_of(url: &str) -> Result<Scheme, String> {
     Ok(s)
 }
 
-/// Een verbinding van een download: kaal of in TLS.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "één verbinding per download, en TLS is het gewone geval (GitHub); boxen kost een allocatie per hop voor niets"
-)]
-pub enum ArtConn<C> {
-    /// `http://`.
-    Plain(C),
-    /// `https://`.
-    Tls(TlsConn<C>),
+/// Wat de kale dial van de laatste hop zag: de host, en waarom hij faalde.
+#[derive(Clone, Debug, Default)]
+pub struct Trace {
+    /// De host van de laatste hop die [`Tcp`] dialde (de naam van een TLS-fout).
+    pub host: String,
+    /// Waarom de laatste dial faalde; `None` als hij lukte.
+    pub why: Option<String>,
 }
 
-impl<C: leanhttp::Conn + Unpin> AsyncRead for ArtConn<C> {
-    fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<Result<usize, IoError>> {
-        match self {
-            Self::Plain(c) => c.poll_read(cx, buf),
-            Self::Tls(c) => c.poll_read(cx, buf),
-        }
-    }
-
-    fn set_read_timeout(&mut self, t: Option<Duration>) -> Result<(), IoError> {
-        match self {
-            Self::Plain(c) => c.set_read_timeout(t),
-            Self::Tls(c) => c.set_read_timeout(t),
-        }
-    }
+/// De kale dial van de bewoner: opzoeken, dan TCP; de zin van een
+/// mislukking in de [`Trace`].
+pub struct Tcp<'a, C, R> {
+    /// Opent de verbinding.
+    pub connect: &'a mut C,
+    /// Zoekt de host op.
+    pub resolver: &'a mut R,
+    /// Wat deze dial zag.
+    pub trace: &'a mut Trace,
 }
 
-impl<C: leanhttp::Conn + Unpin> AsyncWrite for ArtConn<C> {
-    fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, IoError>> {
-        match self {
-            Self::Plain(c) => c.poll_write(cx, buf),
-            Self::Tls(c) => c.poll_write(cx, buf),
-        }
-    }
+impl<C: Connect, R: Resolve> leanhttp::Dial for Tcp<'_, C, R> {
+    type Conn = C::Conn;
 
-    fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
-        match self {
-            Self::Plain(c) => c.poll_flush(cx),
-            Self::Tls(c) => c.poll_flush(cx),
-        }
-    }
-
-    fn set_write_timeout(&mut self, t: Option<Duration>) -> Result<(), IoError> {
-        match self {
-            Self::Plain(c) => c.set_write_timeout(t),
-            Self::Tls(c) => c.set_write_timeout(t),
-        }
-    }
-}
-
-impl<C: leanhttp::Conn + Unpin> Close for ArtConn<C> {
-    fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
-        match self {
-            Self::Plain(c) => c.poll_close(cx),
-            Self::Tls(c) => c.poll_close(cx),
-        }
-    }
-
-    fn has_grown(&self) -> bool {
-        match self {
-            Self::Plain(c) => c.has_grown(),
-            Self::Tls(c) => c.has_grown(),
-        }
-    }
-}
-
-/// Een dialer die één al geopende verbinding geeft: de TCP-kant onder
-/// leanhttps, zodat die alleen de handshake doet.
-struct Ready<C>(Option<C>);
-
-impl<C: leanhttp::Conn> leanhttp::Dial for Ready<C> {
-    type Conn = C;
-
-    async fn dial(&mut self, _target: Target<'_>) -> leanhttp::Result<C> {
-        self.0.take().ok_or(leanhttp::Error::Connect)
-    }
-}
-
-/// De dialer van één download: opzoeken, TCP, en TLS als de hop `https`
-/// is. Onthoudt waarom de laatste dial faalde.
-pub struct ArtifactDial<'a, 't, C, R> {
-    connect: &'a mut C,
-    resolver: &'a mut R,
-    /// `None` zonder vertrouwde tijd: dan weigert elke `https`-hop.
-    trust: Option<Trust<'t>>,
-    pool: &'a mut Pool,
-    why: Option<String>,
-}
-
-impl<'a, 't, C: Connect, R: Resolve> ArtifactDial<'a, 't, C, R> {
-    /// Een dialer; `trust` is `None` zonder vertrouwde tijd.
-    pub fn new(
-        connect: &'a mut C,
-        resolver: &'a mut R,
-        trust: Option<Trust<'t>>,
-        pool: &'a mut Pool,
-    ) -> Self {
-        Self {
-            connect,
-            resolver,
-            trust,
-            pool,
-            why: None,
-        }
-    }
-
-    /// Waarom de laatste dial faalde, als hij faalde.
-    pub fn why(&self) -> Option<&str> {
-        self.why.as_deref()
-    }
-
-    /// Eén hop naar `target`, met de reden van een mislukking in `why`.
-    async fn hop(&mut self, target: Target<'_>) -> Result<ArtConn<C::Conn>, String> {
+    async fn dial(&mut self, target: Target<'_>) -> leanhttp::Result<C::Conn> {
         let host = target.host;
-        if target.https {
-            // Een keten toetst een naam; een kaal IP heeft er geen.
-            if applib::appnet::parse_ip4(host).is_some() {
-                return Err(format!(
-                    "https to the bare address {host} cannot verify a certificate chain; use a host name"
-                ));
+        self.trace.host.clear();
+        self.trace.host.push_str(host);
+        let ip = match self.resolver.resolve(host).await {
+            Ok(ip) => ip,
+            Err(e) => {
+                self.trace.why = Some(format!("resolve {host}: {e}"));
+                return Err(leanhttp::Error::Connect);
             }
-            if self.trust.is_none() {
-                return Err(String::from(
-                    "no trusted wall clock (SNTP has not succeeded), so certificate dates cannot be checked; https refused",
-                ));
-            }
-        }
-        let ip = self
-            .resolver
-            .resolve(host)
-            .await
-            .map_err(|e| format!("resolve {host}: {e}"))?;
-        let [a, b, c, d] = ip;
-        let raw = self
-            .connect
-            .connect(ip, target.port)
-            .await
-            .map_err(|e| format!("connect {host} ({a}.{b}.{c}.{d}:{}): {e}", target.port))?;
-        let Some(trust) = self.trust.filter(|_| target.https) else {
-            return Ok(ArtConn::Plain(raw));
         };
-        let pool = &mut *self.pool;
-        let mut tls = TlsDial::new(Ready(Some(raw)), trust, || pool.entropy());
-        match leanhttp::Dial::dial(&mut tls, target).await {
-            Ok(c) => Ok(ArtConn::Tls(c)),
-            Err(e) => Err(match tls.last_error() {
-                Some(why) => format!("tls {host}: {why}"),
-                None => format!("tls {host}: {e}"),
-            }),
-        }
-    }
-}
-
-impl<C: Connect, R: Resolve> leanhttp::Dial for ArtifactDial<'_, '_, C, R> {
-    type Conn = ArtConn<C::Conn>;
-
-    async fn dial(&mut self, target: Target<'_>) -> leanhttp::Result<Self::Conn> {
-        match self.hop(target).await {
-            Ok(c) => {
-                self.why = None;
-                Ok(c)
+        let [a, b, c, d] = ip;
+        match self.connect.connect(ip, target.port).await {
+            Ok(conn) => {
+                self.trace.why = None;
+                Ok(conn)
             }
-            Err(why) => {
-                self.why = Some(why);
+            Err(e) => {
+                let port = target.port;
+                self.trace.why = Some(format!("connect {host} ({a}.{b}.{c}.{d}:{port}): {e}"));
                 Err(leanhttp::Error::Connect)
             }
         }
     }
-
-    /// Deze dialer versleutelt als de hop `https` is, dus leanhttp laat
-    /// `https://` en een redirect ernaartoe door; de keuze valt per hop.
-    fn is_encrypted(&self) -> bool {
-        true
-    }
 }
+
+/// De webdialer van de bewoner: `leanhttps::WebDial` over [`Tcp`], met de
+/// vertrouwde wandklok als functie en `E` als bron van handshake-entropie.
+pub type Web<'a, C, R, E> = leanhttps::WebDial<Tcp<'a, C, R>, fn() -> Option<u64>, E>;
 
 /// De downloader van artifacts: `http://` en `https://`, en de bytes via de runner de kooi in.
 ///
 /// De artifacts haalt hij in de downloadtaak ([`crate::download`]), naast
 /// de eigenaar: de bytes gaan als berichten naar de node, die ze brok voor
 /// brok de kern in stroomt. De node heeft er een tweede voor de kernbundel
-/// van een flip.
-pub struct HttpImages<C, R, K> {
-    connect: C,
-    resolver: R,
-    clock: K,
-    pool: Pool,
-    /// De wortels, één keer gelezen; `None` als de ingebakken set niet las
-    /// (dan weigert elke `https`, luid).
-    roots: Option<Roots<'static>>,
+/// van een flip. Een download volgt redirects (GitHub naar
+/// `objects.githubusercontent.com`), anders dan de aanroepen van de cluster.
+pub struct HttpImages<C, R> {
+    client: Client<C, R>,
 }
 
-impl<C: Connect, R: Resolve, K: Clock> HttpImages<C, R, K> {
-    /// Een downloader met de ingebakken wortels.
-    pub fn new(connect: C, resolver: R, clock: K, pool: Pool) -> Self {
+impl<C: Connect, R: Resolve> HttpImages<C, R> {
+    /// Een downloader; `trusted_secs` is nu in Unix-seconden, alleen als de
+    /// wandklok vertrouwd is, en `rng` de willekeur van de handshakes.
+    pub fn new(
+        connect: C,
+        resolver: R,
+        trusted_secs: fn() -> Option<u64>,
+        rng: applib::rand::Rng,
+    ) -> Self {
         Self {
-            connect,
-            resolver,
-            clock,
-            pool,
-            roots: Roots::from_concatenated_der(ROOTS_DER).ok(),
+            client: Client::new(connect, resolver, rng, trusted_secs),
         }
-    }
-
-    /// Hoeveel wortels de downloader vertrouwt (0: de set las niet).
-    pub fn root_count(&self) -> usize {
-        self.roots.map_or(0, |r| r.len())
     }
 }
 
-impl<C: Connect, R: Resolve, K: Clock> Images for HttpImages<C, R, K> {
+impl<C: Connect, R: Resolve> Images for HttpImages<C, R> {
     async fn fetch<S: Sink>(&mut self, url: &str, sink: &mut S) -> Result<(), String> {
-        let scheme = scheme_of(url).map_err(|e| format!("download: {e}"))?;
-        // De tijd van deze download gaat mee in de willekeur.
-        self.pool.stir(&self.clock.mono_ns().to_le_bytes());
-        let now = self.clock.trusted_unix_secs();
-        let verifier = self
-            .roots
-            .zip(now)
-            .map(|(roots, now)| ChainVerifier::new(roots, now));
-        if scheme == Scheme::Https && self.roots.is_none() {
-            return Err(format!(
-                "download {url}: the built-in root certificates did not parse; https refused"
-            ));
-        }
-        let trust = verifier.as_ref().map(|v| Trust::Chain(v));
-        let mut dial =
-            ArtifactDial::new(&mut self.connect, &mut self.resolver, trust, &mut self.pool);
+        scheme_of(url).map_err(|e| format!("download {url}: {e}"))?;
         // `get` eist 200 en een Content-Length: een image zonder lengte
         // kan de kern niet plaatsen.
+        let mut dial = self.client.web();
         let got = leanhttp::get(&mut dial, url).await;
-        let mut resp = got.map_err(|e| match dial.why() {
-            Some(why) => format!("download {url}: {why}"),
-            None => format!("download {url}: {e}"),
-        })?;
+        let tls = dial.last_error();
+        drop(dial);
+        let mut resp =
+            got.map_err(|e| format!("download {url}: {}", self.client.reason(e, tls)))?;
         let len = resp
             .length
             .ok_or_else(|| format!("download {url}: no Content-Length"))?;

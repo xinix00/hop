@@ -5,13 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "De host-kant van het net (std): std-sockets als leanhttp-verbinding, een block_on, de HTTP(S)-client met de Mozilla-wortels, en het leans3-transport."
+description = "De host-kant van het net (std): std-sockets als leanhttp-verbinding, een block_on, de HTTP(S)-client over leanhttps::WebDial, en de S3-transporten."
 
 [dependencies]
-leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.9" }
-leanhttps = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.9" }
-leantls = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.9" }
-leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.9" }
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.11" }
+leanhttps = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.11", features = ["mozilla-roots"] }
+leantls = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.11", features = ["mozilla-roots"] }
+leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.11" }
+leans3http = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.11" }
 
 [lints]
 workspace = true

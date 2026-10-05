@@ -1,4 +1,4 @@
-//! De host-kant van het net (std): std-sockets als leanhttp-verbinding, een block_on, de HTTP(S)-client, het leans3-transport.
+//! De host-kant van het net (std): std-sockets als leanhttp-verbinding, een block_on, de HTTP(S)-client, de S3-transporten.
 //!
 //! Op HopOS draait Hop op de executor van applib en praat leanhttp met de
 //! netstack van het slot (`hop-http`). Op Linux en macOS is er een kernel
@@ -11,13 +11,15 @@
 //! - [`block_on`]: de kleinste executor die daarbij past. Een future die
 //!   alleen [`StdConn`]s pollt, wordt in één ronde klaar; een onverwachte
 //!   `Pending` kost een korte slaap en een nieuwe poll.
-//! - [`Http`]: de client voor `http://` en `https://` (leanhttps met
-//!   ketenverificatie tegen de ingebakken Mozilla-wortels, de systeemklok als
-//!   datum), met [`Http::request`] voor API-verkeer (en
+//! - [`Http`]: de client voor `http://` en `https://` (`leanhttps::WebDial`
+//!   over de std-dial: ketenverificatie tegen `leantls::MOZILLA_ROOTS`, de
+//!   systeemklok als datum), met [`Http::request`] voor API-verkeer (en
 //!   [`Http::request_until`] met één totale termijn per aanroep),
 //!   [`Http::stream`] voor downloads en [`Http::open`] voor stromen die de
 //!   aanroeper hap voor hap leest (SSE, een log-tail door de proxy).
-//! - [`S3Transport`]: `leans3::Transport` over dezelfde verbindingen.
+//! - [`s3_http`]: `leans3http::Http` over dezelfde dial, voor de lease en de
+//!   staat; [`S3Transport`]: een gestroomd `leans3::Transport` voor de
+//!   downloads van de runner (leans3http buffert elke body).
 //!
 //! # Waarom threads en geen eigen reactor
 //!
@@ -46,10 +48,10 @@ mod conn;
 mod exec;
 mod s3;
 
-pub use client::{Call, Error, HostConn, Http, Open, ROOTS_DER, Reply, Result, entropy, unix_secs};
+pub use client::{Call, Error, HostConn, Http, Open, Reply, Result, entropy, unix_secs};
 pub use conn::{Socket, StdConn};
 pub use exec::block_on;
-pub use s3::{S3Response, S3Transport};
+pub use s3::{S3Response, S3Transport, s3_http};
 
 #[cfg(test)]
 mod tests;
