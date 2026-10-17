@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: sh tools/gate.sh
+
+  build:
+    needs: gate
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            name: linux-amd64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            name: linux-arm64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: rustup target add ${{ matrix.target }}
+      - name: Build the host binary
+        env:
+          # musl linkt statisch met rust-lld; geen cross-gcc nodig.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+        run: cargo build --release --features std --bin hopprom --target ${{ matrix.target }}
+      - name: Pack
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          dir="dist/hopprom-${VERSION}-${{ matrix.name }}"
+          mkdir -p "$dir"
+          cp "target/${{ matrix.target }}/release/hopprom" "$dir/"
+          tar czf "${dir}.tar.gz" -C dist "$(basename "$dir")"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*.tar.gz
+
+  hopos:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - name: Build the HopOS resident
+        run: cargo build --release --features hopos --bin hopprom-hopos --target aarch64-unknown-none-softfloat
+      - name: Pack
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          cp "target/aarch64-unknown-none-softfloat/release/hopprom-hopos" "dist/hopprom-${VERSION}-hopos.elf"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hopos
+          path: dist/*.elf
+
+  release:
+    needs: [build, hopos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && shasum -a 256 * > checksums.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.elf
+            dist/checksums.txt
