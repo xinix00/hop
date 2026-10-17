@@ -1,0 +1,103 @@
+# hoplb v3: de load balancer voor Hop op hostnaam, in Rust.
+#
+# Eén crate aan de root (de werkruimte heeft één lid): de kern is no_std
+# met alloc en sans-I/O (routetabel, proxy, metrics, admin, de staat van de
+# watcher); de twee vormen zijn features met elk een bin:
+#
+#   feature `std`    bin `hoplb`        de host-daemon: threads, std-sockets
+#   feature `hopos`  bin `hoplb-hopos`  de bewoner op HopOS: applib, één executor
+#
+# De Go-boom staat in OLD/ en is de specificatie (rustdoc/PORT.md §6.5).
+[workspace]
+resolver = "3"
+members = ["."]
+
+[package]
+name = "hoplb"
+version = "3.0.0"
+edition = "2024"
+rust-version = "1.93"
+license-file = "LICENSE"
+repository = "https://github.com/xinix00/hoplb"
+description = "Load balancer op hostnaam voor Hop, met Prometheus-metrics: als host-daemon en als bewoner op HopOS."
+publish = false
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "hoplb"
+path = "src/bin/hoplb/main.rs"
+required-features = ["std"]
+bench = false
+
+[[bin]]
+name = "hoplb-hopos"
+path = "src/bin/hoplb-hopos/main.rs"
+required-features = ["hopos"]
+bench = false
+
+[features]
+# `cargo build` geeft de host-daemon; de bewoner bouwt met
+# `--no-default-features --features hopos` voor aarch64-unknown-none-softfloat.
+default = ["std"]
+std = ["dep:hostnet", "hoplib/std"]
+hopos = ["dep:applib", "dep:sync", "hoplib/hopos"]
+
+[dependencies]
+# HTTP/1.1 (PORT.md §2.1): de traits waar de proxy over loopt, en de server
+# van de admin-poort. Een tag, nooit een pad: lean is een eigen repo.
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.3" }
+# De gedeelde client van Hop (xinix00/hoplib): de kern leest er de jobs,
+# taken en gebeurtenissen mee (sans-I/O), de features kiezen het transport.
+hoplib = { git = "https://github.com/xinix00/hoplib.git", tag = "v3.0.1" }
+# De host-kant van het net (std-sockets als leanhttp-verbinding, block_on,
+# de HTTP-client), dezelfde tag als Hop zelf.
+hostnet = { git = "https://github.com/xinix00/hop.git", tag = "v3.0.0", optional = true }
+# De app-runtime van HopOS: executor, netstack, `TcpConn`-brug voor leanhttp.
+applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.0", features = ["http"], optional = true }
+sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.0", optional = true }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+non_ascii_idents = "deny"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[lints.rustdoc]
+missing_crate_level_docs = "warn"
+unescaped_backticks = "warn"
+
+# De harde set uit rustdoc/README.md §12.
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+ptr_as_ptr = "warn"
+ptr_cast_constness = "warn"
+ref_as_ptr = "warn"
+as_ptr_cast_mut = "warn"
+as_underscore = "warn"
+cast_lossless = "warn"
+mut_mut = "warn"
+needless_bitwise_bool = "warn"
+no_mangle_with_rust_abi = "warn"
+ignored_unit_patterns = "warn"
+await_holding_refcell_ref = "deny"
+await_holding_lock = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+large_stack_arrays = "deny"
+
+[profile.release]
+panic = "abort"
+overflow-checks = true
+lto = true
+codegen-units = 1
+debug = true

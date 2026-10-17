@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: sh tools/gate.sh
+
+      - name: Build the host daemon and the HopOS resident
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          cargo build --release --bin hoplb
+          dir="dist/hoplb-${VERSION}-linux-amd64"
+          mkdir -p "$dir" && cp target/release/hoplb "$dir/"
+          tar czf "${dir}.tar.gz" -C dist "$(basename "$dir")" && rm -rf "$dir"
+          cargo build --release --no-default-features --features hopos \
+            --target aarch64-unknown-none-softfloat --bin hoplb-hopos
+          OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
+          if [ -z "$OBJCOPY" ]; then rustup component add llvm-tools; OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy | head -1)"; fi
+          "$OBJCOPY" --strip-debug target/aarch64-unknown-none-softfloat/release/hoplb-hopos "dist/hoplb-${VERSION}-hopos-arm64.elf"
+          cd dist && shasum -a 256 * > checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*
