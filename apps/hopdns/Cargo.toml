@@ -10,7 +10,7 @@
 #                      (target aarch64-unknown-none-softfloat)
 [package]
 name = "hopdns"
-version = "3.0.0"
+version.workspace = true
 edition = "2024"
 rust-version = "1.93"
 license = "MIT"

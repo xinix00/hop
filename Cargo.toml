@@ -53,7 +53,7 @@ store = { path = "store" }
 hoplib = { path = "hoplib" }
 
 [workspace.package]
-version = "3.0.9"
+version = "3.0.10"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT"

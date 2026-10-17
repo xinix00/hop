@@ -3,7 +3,7 @@
 # features kiezen het transport (`std`: hostnet, `hopos`: applib + leanhttp).
 [package]
 name = "hoplib"
-version = "3.0.1"
+version.workspace = true
 edition = "2024"
 rust-version = "1.93"
 license = "MIT"

@@ -3,7 +3,7 @@
 # feature `std` geeft de host-bin, de feature `hopos` de bewoner op HopOS.
 [package]
 name = "hopprom"
-version = "3.0.0"
+version.workspace = true
 edition = "2024"
 rust-version = "1.93"
 license = "MIT"

@@ -10,7 +10,7 @@
 # De Go-boom staat in OLD/ en is de specificatie (rustdoc/PORT.md §6.5).
 [package]
 name = "hoplb"
-version = "3.0.0"
+version.workspace = true
 edition = "2024"
 rust-version = "1.93"
 license-file = "LICENSE"

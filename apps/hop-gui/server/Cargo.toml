@@ -4,7 +4,7 @@
 # en als HopOS-app (`hop-gui-hopos`, feature `hopos`).
 [package]
 name = "hop-gui"
-version = "3.0.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
