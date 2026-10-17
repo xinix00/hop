@@ -82,6 +82,11 @@ jobs:
   hopos:
     needs: gate
     runs-on: ubuntu-latest
+    env:
+      # Zonder debug-info gebouwd in plaats van achteraf gestript: de
+      # rust-objcopy van de runner mist zijn libLLVM (17-10, v3.0.10). De
+      # symbolen blijven, zoals bij --strip-debug.
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
@@ -93,13 +98,11 @@ jobs:
           cargo build --release --target $T -p hop-gui --features hopos --bin hop-gui-hopos
           cargo build --release --target $T -p hoplb --no-default-features --features hopos --bin hoplb-hopos
           cargo build --release --target $T -p hoplockserver --no-default-features --features hopos --bin hoplockserver-hopos
-      - name: Strip
+      - name: Collect
         run: |
-          OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-          if [ -z "$OBJCOPY" ]; then rustup component add llvm-tools; OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy | head -1)"; fi
           mkdir -p dist
           for a in hopdns hopprom hop-gui hoplb hoplockserver; do
-            "$OBJCOPY" --strip-debug "target/aarch64-unknown-none-softfloat/release/${a}-hopos" "dist/${a}-arm64.elf"
+            cp "target/aarch64-unknown-none-softfloat/release/${a}-hopos" "dist/${a}-arm64.elf"
           done
           ls -l dist
       - uses: actions/upload-artifact@v4
