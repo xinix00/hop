@@ -30,7 +30,24 @@ hostnet/    the host side of the net (std): std sockets for leanhttp, block_on, 
 store/      the lease and the committed cluster state on the host: S3, hoplockserver, a file
 agentd/     the daemon binary (Linux, macOS): agent, election, leader, both APIs, processes and docker
 cli/        the `hop` command: apply, jobs, status, agents, logs, events, delete, flip, image
+hoplib/     the client for plugins: signed requests, typed replies, the /v1/events stream
+
+apps/       the apps Hop ships, each a host daemon (`std`) and a HopOS resident (`hopos`)
+  hopdns/         DNS service discovery, with federation across clusters
+  hoplb/          the HTTP load balancer on hostname, with Prometheus metrics
+  hopprom/        the Prometheus exporter for the cluster
+  hoplockserver/  the compare-and-swap lease store under hoplock (a fake S3)
+  hop-gui/        the static dashboard and its server
 ```
+
+The core crates never depend on `hoplib` or `apps/`: the apps stand on Hop,
+not the other way round (`tools/gate.sh` checks it). lean and HopOS are
+products of their own and come in on one tag each, set in the root
+`Cargo.toml`.
+
+`tools/gate.sh` is the gate for the whole workspace: the core, then every
+app's own `tools/gate.sh` (its `std` and `hopos` builds apart).
+`HOP_GATE_CORE=1` runs the core only.
 
 ## On a host
 

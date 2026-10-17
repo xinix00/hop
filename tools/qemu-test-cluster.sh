@@ -50,15 +50,11 @@
 #
 #   tools/qemu-test-cluster.sh              TIMEOUT=120 per fase, in seconden
 #   HOPOS_DIR=pad tools/qemu-test-cluster.sh   de HopOS-repo (standaard ../../hop-os)
-#   HOPLOCK_DIR=pad                         de hoplockserver-repo (standaard
-#                                           ../../hoplockserver); zijn bin wordt
-#                                           gebouwd in target/ext/hoplock hier
 #   KEEP_LOG=map                            bewaart ook groene logs daar
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 HOPOS_DIR="${HOPOS_DIR:-$DIR/../../hop-os}"
-HOPLOCK_DIR="${HOPLOCK_DIR:-$DIR/../../hoplockserver}"
 TIMEOUT="${TIMEOUT:-120}"
 TARGET=aarch64-unknown-none-softfloat
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/hop-cluster.XXXXXX")"
@@ -148,11 +144,9 @@ echo "== bouwen: hopos (qemuvirt) en appspike in $HOPOS_DIR, agentd-hopos, agent
 (cd "$HOPOS_DIR" && cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt &&
 	cargo build --quiet --release --target "$TARGET" -p appspike)
 (cd "$DIR" && cargo build --quiet --release --target "$TARGET" -p agentd-hopos &&
-	cargo build --quiet --release -p agentd -p cli)
-CARGO_TARGET_DIR="$DIR/target/ext/hoplock" cargo build --quiet --release \
-	--manifest-path "$HOPLOCK_DIR/Cargo.toml" --bin hoplockserver
+	cargo build --quiet --release -p agentd -p cli -p hoplockserver)
 KERNEL="$HOPOS_DIR/target/$TARGET/release/hopos"
-LOCK="$DIR/target/ext/hoplock/release/hoplockserver"
+LOCK="$DIR/target/release/hoplockserver"
 AGENTD="$DIR/target/release/agentd"
 HOP="$DIR/target/release/hop"
 

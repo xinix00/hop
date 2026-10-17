@@ -3,7 +3,7 @@
 # een gepubliceerde poort, en van buiten praat curl het CAS-protocol.
 #
 # De kern (HopOS uit $HOPOS_DIR, standaard ../hop-os) boot op QEMU virt met
-# agentd-hopos (uit $HOP_DIR, standaard ../hop/hop) in slot 1, zoals
+# agentd-hopos (uit $HOP_DIR, standaard de root van de hop-repo) in slot 1, zoals
 # tools/qemu-test-welcome.sh daar. Van buiten gaat één jobspec naar de
 # leader van Hop: deze bewoner van een artifact-server op de host (voor de
 # gast 10.0.2.2), met "ports":{"http":8090}, de sleutel in de env en het
@@ -34,8 +34,8 @@
 #   KEEP_LOG=pad tools/qemu-test.sh      bewaart ook een groene console
 #   HOPOS_DIR=pad HOP_DIR=pad            de repo's van HopOS en Hop
 #   EXT_TARGET=pad                       waar kern en Hop gebouwd worden
-#                                        (standaard target/ext in deze repo:
-#                                        in de andere repo's verandert niets)
+#                                        (standaard target/ext van de
+#                                        werkruimte: in hop-os verandert niets)
 #   VOLUME=/volumes/hoplock              het volume van de job op /data
 #                                        (standaard; VOLUME= toetst zonder)
 #   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/LOCKPORT   de host-poorten;
@@ -43,10 +43,11 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$DIR/../.." && pwd)" # de hop-repo: de werkruimte en zijn target/
 TIMEOUT="${TIMEOUT:-120}"
-HOPOS_DIR="$(cd "${HOPOS_DIR:-$DIR/../hop-os}" && pwd)"
-HOP_DIR="$(cd "${HOP_DIR:-$DIR/../hop/hop}" && pwd)"
-EXT_TARGET="${EXT_TARGET:-$DIR/target/ext}"
+HOPOS_DIR="$(cd "${HOPOS_DIR:-$ROOT/../../hop-os}" && pwd)"
+HOP_DIR="$(cd "${HOP_DIR:-$ROOT}" && pwd)"
+EXT_TARGET="${EXT_TARGET:-$ROOT/target/ext}"
 TARGET=aarch64-unknown-none-softfloat
 KEY="qemu-lock-secret"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/hoplock-qemu.XXXXXX")"
@@ -104,7 +105,7 @@ OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/n
 strip_to() {
 	if [ -n "$OBJCOPY" ]; then "$OBJCOPY" --strip-debug "$1" "$2"; else cp "$1" "$2"; fi
 }
-strip_to "$DIR/target/$TARGET/release/hoplockserver-hopos" "$ART/hoplockserver-hopos.elf"
+strip_to "$ROOT/target/$TARGET/release/hoplockserver-hopos" "$ART/hoplockserver-hopos.elf"
 HOP_ELF="$WORK/agentd-hopos.elf"
 strip_to "$EXT_TARGET/hop/$TARGET/release/agentd-hopos" "$HOP_ELF"
 HOP_SIZE=$(wc -c <"$HOP_ELF" | tr -d ' ')

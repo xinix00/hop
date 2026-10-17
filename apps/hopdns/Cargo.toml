@@ -1,26 +1,20 @@
-# hopdns v3: DNS-service-discovery voor Hop, in Rust. De Go-generatie staat
-# in OLD/ en is de specificatie (PORT.md beslissing 5).
+# hopdns: DNS-service-discovery voor Hop, met federatie. De Go-generatie
+# staat in OLD/ en is de specificatie (PORT.md beslissing 5).
 #
-# Eén crate aan de root, want de root draagt nog het getrackte Go-binary
-# `hopdns` en een map met die naam kan er niet naast. De bibliotheek is
-# no_std met alloc en sans-I/O (de DNS-codec, de cache, de config, de
-# federatie en de toestandsmachine van de watcher); de twee binaries kiezen
-# hun runtime met een feature:
+# De bibliotheek is no_std met alloc en sans-I/O (de DNS-codec, de cache, de
+# config, de federatie en de toestandsmachine van de watcher); de twee
+# binaries kiezen hun runtime met een feature:
 #
 #   --features std     bin `hopdns`: de host-daemon op std-sockets
 #   --features hopos   bin `hopdns-hopos`: de bewoner op applib
 #                      (target aarch64-unknown-none-softfloat)
-[workspace]
-resolver = "3"
-members = ["."]
-
 [package]
 name = "hopdns"
 version = "3.0.0"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT"
-repository = "https://github.com/xinix00/hopdns"
+repository.workspace = true
 publish = false
 description = "DNS service discovery for Hop with federation: a host daemon and a HopOS resident."
 build = "build.rs"
@@ -48,56 +42,12 @@ std = ["hoplib/std"]
 hopos = ["hoplib/hopos", "dep:applib", "dep:sync"]
 
 [dependencies]
-# Alles op een tag, nooit over een pad (PORT.md beslissing 6). hoplib is
-# de gedeelde client van de plugins: de ondertekende verzoeken, de
+# hoplib is de gedeelde client van de plugins: de ondertekende verzoeken, de
 # antwoorden als hop's eigen typen, de SSE-lezer; zijn kern is sans-I/O en
 # staat dus ook in de kern van hopdns.
-hoplib = { git = "https://github.com/xinix00/hoplib.git", tag = "v3.0.1" }
-applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.0", optional = true }
-sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.0", optional = true }
-
-# De harde set uit rustdoc/README.md §12.
-[workspace.lints.rust]
-unsafe_op_in_unsafe_fn = "deny"
-non_ascii_idents = "deny"
-missing_docs = "warn"
-rust_2018_idioms = { level = "warn", priority = -1 }
-unreachable_pub = "warn"
-
-[workspace.lints.rustdoc]
-missing_crate_level_docs = "warn"
-unescaped_backticks = "warn"
-
-[workspace.lints.clippy]
-all = { level = "warn", priority = -1 }
-undocumented_unsafe_blocks = "deny"
-unnecessary_safety_comment = "warn"
-unnecessary_safety_doc = "warn"
-ptr_as_ptr = "warn"
-ptr_cast_constness = "warn"
-ref_as_ptr = "warn"
-as_ptr_cast_mut = "warn"
-as_underscore = "warn"
-cast_lossless = "warn"
-mut_mut = "warn"
-needless_bitwise_bool = "warn"
-no_mangle_with_rust_abi = "warn"
-ignored_unit_patterns = "warn"
-await_holding_refcell_ref = "deny"
-await_holding_lock = "deny"
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
-todo = "deny"
-unimplemented = "deny"
-large_stack_arrays = "deny"
+hoplib = { workspace = true }
+applib = { workspace = true, optional = true }
+sync = { workspace = true, optional = true }
 
 [lints]
 workspace = true
-
-[profile.release]
-panic = "abort"
-overflow-checks = true
-lto = true
-codegen-units = 1
-debug = true

@@ -308,7 +308,7 @@ fn agent_metrics(agents: &[Agent], capacity: &Map<CapacityMetric>) -> Result<Map
     for a in agents {
         let m = AgentMetric {
             capacity: capacity.get(&a.id).copied(),
-            temp_milli_c: a.temp_milli_c,
+            temp_milli_c: a.telemetry.temp_milli_c,
         };
         out.insert(try_string(&a.id)?, m)?;
     }

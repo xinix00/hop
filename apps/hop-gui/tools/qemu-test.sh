@@ -49,9 +49,10 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$DIR/../.." && pwd)" # de hop-repo: de werkruimte en zijn target/
 TIMEOUT="${TIMEOUT:-90}"
-HOPOS_DIR="$(cd "${HOPOS_DIR:-$DIR/../../hop-os}" && pwd)"
-HOP_DIR="$(cd "${HOP_DIR:-$DIR/../hop}" && pwd)"
+HOPOS_DIR="$(cd "${HOPOS_DIR:-$ROOT/../../hop-os}" && pwd)"
+HOP_DIR="$(cd "${HOP_DIR:-$ROOT}" && pwd)"
 TARGET=aarch64-unknown-none-softfloat
 KEY="${HOP_KEY:-qemu-dashboard-key}"
 LOG="$(mktemp -t hopgui-qemu.XXXXXX)"
@@ -93,13 +94,13 @@ ARTPORT="$(port "${ARTPORT:-8000}" ARTPORT)"
 WEBPORT="$(port "${WEBPORT:-8081}" WEBPORT)"
 
 echo "== build: hop-gui-hopos here, hopos in $HOPOS_DIR, agentd-hopos in $HOP_DIR"
-(cd "$DIR" && cargo build --quiet --release --target "$TARGET" --features hopos --bin hop-gui-hopos)
+(cd "$DIR" && cargo build --quiet --release -p hop-gui --target "$TARGET" --features hopos --bin hop-gui-hopos)
 (cd "$HOPOS_DIR" && cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt)
 (cd "$HOP_DIR" && cargo build --quiet --release --target "$TARGET" -p agentd-hopos)
 
 # The artifact server: without debug info, the symbols stay for placement.
 OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
-ELF="$DIR/target/$TARGET/release/hop-gui-hopos"
+ELF="$ROOT/target/$TARGET/release/hop-gui-hopos"
 if [ -n "$OBJCOPY" ]; then
 	"$OBJCOPY" --strip-debug "$ELF" "$ART/hop-gui.elf"
 else

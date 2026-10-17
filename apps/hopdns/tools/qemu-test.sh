@@ -46,8 +46,9 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-HOPOS_DIR="$(cd "${HOPOS_DIR:-$DIR/../../hop-os}" && pwd)"
-HOP_DIR="$(cd "${HOP_DIR:-$DIR/../hop}" && pwd)"
+ROOT="$(cd "$DIR/../.." && pwd)" # de hop-repo: de werkruimte en zijn target/
+HOPOS_DIR="$(cd "${HOPOS_DIR:-$ROOT/../../hop-os}" && pwd)"
+HOP_DIR="$(cd "${HOP_DIR:-$ROOT}" && pwd)"
 TIMEOUT="${TIMEOUT:-120}"
 TARGET=aarch64-unknown-none-softfloat
 LOG="$(mktemp -t hopdns-qemu.XXXXXX)"
@@ -105,7 +106,7 @@ strip_to() {
 		cp "$1" "$2"
 	fi
 }
-strip_to "$DIR/target/$TARGET/release/hopdns-hopos" "$ART/hopdns.elf"
+strip_to "$ROOT/target/$TARGET/release/hopdns-hopos" "$ART/hopdns.elf"
 strip_to "$HOPOS_DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
 (cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
 HPID=$!

@@ -198,10 +198,10 @@ against the state machine and over real sockets; `client_test.go` and
 `object_test.go` with Hop's own Rust client (`store::HoplockLease`,
 `store::HoplockStateStore`) against the running server.
 
-`tools/e2e-host.sh` and `tools/qemu-test.sh` build Hop and HopOS from the
-sibling checkouts (`HOP_DIR`, default `../hop/hop`; `HOPOS_DIR`, default
-`../hop-os`) into `target/ext` of this repository, with `--locked`: nothing
-in those repositories changes.
+`tools/e2e-host.sh` and `tools/qemu-test.sh` build Hop from this workspace
+(`HOP_DIR`, default the hop repository root) and HopOS from its sibling
+checkout (`HOPOS_DIR`, default `../../hop-os` from the hop root) into
+`target/ext`, with `--locked`: nothing in the HopOS checkout changes.
 
 ## Status
 

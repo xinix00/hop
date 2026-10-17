@@ -32,7 +32,7 @@ impl Cluster for FakeCluster {
     fn register_agent(&mut self, _: u64, _: &str, _: &str, _: &str, _: &[(String, i64)]) -> bool {
         true
     }
-    fn heartbeat(&mut self, _: u64, _: &str, _: &str, _: i64) -> bool {
+    fn heartbeat(&mut self, _: u64, _: &str, _: &str, _: types::Telemetry) -> bool {
         true
     }
     fn unregister_agent(&mut self, _: &str) {}
@@ -92,7 +92,10 @@ fn cluster() -> FakeCluster {
                 endpoint: "http://10.0.0.1:7878".into(),
                 version: "3.0.0".into(),
                 last_seen: types::Time(1_790_000_000_000_000_000),
-                temp_milli_c: 51_000,
+                telemetry: types::Telemetry {
+                    temp_milli_c: 51_000,
+                    ..types::Telemetry::default()
+                },
             },
             types::Agent {
                 id: "node-2".into(),

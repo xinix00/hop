@@ -45,9 +45,10 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$DIR/../.." && pwd)" # de hop-repo: de werkruimte en zijn target/
 TIMEOUT="${TIMEOUT:-120}"
-HOPOS_DIR="$(cd "${HOPOS_DIR:-$DIR/../../hop-os}" && pwd)"
-HOP_DIR="$(cd "${HOP_DIR:-$DIR/../hop}" && pwd)"
+HOPOS_DIR="$(cd "${HOPOS_DIR:-$ROOT/../../hop-os}" && pwd)"
+HOP_DIR="$(cd "${HOP_DIR:-$ROOT}" && pwd)"
 TARGET=aarch64-unknown-none-softfloat
 LOG="$(mktemp -t hoplb-qemu.XXXXXX)"
 ART="$(mktemp -d -t hoplb-art.XXXXXX)"
@@ -100,7 +101,7 @@ OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/n
 strip_to() {
 	if [ -n "$OBJCOPY" ]; then "$OBJCOPY" --strip-debug "$1" "$2"; else cp "$1" "$2"; fi
 }
-strip_to "$DIR/target/$TARGET/release/hoplb-hopos" "$ART/hoplb.elf"
+strip_to "$ROOT/target/$TARGET/release/hoplb-hopos" "$ART/hoplb.elf"
 strip_to "$HOPOS_DIR/target/$TARGET/release/welcome" "$ART/welcome.elf"
 (cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
 HPID=$!

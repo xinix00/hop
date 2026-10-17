@@ -18,9 +18,9 @@ One crate, three faces:
 | `hopprom-hopos` (bin) | `hopos` | The HopOS resident (`aarch64-unknown-none-softfloat`, on `applib`): a poll task and a server task on the app executor. |
 
 Talking to Hop (signing with `X-Hop-Auth`, the routes, reading the replies)
-is [hoplib](https://github.com/xinix00/hoplib), the client shared by the Hop
-plugins. Dependencies come from git tags only: hop `v3.0.0`, HopOS
-`v3.0.0`, lean `v3.1.3`, hoplib `v3.0.1`.
+is [hoplib](../../hoplib), the client shared by the Hop plugins. hopprom
+lives in the hop workspace: hop's crates and hoplib are path dependencies,
+HopOS and lean come in on the workspace's tags (the root `Cargo.toml`).
 
 ## Host binary
 

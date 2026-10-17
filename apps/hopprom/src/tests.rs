@@ -509,7 +509,7 @@ fn the_text_format_is_exact() {
     run.cpu_percent = 1.25;
     run.mem_percent = 3.0;
     let mut a = agent("hopos-qemu", at(2));
-    a.temp_milli_c = 51_500;
+    a.telemetry.temp_milli_c = 51_500;
     let p = Poll {
         agents: vec![a],
         jobs: vec![job("hopprom", 1)],

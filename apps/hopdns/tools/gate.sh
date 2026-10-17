@@ -4,8 +4,8 @@
 #
 # De kern (de bibliotheek zonder features) is no_std en bouwt voor
 # aarch64-unknown-none-softfloat; `std` is de host-daemon, `hopos` de
-# bewoner. De QEMU-kring is tools/qemu-test.sh (die vraagt hop-os en hop
-# naast deze repo, en QEMU).
+# bewoner. De QEMU-kring is tools/qemu-test.sh (die vraagt hop-os naast
+# de hop-repo, en QEMU).
 set -e
 cd "$(dirname "$0")/.."
 TARGET=aarch64-unknown-none-softfloat
@@ -23,7 +23,7 @@ echo "== target: de no_std-kern en de bewoner ($TARGET)"
 cargo build --quiet --lib --target "$TARGET"
 cargo clippy --quiet --release --features hopos --target "$TARGET" --bin hopdns-hopos -- -D warnings
 cargo build --quiet --release --features hopos --target "$TARGET" --bin hopdns-hopos
-ls -l "target/$TARGET/release/hopdns-hopos" | awk '{print "   hopdns-hopos: " $5 " bytes (met debug-info)"}'
+ls -l "../../target/$TARGET/release/hopdns-hopos" | awk '{print "   hopdns-hopos: " $5 " bytes (met debug-info)"}'
 echo "== meetregels (release)"
 cargo test --release --test bench -- --nocapture --test-threads=1 2>/dev/null |
 	grep -o 'bench [a-z_/0-9]*: .*' | sed 's/^/   /'

@@ -1,7 +1,7 @@
 #!/bin/sh
-# De poort (handboek §9): host-tests, clippy met de harde set, rustfmt, de
-# bewoner voor zijn target, en de randen van de afhankelijkheden. Rood is
-# rood.
+# De poort (handboek §9): host-tests, clippy met de harde set, rustfmt en de
+# bewoner voor zijn target. Rood is rood. De randen van de afhankelijkheden
+# bewaakt de poort van de hop-werkruimte (tools/gate.sh in de root).
 #
 # Drie vormen van dezelfde crate, elk apart getoetst:
 #
@@ -20,16 +20,6 @@ cd "$(dirname "$0")/.."
 TARGET=aarch64-unknown-none-softfloat
 LOG="$(mktemp -t hoplb-gate.XXXXXX)"
 trap 'rm -f "$LOG"' EXIT
-
-echo "== randen: alleen git-tags, nooit een pad over de repo-grens"
-if grep -nE '^[^#]*path *=' Cargo.toml | grep -v -E '^\S*:(path = "src/)'; then
-	echo "ROOD: een pad-dependency in Cargo.toml"
-	exit 1
-fi
-if grep -nE '^[^#]*git *=' Cargo.toml | grep -v 'tag *='; then
-	echo "ROOD: een git-dependency zonder tag"
-	exit 1
-fi
 
 echo "== kern: cargo test (no_std-bibliotheek, host-tests)"
 cargo test --quiet --no-default-features -- --nocapture --test-threads=1 >"$LOG" 2>&1 || {
@@ -54,10 +44,10 @@ cargo fmt --check
 
 echo "== target: de bewoner ($TARGET, release)"
 cargo build --quiet --release --no-default-features --features hopos --target "$TARGET" --bin hoplb-hopos
-ls -l "target/$TARGET/release/hoplb-hopos" | awk '{print "   hoplb-hopos: " $5 " bytes (met debug-info; objcopy --strip-debug voor de artifact)"}'
+ls -l "../../target/$TARGET/release/hoplb-hopos" | awk '{print "   hoplb-hopos: " $5 " bytes (met debug-info; objcopy --strip-debug voor de artifact)"}'
 echo "== host: de daemon (release)"
 cargo build --quiet --release --bin hoplb
-ls -l target/release/hoplb | awk '{print "   hoplb: " $5 " bytes"}'
+ls -l ../../target/release/hoplb | awk '{print "   hoplb: " $5 " bytes"}'
 
 echo "== meetregels (test-build)"
 grep -E '^bench ' "$LOG" | sed 's/^/   /'

@@ -4,9 +4,9 @@
 # cluster erin.
 #
 # De kern en de QEMU-regel zijn die van hop-os (image/qemu-run.sh, APP=hop:
-# agentd-hopos in slot 1); dit script bouwt alleen hopprom-hopos hier en
-# neemt van de twee andere repo's alleen hun scripts en bestanden, geen
-# code (PORT.md beslissing 6). Van buiten gaat er één jobspec naar de
+# agentd-hopos in slot 1); dit script bouwt hopprom-hopos en agentd-hopos in
+# de hop-werkruimte en neemt van hop-os alleen zijn scripts en bestanden,
+# geen code (PORT.md beslissing 6). Van buiten gaat er één jobspec naar de
 # leader van Hop: hopprom-hopos van een artifact-server op de host (voor de
 # gast 10.0.2.2), met "ports":{"metrics":9090}. Hop zet ER_PORT_METRICS=9090
 # in de env en de kern zet uplink-poort 9090 door naar het slot (DNAT). De
@@ -48,9 +48,10 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$DIR/../.." && pwd)" # de hop-repo: de werkruimte en zijn target/
 TIMEOUT="${TIMEOUT:-90}"
-HOPOS_DIR="$(cd "${HOPOS_DIR:-$DIR/../../hop-os}" && pwd)"
-HOP_DIR="$(cd "${HOP_DIR:-$DIR/../hop}" && pwd)"
+HOPOS_DIR="$(cd "${HOPOS_DIR:-$ROOT/../../hop-os}" && pwd)"
+HOP_DIR="$(cd "${HOP_DIR:-$ROOT}" && pwd)"
 TARGET=aarch64-unknown-none-softfloat
 LOG="$(mktemp -t hopprom-qemu.XXXXXX)"
 ART="$(mktemp -d -t hopprom-art.XXXXXX)"
@@ -101,9 +102,9 @@ echo "== bouwen: hopprom-hopos hier; hopos (qemuvirt) in $HOPOS_DIR en agentd-ho
 # voor de plaatsing.
 OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
 if [ -n "$OBJCOPY" ]; then
-	"$OBJCOPY" --strip-debug "$DIR/target/$TARGET/release/hopprom-hopos" "$ART/hopprom-hopos.elf"
+	"$OBJCOPY" --strip-debug "$ROOT/target/$TARGET/release/hopprom-hopos" "$ART/hopprom-hopos.elf"
 else
-	cp "$DIR/target/$TARGET/release/hopprom-hopos" "$ART/hopprom-hopos.elf"
+	cp "$ROOT/target/$TARGET/release/hopprom-hopos" "$ART/hopprom-hopos.elf"
 fi
 (cd "$ART" && exec python3 -m http.server "$ARTPORT" --bind 127.0.0.1) >"$ART/http.log" 2>&1 &
 HPID=$!

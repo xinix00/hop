@@ -6,13 +6,13 @@
 set -e
 cd "$(dirname "$0")/.."
 echo "== host: cargo test (std and hopos)"
-cargo test --quiet --all-features
+cargo test --quiet -p hop-gui --all-features
 echo "== host: cargo clippy"
-cargo clippy --quiet --all-features --all-targets -- -D warnings
+cargo clippy --quiet -p hop-gui --all-features --all-targets -- -D warnings
 echo "== rustfmt"
-cargo fmt --check
+cargo fmt -p hop-gui --check
 echo "== target: hop-gui-hopos (aarch64)"
-cargo build --quiet --release --target aarch64-unknown-none-softfloat --features hopos --bin hop-gui-hopos
+cargo build --quiet --release -p hop-gui --target aarch64-unknown-none-softfloat --features hopos --bin hop-gui-hopos
 echo "== scripts"
 for s in tools/*.sh; do sh -n "$s"; done
 python3 -m py_compile tools/dashboard-api.py

@@ -4,7 +4,7 @@ A static cluster dashboard for Hop, built with the shared Haasstyle components.
 
 The dashboard itself is static: `index.html`, `app.js`, `appearance.js`,
 `style.css` and `vendor/`, with no build step, CDN or frontend framework.
-This repository also carries its host: the crate `hop-gui` (in `server/`)
+This directory also carries its host: the crate `hop-gui` (in `server/`)
 bakes those files into one binary with `include_bytes!` and serves them,
 either on a plain host or as an app on a HopOS node that Hop places like
 any other job.
@@ -16,7 +16,7 @@ any other job.
 kernel reads them when it places the image):
 
 ```sh
-cargo build --release --target aarch64-unknown-none-softfloat --features hopos --bin hop-gui-hopos
+cargo build --release -p hop-gui --target aarch64-unknown-none-softfloat --features hopos --bin hop-gui-hopos
 rust-objcopy --strip-debug target/aarch64-unknown-none-softfloat/release/hop-gui-hopos hop-gui.elf
 ```
 
@@ -48,7 +48,7 @@ The image is about 4.5 MB, most of it the icon font in `vendor/`; the
 ## Hosting on a host
 
 ```sh
-cargo build --release --features std --bin hop-gui
+cargo build --release -p hop-gui --features std --bin hop-gui
 target/release/hop-gui -listen :3000
 ```
 

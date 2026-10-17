@@ -18,7 +18,8 @@
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-HOP_DIR="$(cd "${HOP_DIR:-$DIR/../hop}" && pwd)"
+ROOT="$(cd "$DIR/../.." && pwd)" # de hop-repo: de werkruimte en zijn target/
+HOP_DIR="$(cd "${HOP_DIR:-$ROOT}" && pwd)"
 GUIPORT="${GUIPORT:-3000}"
 AGENTPORT="${AGENTPORT:-18380}"
 KEY=host-dashboard-key
@@ -33,7 +34,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "== build: hop-gui here, agentd in $HOP_DIR"
-(cd "$DIR" && cargo build --quiet --release --features std --bin hop-gui)
+(cd "$DIR" && cargo build --quiet --release -p hop-gui --features std --bin hop-gui)
 (cd "$HOP_DIR" && cargo build --quiet --release -p agentd)
 
 cat >"$WORK/hop.json" <<JSON
@@ -45,7 +46,7 @@ cat >"$WORK/hop.json" <<JSON
 JSON
 "$HOP_DIR/target/release/agentd" --config "$WORK/hop.json" 2>"$WORK/agentd.log" &
 APID=$!
-"$DIR/target/release/hop-gui" -listen "127.0.0.1:$GUIPORT" 2>"$WORK/hop-gui.log" &
+"$ROOT/target/release/hop-gui" -listen "127.0.0.1:$GUIPORT" 2>"$WORK/hop-gui.log" &
 GPID=$!
 
 wait_log() { # wait_log <file> <marker>

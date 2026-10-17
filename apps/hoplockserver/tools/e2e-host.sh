@@ -1,7 +1,7 @@
 #!/bin/sh
 # De end-to-end-run op de host: deze server met Hop's echte `agentd`.
 #
-# Twee agentd's (uit $HOP_DIR, standaard ../hop/hop, `cargo build --release
+# Twee agentd's (uit $HOP_DIR, standaard de root van de hop-repo, `cargo build --release
 # -p agentd --locked`) vormen één cluster met `cluster.lock` op deze
 # hoplockserver. Groen alleen als:
 #
@@ -22,13 +22,13 @@
 #   tools/e2e-host.sh                 bouwt release; laat de logs staan bij rood
 #   HOP_DIR=pad tools/e2e-host.sh     de hop-repo
 #   EXT_TARGET=pad                    waar agentd gebouwd wordt (standaard
-#                                     target/ext in deze repo: in de hop-repo
-#                                     verandert niets)
+#                                     target/ext van de werkruimte)
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
-EXT_TARGET="${EXT_TARGET:-$DIR/target/ext}"
+ROOT="$(cd "$DIR/../.." && pwd)" # de hop-repo: de werkruimte en zijn target/
+HOP_DIR="${HOP_DIR:-$ROOT}"
+EXT_TARGET="${EXT_TARGET:-$ROOT/target/ext}"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/hoplock-e2e.XXXXXX")"
 KEY="e2e-lock-secret"
 LPID=""
@@ -66,7 +66,7 @@ echo "== bouwen: hoplockserver, en agentd in $HOP_DIR (target $EXT_TARGET/hop)"
 cargo build --quiet --release --manifest-path "$DIR/Cargo.toml" --bin hoplockserver
 CARGO_TARGET_DIR="$EXT_TARGET/hop" cargo build --quiet --release --locked \
 	--manifest-path "$HOP_DIR/Cargo.toml" -p agentd
-LOCK="$DIR/target/release/hoplockserver"
+LOCK="$ROOT/target/release/hoplockserver"
 AGENTD="$EXT_TARGET/hop/release/agentd"
 
 fail() {

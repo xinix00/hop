@@ -21,7 +21,36 @@ members = [
     "store",
     "agentd",
     "cli",
+    # De client van de plugins en de apps die Hop meelevert. Ze staan op
+    # Hop (types, auth, hostnet), nooit andersom: geen kern-crate hangt van
+    # hoplib of van apps/ af (tools/gate.sh bewaakt dat).
+    "hoplib",
+    "apps/hopdns",
+    "apps/hoplb",
+    "apps/hopprom",
+    "apps/hoplockserver",
+    "apps/hop-gui/server",
 ]
+
+# Eén tag per buur-repo voor de hele werkruimte: lean en HopOS zijn eigen
+# producten en komen binnen via een tag, nooit over een pad (PORT.md
+# beslissing 6). Binnen de repo zijn het paden.
+[workspace.dependencies]
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
+leanhttps = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
+leantls = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
+leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
+leans3http = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
+applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.13" }
+sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.13" }
+abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.13" }
+types = { path = "types" }
+auth = { path = "auth" }
+api = { path = "api" }
+discovery = { path = "discovery" }
+hostnet = { path = "hostnet" }
+store = { path = "store" }
+hoplib = { path = "hoplib" }
 
 [workspace.package]
 version = "3.0.9"
