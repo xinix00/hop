@@ -422,7 +422,7 @@ fn https_goes_through_tls_with_the_name_as_sni() {
 fn https_is_refused_without_clock_or_name_and_says_why() {
     let (r, _, seen) = fetch("https://github.com/x.elf", &[OK], no_clock);
     let e = r.unwrap_err();
-    assert!(e.contains("SNTP") && e.contains("https refused"), "{e}");
+    assert!(e.contains("SNTP") && e.contains("no wall clock"), "{e}");
     assert!(seen.borrow().is_empty(), "geen verbinding zonder klok");
 
     let (r, _, seen) = fetch("https://10.0.2.2/x.elf", &[OK], now);
