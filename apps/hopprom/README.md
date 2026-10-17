@@ -19,8 +19,10 @@ One crate, three faces:
 
 Talking to Hop (signing with `X-Hop-Auth`, the routes, reading the replies)
 is [hoplib](../../hoplib), the client shared by the Hop plugins. hopprom
-lives in the hop workspace: hop's crates and hoplib are path dependencies,
-HopOS and lean come in on the workspace's tags (the root `Cargo.toml`).
+lives in the hop workspace and carries its version (3.0.11): hop's crates
+and hoplib are path dependencies, HopOS v3.0.13 and lean v3.1.12 come in
+on the workspace's tags (`[workspace.dependencies]` in the root
+`Cargo.toml`).
 
 ## Host binary
 
@@ -28,9 +30,9 @@ HopOS and lean come in on the workspace's tags (the root `Cargo.toml`).
 cargo build --release --features std --bin hopprom
 
 # Defaults: polls http://127.0.0.1:8080, serves :9090/metrics every 5s.
-./target/release/hopprom
+../../target/release/hopprom
 
-./target/release/hopprom \
+../../target/release/hopprom \
   -listen :9090 \
   -agent http://127.0.0.1:8080 \
   -interval 5s \
@@ -49,7 +51,7 @@ sees `up 0` instead of a cluster of zeros. `GET /health` answers `ok`.
 
 ```sh
 cargo build --release --target aarch64-unknown-none-softfloat --features hopos --bin hopprom-hopos
-rust-objcopy --strip-debug target/aarch64-unknown-none-softfloat/release/hopprom-hopos hopprom-hopos.elf
+rust-objcopy --strip-debug ../../target/aarch64-unknown-none-softfloat/release/hopprom-hopos hopprom-hopos.elf
 ```
 
 Place it with Hop; the kernel publishes the jobspec port on the node's
@@ -73,10 +75,11 @@ uplink (DNAT) and Hop passes it as `ER_PORT_METRICS`:
 | `HOPPROM_API_KEY` | none | Cluster key (`HOP_API_KEY` from the Go generation also works). |
 | `ER_PORT_METRICS` | `9090` | Set by Hop from `ports`. |
 
-Port 9080 is Hop's leader API, which has no `/leader` route: with the
-default the leader metrics stay empty (`hop_leader_info{leader=""} 0`) and
-the console says so once. `HOPPROM_AGENT=http://HOP:8080` polls the agent
-API instead, which proxies `/v1/*` to the leader and does serve `/leader`.
+The default polls Hop's agent API (port 8080), which proxies `/v1/*` to
+the leader and serves `/leader` itself. Port 9080 is Hop's leader API,
+which has no `/leader` route: with `HOPPROM_AGENT=http://HOP:9080` the
+leader metrics stay empty (`hop_leader_info{leader=""} 0`) and the console
+says so once.
 
 Console markers: `HOPOS_HOPPROM_UP port=<n>` when the listener is up;
 `HOPOS_HOPPROM_POLL agents=<n> tasks=<n>` after the first successful poll
@@ -221,9 +224,10 @@ sh tools/gate.sh       # tests, clippy -D warnings, rustfmt, the no_std core and
 sh tools/qemu-test.sh  # Hop on QEMU, hopprom placed with ports 9090, /metrics from outside
 ```
 
-`tools/qemu-test.sh` uses the hop-os and hop repositories next to this one
-(`HOPOS_DIR`, default `../../hop-os`; `HOP_DIR`, default `../hop`) for their
-build and QEMU scripts only. It boots the kernel with Hop in slot 1, posts
+`tools/qemu-test.sh` uses a hop-os checkout (`HOPOS_DIR`, default
+`../../hop-os` from the hop root) for its build and QEMU scripts, and
+builds Hop from this workspace (`HOP_DIR`, default the hop repository
+root). It boots the kernel with Hop in slot 1, posts
 the hopprom jobspec to the leader, adds the host forward to guest port 9090
 over QMP, and checks `/metrics` from outside: `hop_agents_total 1` and
 hopprom's own task metrics.

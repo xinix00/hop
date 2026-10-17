@@ -12,6 +12,8 @@ the API. The same crates also run as an ordinary daemon on Linux and macOS.
 How the code is written: the haas.software Rust handbook (`rustdoc/README.md`
 next to this repository).
 
+The full documentation lives in [`docs/`](docs/index.md).
+
 ## Layout
 
 ```
@@ -19,9 +21,9 @@ types/      the job spec, task state, node identity: the vocabulary
 config/     node and cluster configuration
 auth/       the HMAC request authentication (X-Hop-Auth)
 leader/     scheduling, placement, updates, failover: the cluster brain
-agent/      the node: tasks, heartbeats, restarts, state persistence
+agent/      the node: tasks, heartbeats, restarts, health checks, the election
 api/        the HTTP API as pure handlers over request/response types
-discovery/  finding nodes on the LAN
+discovery/  the leader lease: claim, renew, take over; finding the leader through it
 runner/     the task backends: HopOS slots, processes, docker
 hopos-runner/  runner::SystemApi over applib's system client (the kernel frames)
 hop-http/   the HTTP adapter: leanhttp over an applib TcpStream, api in and out
@@ -66,7 +68,8 @@ tasks come from `GET /v1/tasks`, and logs and an agent's capacity go through
 the leader to that agent (`/v1/agents/{id}/logs/...`, `/capacity`). An agent
 may sit on an address the CLI cannot reach (a HopOS slot LAN, a private
 network behind the leader); the leader reaches them all. Only `flip` goes to
-an agent itself (`--agent`).
+an agent itself (`--agent`). Against an older leader that answers 404, `jobs`,
+`status` and `agents <id>` fall back to asking the agents directly.
 
 `hop image` talks to no one: it is the HopOS imager. Every HopOS kernel
 carries its node config (`hopos.cfg`) in a 16 KiB config window (a
@@ -84,7 +87,7 @@ hop image hopos-o6n-headless.flip --config my-node.cfg              # a bundle: 
 ```
 
 Streams (`hop events`, `hop logs -f`) hold a connection thread on the node
-while they run, so a node allows only a few at once (4 on a host, 2 on
+while they run, so a node allows only a few at once (4 on a host, 3 on
 HopOS) and says so with a 503. Calls to the lease and state backends (S3,
 hoplockserver) have one total deadline per call, not one per phase.
 
@@ -97,15 +100,16 @@ same for events, `/v1/tasks` and a live log through the leader.
 Cross-build for Linux: `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld
 cargo build --release -p agentd -p cli --target aarch64-unknown-linux-musl`.
 
-## Een cluster van HopOS-nodes
+## A cluster of HopOS nodes
 
 A HopOS node is a standalone leader until its `hopos.cfg` names a lock. With a
 lock, HopOS nodes and host agents (`agentd`) form one cluster: they share one
 lease on a hoplockserver or in an S3 bucket (the same lease bytes as the host
 writes, `discovery::wire`), one node holds it and leads, and the others
 register and heartbeat with that leader over the LAN. The committed cluster
-state (`state/<cluster>`) lives next to the lease, so a new leader carries on
-with the jobs of the old one.
+state (`state/<cluster>`) lives next to the lease (or in the S3 bucket when
+`hopos.s3.*` is set, whatever the lock type), so a new leader carries on with
+the jobs of the old one.
 
 The kernel hands these `hopos.cfg` keys to Hop as `HOPOS_*` env:
 
@@ -138,8 +142,9 @@ Its first claim is the boot claim: a free lock makes it leader at once. Then:
   every 10 s (`HOP_LINK_FAIL` says once why a call failed), and its agent
   port passes `/v1/*` on to the leader, streams included (`hop events`,
   `hop logs -f`);
-- failover: when the leader stops answering, the others take the lease after
-  it expires, exactly as on hosts.
+- failover: when the leader stops answering, the others try to claim the
+  lease after four failed election ticks (about 40 s) and take it once it has
+  expired, exactly as on hosts.
 
 ```
 hopos.node=pi-kitchen

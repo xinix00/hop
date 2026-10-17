@@ -36,13 +36,13 @@ tested against, test by test.
 ## Usage (host)
 
 ```bash
-cargo build --release --features std --bin hopdns
+cargo build --release --features std --bin hopdns   # into the workspace root's target/
 
 # Single cluster
-./target/release/hopdns -listen :5353 -peer http://127.0.0.1:8080
+../../target/release/hopdns -listen :5353 -peer http://127.0.0.1:8080
 
 # Federation: local and remote clusters (over a VPN)
-./target/release/hopdns -listen :5353 \
+../../target/release/hopdns -listen :5353 \
   -peer http://127.0.0.1:8080 \
   -peer http://key@10.0.1.100:8080 \
   -peer http://10.0.2.100:8080
@@ -171,15 +171,16 @@ one job) as messages; nothing is shared behind a mutex.
 | `tools/qemu-test.sh` | Hop on QEMU places welcome and hopdns; hopdns resolves welcome |
 | `OLD/` | the Go generation (specification) |
 
-Dependencies come from tags only: `hoplib` v3.0.1 (the shared plugin
-client), and for the resident `applib` and `sync` from HopOS
-v3.0.0.
+hopdns is a member of the hop workspace and carries its version (3.0.11):
+`hoplib` (the shared plugin client) is a path dependency, and the
+resident's `applib` and `sync` come from HopOS v3.0.13 through
+`[workspace.dependencies]` in the root `Cargo.toml`.
 
 ## Testing
 
 ```bash
 tools/gate.sh        # everything that runs on the host, plus the target build
-tools/qemu-test.sh   # needs ../../hop-os, ../hop and qemu-system-aarch64
+tools/qemu-test.sh   # needs hop-os (HOPOS_DIR, default ../../hop-os from the hop root) and qemu-system-aarch64
 ```
 
 `tools/qemu-test.sh` boots HopOS with Hop in slot 1, posts welcome and

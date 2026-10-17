@@ -94,7 +94,7 @@ Build the artifact without debug info (the symbols stay, placement reads them):
 ```bash
 cargo build --release --no-default-features --features hopos \
   --target aarch64-unknown-none-softfloat --bin hoplb-hopos
-rust-objcopy --strip-debug target/aarch64-unknown-none-softfloat/release/hoplb-hopos hoplb.elf
+rust-objcopy --strip-debug ../../target/aarch64-unknown-none-softfloat/release/hoplb-hopos hoplb.elf
 ```
 
 The node publishes ports 80 and 9091 on its uplink to hoplb's slot. A
@@ -148,8 +148,9 @@ sh tools/gate.sh       # tests (core, host, resident), clippy -D warnings, rustf
 sh tools/qemu-test.sh  # HopOS on QEMU: Hop places welcome and hoplb, the bunny page through hoplb
 ```
 
-`tools/qemu-test.sh` needs the sibling repositories: `HOPOS_DIR` (default
-`../../hop-os`) and `HOP_DIR` (default `../hop`). It boots HopOS with Hop,
+`tools/qemu-test.sh` needs a HopOS checkout: `HOPOS_DIR` (default
+`../../hop-os` from the hop root); Hop is built from this workspace
+(`HOP_DIR`, default the hop repository root). It boots HopOS with Hop,
 places welcome (`ports` 8081, tag `hoplb-urlprefix=welcome.local`) and hoplb
 (`ports` 80 and 9091), fetches `http://127.0.0.1:$WEBPORT/` with
 `Host: welcome.local` through hoplb, checks that `/metrics` counts it, then
@@ -157,9 +158,11 @@ deletes welcome and checks that the SSE stream takes the route away.
 
 The Go generation lives in `OLD/` and is the specification: every Go test is
 here under its own name, every Go benchmark is a test that prints a line
-`bench <name>: <ns> ns/op`. Dependencies come from git tags only (lean
-v3.1.3, hop v3.0.0, HopOS v3.0.0, hoplib v3.0.1), never
-from a path across repositories.
+`bench <name>: <ns> ns/op`. hoplb is a member of the hop workspace and
+carries its version (3.0.11): hoplib and hop's crates are path
+dependencies, lean v3.1.12 and HopOS v3.0.13 come from git tags through
+`[workspace.dependencies]` in the root `Cargo.toml`, never from a path
+across repositories.
 
 ## License
 

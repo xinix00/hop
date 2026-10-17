@@ -22,7 +22,7 @@ reads it (status, `ETag`, body), and ships in two forms:
 
 ```sh
 cargo build --release
-./target/release/hoplockserver \
+../../target/release/hoplockserver \
   -listen :8090 \
   -data ./data \
   -api-key "$(openssl rand -hex 32)"
@@ -47,7 +47,7 @@ keys already in the data directory), `HOPLOCK_NO_AUTH` when there is no key,
 cargo build --release --target aarch64-unknown-none-softfloat \
   --no-default-features --features hopos --bin hoplockserver-hopos
 rust-objcopy --strip-debug \
-  target/aarch64-unknown-none-softfloat/release/hoplockserver-hopos hoplockserver.elf
+  ../../target/aarch64-unknown-none-softfloat/release/hoplockserver-hopos hoplockserver.elf
 ```
 
 Serve `hoplockserver.elf` over HTTP where the node can reach it and hand Hop
@@ -75,13 +75,14 @@ Console markers: `HOPOS_HOPLOCK_UP keys=<n>`, `HOPOS_HOPLOCK_NO_AUTH`,
 `HOPOS_HOPLOCK_CORRUPT` (a torn record, treated as absent),
 `HOPOS_HOPLOCK_FAIL`, and every 1000 requests `HOPOS_HOPLOCK_REQUESTS`.
 
-**Persistence on HopOS is not there yet.** A job's data belongs on a job
-volume (`"volumes": {"/volumes/hoplock": "/data"}`), but Hop v3.0.0-alpha.10
-refuses a job with volumes on HopOS ("persistent volumes require START_SLOT
-mount support"): `START_SLOT` does not carry mounts yet. Without a volume,
+**Persistence on HopOS needs a job volume.** Put the data on one
+(`"volumes": {"/volumes/hoplock": "/data"}` in the jobspec): Hop passes a
+job's volumes to the kernel as mounts in `START_SLOT` (HopOS alpha.11 and
+later), so the keys survive a restart of the job. Without a volume,
 `/data` is in the slot's own root, which the kernel empties at every start.
-Keys survive everything except a restart of the job; once Hop and HopOS pass
-volumes, the same image persists across restarts with no change here.
+`tools/qemu-test.sh` checks this: a key written before the job is deleted
+and placed again is still there with the same ETag (`VOLUME=` runs it
+without a volume).
 
 ## Use it from Hop
 
@@ -179,10 +180,12 @@ instead. This server is the small, free option.
 | `src/bin/hoplockserver-hopos.rs` | Feature `hopos`: the HopOS resident (applib, leanhttp over `applib::tcp`) |
 | `OLD/` | The Go server: the specification |
 
-Dependencies come from git tags only: lean v3.1.3 (`leanhttp`), hop
-v3.0.0 (`auth` for SHA-256, `hostnet` for the host sockets; `store`
-and `discovery` for the client tests), HopOS v3.0.0 (`applib`,
-`sync`).
+hoplockserver is a member of the hop workspace and carries its version
+(3.0.11). hop's crates are path dependencies (`auth` for SHA-256,
+`hostnet` for the host sockets; `store` and `discovery` for the client
+tests); lean v3.1.12 (`leanhttp`) and HopOS v3.0.13 (`applib`, `sync`)
+come from git tags through `[workspace.dependencies]` in the root
+`Cargo.toml`.
 
 ## Tests
 

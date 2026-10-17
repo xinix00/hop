@@ -114,19 +114,21 @@ ones to the leader:
 | `GET /v1/agents/{id}/logs/{task}/{stdout,stderr}` | the live log (SSE; without a query it follows, `?follow=0` is a snapshot) |
 | `GET /v1/events` | live updates (SSE) |
 
-The hop repository checks that every one of these exists, with this
-shape: its test `api/src/tests_gui.rs` greps this `app.js` when the two
-repositories sit side by side.
+Hop checks that every one of these exists, with this shape: the test
+`api/src/tests_gui.rs` greps this `app.js`. It looks in `HOP_GUI_DIR`
+(default `../../hop-gui` from `api/`, outside this repository), so run it
+from the hop root as `HOP_GUI_DIR="$PWD/apps/hop-gui" cargo test -p api`;
+without it the test prints that the routes were NOT checked and skips.
 
 ## Tests
 
 ```sh
 sh tools/gate.sh        # host tests, clippy, rustfmt, the HopOS build
-sh tools/host-test.sh   # hop-gui -listen next to agentd (HOP_DIR, default ../hop)
+sh tools/host-test.sh   # hop-gui -listen next to agentd (HOP_DIR, default the hop repository root)
 sh tools/qemu-test.sh   # HopOS on QEMU: Hop places hop-gui-hopos with ports 80
 ```
 
-`tools/qemu-test.sh` (`HOPOS_DIR`, default `../../hop-os`, and `HOP_DIR`)
+`tools/qemu-test.sh` (`HOPOS_DIR`, default `../../hop-os` from the hop root, and `HOP_DIR`)
 boots HopOS with Hop in slot 1, posts the jobspec above to the agent,
 fetches `/`, the scripts, the stylesheet and the font through the
 published port and compares them byte for byte, checks a `304`, and then
@@ -138,9 +140,11 @@ app's live log, the priority, and the delete. `tools/host-test.sh` runs the
 same sequence against `agentd` with a real key and also requires a `401`
 for an unsigned call.
 
-Dependencies come from git tags only, never a path across a repository:
-hop `v3.0.0` (`hostnet`), HopOS `v3.0.0` (`applib` with
-`http`, and `sync`), lean `v3.1.3` (`leanhttp`).
+The crate is a member of the hop workspace and carries its version
+(3.0.11): hop's `hostnet` is a path dependency; HopOS `v3.0.13` (`applib`
+with `http`, and `sync`) and lean `v3.1.12` (`leanhttp`) come from git
+tags through `[workspace.dependencies]` in the root `Cargo.toml`, never a
+path across a repository.
 
 ## Dashboard
 

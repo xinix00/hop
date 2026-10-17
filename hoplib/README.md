@@ -18,7 +18,7 @@ body); the transport is chosen by a feature:
 | `std` | `hoplib::host` | blocking, over `hostnet::Http` (one executor per thread) |
 | `hopos` | `hoplib::hopos` | async on the app executor, over `applib::tcp::TcpConn` and leanhttp |
 
-Point the client at the LOCAL agent (`127.0.0.1:7878`, or the slot address
+Point the client at the LOCAL agent (`127.0.0.1:8080`, Hop's default agent port, or the slot address
 on HopOS). The agent forwards `/v1/...` to whoever leads, so a plugin never
 has to know the leader.
 
@@ -39,7 +39,7 @@ On the host:
 use core::ops::ControlFlow;
 use hoplib::{Client, host::Agent};
 
-let agent = Agent::new(Client::new("127.0.0.1:7878", Some(&key))?);
+let agent = Agent::new(Client::new("127.0.0.1:8080", Some(&key))?);
 let status = agent.status()?;          // cluster_name, placed, deploying, ...
 let jobs = agent.jobs()?;
 let tasks = agent.tasks()?;            // per agent; falls back to the agents themselves
@@ -105,8 +105,10 @@ tools/gate.sh   # host tests (all features), clippy -D warnings, fmt, no_std bui
 ```
 
 The tests run requests through hop's real `api::LeaderApi` (HMAC check
-included) and read SSE bytes produced by `api::EventLog`. Dependencies come
-only from git tags: hop v3.0.0, HopOS v3.0.0, lean v3.1.3.
+included) and read SSE bytes produced by `api::EventLog`. hoplib is a
+member of the hop workspace and carries its version (3.0.11): hop's crates
+are path dependencies, HopOS v3.0.13 and lean v3.1.12 come from git tags
+through `[workspace.dependencies]` in the root `Cargo.toml`.
 
 ## License
 
