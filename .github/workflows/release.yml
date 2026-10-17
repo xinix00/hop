@@ -1,5 +1,17 @@
 name: Release
 
+# Eén tag, één release voor de hele werkruimte: Hop zelf en de apps die hij
+# meelevert. Per platform een tarball per binary:
+#
+#   <naam>-<tag>-<os>-<arch>.tar.gz   met de map <naam>-<tag>-<os>-<arch>/
+#   <naam>-<os>-<arch>.tar.gz         dezelfde bytes zonder versie, voor
+#                                     /releases/latest/download/<bestand>
+#                                     (gethop.org linkt die; hij veroudert nooit)
+#
+# en per app de HopOS-bewoner als <naam>-arm64.elf (zonder debug-info). Hop's
+# eigen bewoner (hop-arm64.elf, hop-riscv64.elf) bouwt hop-os/tools/hop-build.sh,
+# tegen de applib van de HopOS-werkboom; die zit hier bewust niet in.
+
 on:
   push:
     tags:
@@ -9,63 +21,102 @@ permissions:
   contents: write
 
 jobs:
-  test:
+  gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-      - run: go test ./...
+      - run: rustup show
+      - run: sh tools/gate.sh
 
-  release:
-    needs: test
-    runs-on: ubuntu-latest
+  host:
+    needs: gate
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            name: linux-amd64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            name: linux-arm64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    env:
+      # musl linkt statisch met rust-lld; geen cross-gcc nodig.
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      CARGO_PROFILE_RELEASE_STRIP: debuginfo
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-
-      - name: Build all platforms
+      - run: rustup show
+      - run: rustup target add ${{ matrix.target }}
+      - name: Build
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            -p agentd -p cli -p hoplockserver -p hoplb -p hopdns -p hopprom -p hop-gui \
+            --features hopdns/std,hopprom/std,hop-gui/std
+      - name: Pack
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          LDFLAGS="-s -w -X main.version=${VERSION}"
-          PLATFORMS="linux:amd64 linux:arm64 darwin:arm64"
-          BINS="agent:agent run:cli"
-
+          BIN="target/${{ matrix.target }}/release"
           mkdir -p dist
-
-          for plat in $PLATFORMS; do
-            IFS=: read -r os arch <<< "$plat"
-            dir="dist/hop-${VERSION}-${os}-${arch}"
-            mkdir -p "$dir"
-
-            for b in $BINS; do
-              IFS=: read -r bin cmd <<< "$b"
-              echo "Building $bin for $os/$arch..."
-              CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-                go build -trimpath -ldflags="$LDFLAGS" -o "$dir/$bin" "./cmd/$cmd"
-            done
-
-            tar czf "${dir}.tar.gz" -C dist "$(basename $dir)"
-
-            # Same bytes under a version-less name. GitHub's
-            # /releases/latest/download/<file> only resolves for a filename that
-            # is constant across releases, and gethop.org links exactly that so
-            # the download page never goes stale. The versioned name stays for
-            # anyone pinning a release.
-            cp "${dir}.tar.gz" "dist/hop-${os}-${arch}.tar.gz"
-
-            rm -rf "$dir"
+          # <tarball>:<binaries erin>
+          for spec in "hop:agentd hop" hoplockserver hoplb hopdns hopprom hop-gui; do
+            name="${spec%%:*}"
+            bins="${spec#*:}"
+            dir="${name}-${VERSION}-${{ matrix.name }}"
+            mkdir -p "dist/$dir"
+            for b in $bins; do cp "$BIN/$b" "dist/$dir/"; done
+            tar czf "dist/$dir.tar.gz" -C dist "$dir"
+            cp "dist/$dir.tar.gz" "dist/${name}-${{ matrix.name }}.tar.gz"
+            rm -rf "dist/$dir"
           done
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*.tar.gz
 
-          cd dist && shasum -a 256 *.tar.gz > checksums.txt
+  hopos:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - name: Build the HopOS residents
+        run: |
+          T=aarch64-unknown-none-softfloat
+          cargo build --release --target $T -p hopdns --features hopos --bin hopdns-hopos
+          cargo build --release --target $T -p hopprom --features hopos --bin hopprom-hopos
+          cargo build --release --target $T -p hop-gui --features hopos --bin hop-gui-hopos
+          cargo build --release --target $T -p hoplb --no-default-features --features hopos --bin hoplb-hopos
+          cargo build --release --target $T -p hoplockserver --no-default-features --features hopos --bin hoplockserver-hopos
+      - name: Strip
+        run: |
+          OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy 2>/dev/null | head -1)"
+          if [ -z "$OBJCOPY" ]; then rustup component add llvm-tools; OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/rust-objcopy | head -1)"; fi
+          mkdir -p dist
+          for a in hopdns hopprom hop-gui hoplb hoplockserver; do
+            "$OBJCOPY" --strip-debug "target/aarch64-unknown-none-softfloat/release/${a}-hopos" "dist/${a}-arm64.elf"
+          done
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hopos
+          path: dist/*.elf
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+  release:
+    needs: [host, hopos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: |
-            dist/*.tar.gz
-            dist/checksums.txt
+          files: dist/*
