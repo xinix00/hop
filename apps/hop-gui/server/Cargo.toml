@@ -1,0 +1,45 @@
+[package]
+name = "hop-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "De host van het Hop-dashboard: de statische bestanden ingebakken, geserveerd op een host (std) of als HopOS-app."
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+# `hop-gui -listen :3000` op Linux en macOS: std-sockets via hop's hostnet.
+[[bin]]
+name = "hop-gui"
+path = "src/bin/host.rs"
+required-features = ["std"]
+bench = false
+
+# Het dashboard als app in een slot van HopOS, geplaatst door Hop.
+[[bin]]
+name = "hop-gui-hopos"
+path = "src/bin/hopos.rs"
+required-features = ["hopos"]
+bench = false
+
+[features]
+default = []
+std = ["dep:hostnet"]
+hopos = ["dep:applib", "dep:sync"]
+
+[dependencies]
+# HTTP/1.1 zonder TLS, dezelfde tag als Hop en HopOS. Nooit een pad over
+# een repo-grens (PORT.md beslissing 6).
+leanhttp = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.9" }
+# De host-kant: std-sockets als leanhttp-verbinding en een block_on.
+hostnet = { git = "https://github.com/xinix00/hop.git", tag = "v3.0.0", optional = true }
+# De app-runtime van HopOS met de TcpConn-brug, en de rij en de tabel van
+# de werkerpool (dezelfde vorm als apps/welcome).
+applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.8", features = ["http"], optional = true }
+sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.8", optional = true }
+
+[lints]
+workspace = true

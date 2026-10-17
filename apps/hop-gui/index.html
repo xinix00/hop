@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="en" data-style="08" data-theme="dark">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <meta name="theme-color" content="#1e1e1e">
+    <title>
+      Hop · Cluster dashboard
+    </title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐇</text></svg>">
+    <script src="appearance.js">
+    </script>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <a class="skip-link t-action" href="#main">
+      Skip to dashboard
+    </a>
+    <div class="app-layout">
+      <aside class="sidebar" aria-label="Server navigation">
+        <a class="brand" href="#agents" aria-label="Hop dashboard">
+          <span class="brand-symbol" aria-hidden="true">(\(\</span>
+          <span>Hop<span class="brand-caption">CLUSTER DASHBOARD</span></span>
+        </a>
+        <div class="sidebar-navigation">
+          <h2 class="eyebrow">Servers</h2>
+          <nav class="t-nav" id="clusterMenu" aria-label="Saved servers"></nav>
+          <button class="t-action" id="clusterAddBtn" type="button" onclick="app.showAddCluster()">
+            <span class="material-symbols-outlined t-icon" aria-hidden="true">add</span>
+            New server
+          </button>
+        </div>
+        <div class="sidebar-foot">
+          <button class="appearance-trigger t-action t-action--neutral" type="button" data-open-appearance>
+            <span class="material-symbols-outlined t-icon" aria-hidden="true">palette</span>
+            Appearance
+          </button>
+          <p class="updated">Updated <time id="lastUpdate">—</time></p>
+        </div>
+      </aside>
+      <main id="main" class="workspace" tabindex="-1">
+      <div class="page-heading">
+        <div>
+          <p class="eyebrow">
+            Cluster dashboard
+          </p>
+          <h1 id="clusterHeading">
+            Cluster overview
+          </h1>
+          <p class="subtitle" id="clusterDescription">
+            Connect a cluster to see your agents, capacity and running jobs.
+          </p>
+        </div>
+        <div class="page-actions">
+          <span class="connection-state" id="connectionState" role="status">No cluster connected</span>
+          <button id="removeClusterButton" class="t-action t-action--neutral t-icon-button" type="button" hidden title="Remove this server from saved servers" aria-label="Remove this server from saved servers">
+            <span class="material-symbols-outlined t-icon" aria-hidden="true">delete</span>
+          </button>
+        </div>
+      </div>
+      <dl class="stats" id="statsContainer" aria-label="Cluster summary">
+        <div class="stat t-card">
+          <dt>
+            <span class="material-symbols-outlined t-icon" aria-hidden="true">
+              dns
+            </span>
+            Agents
+          </dt>
+          <dd id="agentCount">
+            —
+          </dd>
+          <dd class="stat-description">
+            Registered nodes
+          </dd>
+        </div>
+        <div class="stat t-card">
+          <dt>
+            <span class="material-symbols-outlined t-icon" aria-hidden="true">
+              deployed_code
+            </span>
+            Placed
+          </dt>
+          <dd id="totalPlaced">
+            —
+          </dd>
+          <dd class="stat-description">
+            Scheduled instances
+          </dd>
+        </div>
+        <div class="stat t-card">
+          <dt>
+            <span class="material-symbols-outlined t-icon" aria-hidden="true">
+              work
+            </span>
+            Jobs
+          </dt>
+          <dd id="totalJobs">
+            —
+          </dd>
+          <dd class="stat-description">
+            Desired workloads
+          </dd>
+        </div>
+        <div class="stat t-card">
+          <dt>
+            <span class="material-symbols-outlined t-icon" aria-hidden="true">
+              hub
+            </span>
+            Leader
+          </dt>
+          <dd class="stat-endpoint">
+            <code id="leaderAddr">
+              —
+            </code>
+          </dd>
+          <dd class="stat-description">
+            Current coordinator
+          </dd>
+        </div>
+      </dl>
+      <div id="settleBadge" class="settle-badge t-alert" data-tone="warning" role="status">
+        <span class="t-spinner" aria-hidden="true">
+        </span>
+        <span>
+          Leader settling — waiting for agents to register…
+        </span>
+      </div>
+      <div id="sseStatus" class="sse-ok" role="status">
+      </div>
+      <div id="error" role="alert">
+      </div>
+      <nav class="tabs t-segmented" aria-label="Dashboard sections">
+        <button class="tab active" type="button" data-tab="agents" aria-pressed="true" aria-controls="tab-agents" onclick="app.showTab('agents')">
+          <span class="material-symbols-outlined t-icon" aria-hidden="true">
+            dns
+          </span>
+          Agents
+        </button>
+        <button class="tab" type="button" data-tab="jobs" aria-pressed="false" aria-controls="tab-jobs" onclick="app.showTab('jobs')">
+          <span class="material-symbols-outlined t-icon" aria-hidden="true">
+            work
+          </span>
+          Jobs
+        </button>
+      </nav>
+      <section id="tab-agents" class="tab-content active" aria-labelledby="agentsHeading">
+        <div class="panel t-panel">
+          <div id="agentsListView">
+            <div class="panel-header t-panel-head">
+              <div>
+                <h2 id="agentsHeading">
+                  Agents
+                  &
+                  capacity
+                </h2>
+                <p>
+                  Live resources across the cluster.
+                </p>
+              </div>
+              <span class="panel-note">
+                CPU · memory · temperature
+              </span>
+            </div>
+            <div class="table-scroll">
+              <table id="agentsTable" class="t-table">
+                <caption class="sr-only">
+                  Registered agents and resource usage
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">
+                      ID
+                    </th>
+                    <th scope="col">
+                      Version
+                    </th>
+                    <th scope="col">
+                      Endpoint
+                    </th>
+                    <th scope="col">
+                      CPU
+                    </th>
+                    <th scope="col">
+                      Memory
+                    </th>
+                    <th scope="col">
+                      System
+                    </th>
+                    <th scope="col">
+                      Temp
+                    </th>
+                    <th scope="col">
+                      Tasks
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td colspan="8" class="empty">
+                      Add a cluster to see its agents.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div id="agentDetailView" class="hidden">
+            <div class="panel-header t-panel-head">
+              <div class="job-detail-title">
+                <button class="t-action t-action--neutral" type="button" onclick="app.closeAgentDetail()">
+                  <span class="material-symbols-outlined t-icon" aria-hidden="true">
+                    arrow_back
+                  </span>
+                  Agents
+                </button>
+                <h2 id="agentDetailName">
+                </h2>
+              </div>
+            </div>
+            <div id="agentDetailInfo" class="job-detail-info">
+            </div>
+            <div class="table-scroll">
+              <table id="agentTasksTable" class="t-table">
+                <caption class="sr-only">
+                  Tasks on this agent
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">
+                      Task
+                    </th>
+                    <th scope="col">
+                      Job
+                    </th>
+                    <th scope="col">
+                      Ports
+                    </th>
+                    <th scope="col">
+                      Core
+                    </th>
+                    <th scope="col">
+                      CPU
+                    </th>
+                    <th scope="col">
+                      Mem
+                    </th>
+                    <th scope="col">
+                      Restarts
+                    </th>
+                    <th scope="col">
+                      State
+                    </th>
+                    <th scope="col">
+                      <span class="sr-only">
+                        Actions
+                      </span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section id="tab-jobs" class="tab-content" aria-label="Jobs">
+        <div class="panel t-panel">
+          <div id="jobsListView">
+            <div class="panel-header t-panel-head">
+              <div>
+                <h2>
+                  Jobs
+                </h2>
+                <p>
+                  Inspect workloads or drag a row to change its priority.
+                </p>
+              </div>
+              <button class="t-action" id="newJobButton" type="button" onclick="app.toggleNewJob()">
+                <span class="material-symbols-outlined t-icon" aria-hidden="true">
+                  add
+                </span>
+                New job
+              </button>
+            </div>
+            <div class="table-scroll">
+              <table id="jobsTable" class="t-table">
+                <caption class="sr-only">
+                  Jobs in priority order
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">
+                      <span class="sr-only">
+                        Reorder
+                      </span>
+                    </th>
+                    <th scope="col">
+                      Prio
+                    </th>
+                    <th scope="col">
+                      Name
+                    </th>
+                    <th scope="col">
+                      Running
+                    </th>
+                    <th scope="col">
+                      Status
+                    </th>
+                    <th scope="col">
+                      <span class="sr-only">
+                        Actions
+                      </span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td colspan="6" class="empty">
+                      Add a cluster to see its jobs.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div id="jobDetailView" class="hidden">
+            <div class="panel-header t-panel-head">
+              <div class="job-detail-title">
+                <button class="t-action t-action--neutral" type="button" onclick="app.closeJobDetail()">
+                  <span class="material-symbols-outlined t-icon" aria-hidden="true">
+                    arrow_back
+                  </span>
+                  Jobs
+                </button>
+                <h2 id="jobDetailName">
+                </h2>
+                <span id="jobDetailStatus" class="t-tag t-supplement status">
+                </span>
+              </div>
+              <div class="t-actions">
+                <button class="t-action" type="button" id="jobDetailRedeploy">
+                  <span class="material-symbols-outlined t-icon" aria-hidden="true">
+                    refresh
+                  </span>
+                  Redeploy
+                </button>
+                <button class="t-action t-action--danger" type="button" id="jobDetailDelete">
+                  <span class="material-symbols-outlined t-icon" aria-hidden="true">
+                    delete
+                  </span>
+                  Delete
+                </button>
+              </div>
+            </div>
+            <div id="jobDetailInfo" class="job-detail-info">
+            </div>
+            <div class="table-scroll">
+              <table id="jobTasksTable" class="t-table">
+                <caption class="sr-only">
+                  Tasks for this job
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">
+                      Task
+                    </th>
+                    <th scope="col">
+                      Agent
+                    </th>
+                    <th scope="col">
+                      Ports
+                    </th>
+                    <th scope="col">
+                      Core
+                    </th>
+                    <th scope="col">
+                      CPU
+                    </th>
+                    <th scope="col">
+                      Mem
+                    </th>
+                    <th scope="col">
+                      Restarts
+                    </th>
+                    <th scope="col">
+                      State
+                    </th>
+                    <th scope="col">
+                      <span class="sr-only">
+                        Actions
+                      </span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+      <footer class="page-footer">
+        <span>
+          Hop
+          <span aria-hidden="true">
+            /
+          </span>
+          Cluster dashboard
+        </span>
+      </footer>
+      </main>
+    </div>
+    <dialog id="clusterForm" class="t-dialog" aria-labelledby="clusterFormTitle">
+      <form id="addClusterForm">
+        <div class="t-dialog-head">
+          <div>
+            <h2 id="clusterFormTitle">
+              Add a cluster
+            </h2>
+            <p>
+              Give your cluster a name and connect to an agent.
+            </p>
+          </div>
+          <button class="t-action t-action--neutral t-icon-button" type="button" onclick="app.hideAddCluster()" aria-label="Close">
+            <span class="material-symbols-outlined t-icon" aria-hidden="true">
+              close
+            </span>
+          </button>
+        </div>
+        <div class="t-dialog-body form-fields">
+          <label for="clusterName">
+            Name
+            <input class="t-field" type="text" id="clusterName" placeholder="e.g. Production" required autocomplete="off">
+          </label>
+          <label for="clusterEndpoint">
+            Agent address
+            <input class="t-field" type="text" id="clusterEndpoint" placeholder="e.g. 10.0.0.1:8080" required autocomplete="url" spellcheck="false">
+          </label>
+          <label for="clusterApiKey">
+            API key
+            <span class="optional">
+              optional
+            </span>
+            <input class="t-field" type="password" id="clusterApiKey" autocomplete="off">
+          </label>
+        </div>
+        <div class="t-dialog-foot">
+          <button class="t-action t-action--neutral" type="button" onclick="app.hideAddCluster()">
+            Cancel
+          </button>
+          <button class="t-action" type="submit">
+            <span class="material-symbols-outlined t-icon" aria-hidden="true">
+              link
+            </span>
+            Connect cluster
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="newJobForm" class="t-dialog" aria-labelledby="newJobTitle">
+      <form id="createJobForm">
+        <div class="t-dialog-head">
+          <div>
+            <h2 id="newJobTitle">
+              New job
+            </h2>
+            <p>
+              Define a workload for the selected cluster.
+            </p>
+          </div>
+          <button class="t-action t-action--neutral t-icon-button" type="button" onclick="app.toggleNewJob()" aria-label="Close">
+            <span class="material-symbols-outlined t-icon" aria-hidden="true">
+              close
+            </span>
+          </button>
+        </div>
+        <div class="t-dialog-body form-fields">
+          <label for="jobJson">
+            Job definition
+            <textarea class="t-field code-field" id="jobJson" rows="10" spellcheck="false" required aria-describedby="jobJsonHint" placeholder='{"name": "myapp", "command": "./myapp", "count": 1}'>
+            </textarea>
+          </label>
+          <p class="hint" id="jobJsonHint">
+            Use the same JSON job definition as the Hop API.
+          </p>
+        </div>
+        <div class="t-dialog-foot">
+          <button class="t-action t-action--neutral" type="button" onclick="app.toggleNewJob()">
+            Cancel
+          </button>
+          <button class="t-action" id="startJobButton" type="submit">
+            <span class="material-symbols-outlined t-icon" aria-hidden="true">
+              play_arrow
+            </span>
+            Start job
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="logModal" class="t-dialog log-dialog" aria-labelledby="logTitle">
+      <div class="t-dialog-head">
+        <div>
+          <h2 id="logTitle">
+            Task logs
+            <code id="logTaskId">
+            </code>
+          </h2>
+          <p>
+            Live output, relayed through the cluster.
+          </p>
+        </div>
+        <button class="t-action t-action--neutral t-icon-button" type="button" onclick="app.closeLogs()" aria-label="Close logs">
+          <span class="material-symbols-outlined t-icon" aria-hidden="true">
+            close
+          </span>
+        </button>
+      </div>
+      <div class="log-toolbar">
+        <div class="t-segmented" role="group" aria-label="Log stream">
+          <button type="button" onclick="app.switchStream('stdout')" id="btnStdout" aria-pressed="true">
+            stdout
+          </button>
+          <button type="button" onclick="app.switchStream('stderr')" id="btnStderr" aria-pressed="false">
+            stderr
+          </button>
+        </div>
+        <span class="log-status" id="logStatus" role="status">
+        </span>
+      </div>
+      <pre id="logOutput" tabindex="0" aria-label="Task log output">
+      </pre>
+    </dialog>
+    <dialog id="appearance-dialog" class="t-dialog appearance-dialog" aria-labelledby="appearance-title">
+      <div class="t-dialog-head">
+        <div>
+          <h2 id="appearance-title">
+            Make it yours
+          </h2>
+          <p>
+            Same controls. Your favourite finish.
+          </p>
+        </div>
+        <button class="t-action t-action--neutral t-icon-button" type="button" data-close-appearance aria-label="Close appearance settings">
+          <span class="material-symbols-outlined t-icon" aria-hidden="true">
+            close
+          </span>
+        </button>
+      </div>
+      <div class="t-dialog-body form-fields">
+        <label for="appearance-style">
+          Theme
+          <select id="appearance-style">
+            <option value="95">
+              Senior · Classic 95
+            </option>
+            <option value="08">
+              Medior · Glossy 08
+            </option>
+            <option value="matte">
+              Junior · Tactile Matte
+            </option>
+          </select>
+        </label>
+        <label for="appearance-color">
+          Accent colour
+          <select id="appearance-color">
+            <option value="plum">
+              Purple
+            </option>
+            <option value="red">
+              Red
+            </option>
+            <option value="blue">
+              Blue
+            </option>
+            <option value="petrol">
+              Petrol
+            </option>
+            <option value="green">
+              Green
+            </option>
+          </select>
+        </label>
+        <div>
+          <p class="field-label" id="modeLabel">
+            Mode
+          </p>
+          <div class="t-segmented" role="group" aria-labelledby="modeLabel">
+            <button type="button" data-appearance-mode="dark" aria-pressed="true">
+              <span class="material-symbols-outlined t-icon" aria-hidden="true">
+                dark_mode
+              </span>
+              Dark
+            </button>
+            <button type="button" data-appearance-mode="light" aria-pressed="false">
+              <span class="material-symbols-outlined t-icon" aria-hidden="true">
+                light_mode
+              </span>
+              Light
+            </button>
+          </div>
+        </div>
+        <div class="appearance-preview t-card t-card--padded">
+          <strong>
+            Your workspace
+          </strong>
+          <p class="hint">
+            A clear surface. A button that feels like a button.
+          </p>
+          <div class="t-actions">
+            <button class="t-action" type="button" data-close-appearance>
+              Looks good
+            </button>
+            <span class="t-spinner" aria-hidden="true">
+            </span>
+            <span class="hint">
+              Loading preview
+            </span>
+          </div>
+        </div>
+        <p class="hint" id="appearance-status" role="status">
+          Your preference is saved in this browser.
+        </p>
+      </div>
+    </dialog>
+    <script src="vendor/tactile-select.js">
+    </script>
+    <script src="vendor/tactile-dialog.js">
+    </script>
+    <script src="app.js">
+    </script>
+  </body>
+</html>

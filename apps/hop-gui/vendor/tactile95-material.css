@@ -1,0 +1,205 @@
+/* Classic material for applications; same bevel recipe as tactile95.css. */
+@scope (:root[data-style="95"]) {
+  :scope {
+    color-scheme: light;
+    --sans: Tahoma, "Segoe UI", Arial, sans-serif;
+    --accent: #000080;
+    --accent-light: #000080;
+    --on-dark-accent: #000080;
+    --accent-ink: #111;
+    --workspace: #a8a8a8;
+    --panel: #c0c0c0;
+    --card: #d4d4d4;
+    --input: #fff;
+    --toolbar: #c0c0c0;
+    --edge: #808080;
+    --text: #161616;
+    --muted: #454545;
+    --neutral: #c0c0c0;
+    --green: #166029;
+    --red: #9c1717;
+    --yellow: #715000;
+    --button-edge: #808080;
+    --contour: transparent;
+    --gloss: none;
+    --hover-gloss: none;
+    --pressed-gloss: none;
+    --pressed-hover-gloss: none;
+    --rim: transparent;
+    --shadow: 0 2px 4px #0002;
+    --popup-shadow: 0 14px 32px #0004, 0 3px 6px #0002;
+    --t-surface: var(--card);
+    --t-edge: var(--edge);
+    --t-accent: var(--accent-light);
+    --t-sheen: none;
+    --t-sheen-hover: none;
+    --t-rim: transparent;
+    --t-hover-fill: #e1e1e1;
+    --t-selected-fill: var(--accent);
+    --t-selection: #e8e8e8;
+    --t-segment-face: #c0c0c0;
+    --t-segment-selected: #e4e4e4;
+    --w95-face: #c0c0c0;
+    --w95-hover: #cecece;
+    --w95-light: #fff;
+    --w95-mid: #dfdfdf;
+    --w95-shade: #808080;
+    --w95-dark: #404040;
+    --w95-outset: inset 1px 1px 0 var(--w95-light), inset -1px -1px 0 var(--w95-shade);
+    --w95-inset: inset 1px 1px 0 var(--w95-shade), inset -1px -1px 0 var(--w95-light);
+    --w95-raised: var(--w95-outset), 0 2px 3px #0002;
+  }
+  :scope[data-contrast="high"] {
+    --workspace: #909090;
+    --card: #e7e7e7;
+    --text: #000;
+    --muted: #222;
+    --edge: #505050;
+    --w95-shade: #606060;
+    --w95-dark: #000;
+  }
+  /* The bevel ring is painted as background layers behind a transparent border, so the light/dark
+     switch is a hard horizontal cut we control. --w95-r is the element's corner radius; the dark
+     wraps --w95-wrap-top into the top-right arc and --w95-wrap-bottom into the bottom-left arc. */
+  :where(.btn, .t-action, .t-remove, .t-dismiss, .t-supplement.t-hover, .t-editor .md-toolbar button, .mini-button,
+    :is(.specimen, .t-card), .t-panel, .content-card, .t-record, .mini-dialog, .swatch, :is(.segmented, .t-segmented), :is(.segmented, .t-segmented) > button[aria-pressed="true"],
+    .t-alert, :is(.popup, .t-notice), .t-select-popup, dialog, .toast, .card-art span,
+    input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]), textarea, .t-select-caption, .t-select-popup .t-select-search,
+    .t-editor, .editor-source, .code-sample, .table-scroll, .dropzone, :is(.console, .t-well, .t-fieldset), .diff) {
+    --w95-r: 6px;
+    --w95-wrap-top: 2px;
+    --w95-wrap-bottom: 1px;
+    --w95-ring-in-top: var(--w95-dark);
+    --w95-ring-out:
+      linear-gradient(var(--w95-light), var(--w95-light)) top / 100% calc(var(--w95-r) - var(--w95-wrap-top)) no-repeat border-box,
+      linear-gradient(var(--w95-light), var(--w95-light)) left top / 1px calc(100% - var(--w95-r) + var(--w95-wrap-bottom)) no-repeat border-box,
+      linear-gradient(var(--w95-dark), var(--w95-dark)) border-box;
+    --w95-ring-in:
+      linear-gradient(var(--w95-ring-in-top), var(--w95-ring-in-top)) top / 100% calc(var(--w95-r) - var(--w95-wrap-top)) no-repeat border-box,
+      linear-gradient(var(--w95-ring-in-top), var(--w95-ring-in-top)) left top / 1px calc(100% - var(--w95-r) + var(--w95-wrap-bottom)) no-repeat border-box,
+      linear-gradient(var(--w95-light), var(--w95-light)) border-box;
+    --w95-ring: var(--w95-ring-out);
+    --w95-fill: var(--w95-face);
+    background: linear-gradient(var(--w95-fill), var(--w95-fill)) padding-box, var(--w95-ring);
+    border-color: transparent;
+  }
+  /* Hard two-tone edges replace glass. All action faces stay classic grey. */
+  :is(.btn, .t-action, .t-remove, .t-dismiss, .t-supplement.t-hover, .t-editor .md-toolbar button, .mini-button) {
+    --face: var(--w95-face);
+    --ink: var(--text);
+    color: var(--text);
+    border: 1px solid transparent;
+    box-shadow: var(--w95-raised);
+    text-shadow: none;
+  }
+  .btn { --w95-r: 7px; }
+  :is(.btn, .t-action, .t-remove, .t-dismiss, .t-supplement.t-hover, .t-editor .md-toolbar button):hover:not(:disabled, [aria-disabled="true"]) {
+    --w95-fill: var(--w95-hover);
+    color: var(--text);
+    box-shadow: var(--w95-raised);
+  }
+  :is(.btn, .t-action, .t-remove, .t-dismiss, .t-supplement.t-hover, .t-editor .md-toolbar button):is(:active, [aria-pressed="true"], [aria-expanded="true"], .is-pressed):not(:disabled, [aria-disabled="true"]),
+  .t-select-trigger:is(:active, [aria-expanded="true"]):not(:disabled) .t-select-arrow {
+    --w95-fill: var(--w95-face);
+    --w95-ring: var(--w95-ring-in);
+    color: var(--text);
+    box-shadow: var(--w95-inset);
+  }
+  :is(.btn, .t-action, .t-remove, .t-dismiss, .t-supplement.t-hover, .t-editor .md-toolbar button):is([aria-pressed="true"], [aria-expanded="true"], .is-pressed):hover:not(:disabled, [aria-disabled="true"]),
+  .t-select-trigger[aria-expanded="true"]:hover:not(:disabled) .t-select-arrow { --w95-fill: var(--w95-hover); }
+  :is(.btn, .t-action, .t-remove, .t-dismiss, .t-supplement.t-hover, .t-editor .md-toolbar button):disabled { box-shadow: var(--w95-outset); opacity: .5; }
+  :is(.btn, .t-action, .t-remove, .t-dismiss, :is(.segmented, .t-segmented), .mini-button, .t-supplement, .t-editor .md-toolbar button)::after,
+  .t-supplement::before { content: none; }
+  .btn.danger, .t-alert[data-tone="danger"] .t-action { color: var(--red); }
+  .btn.success { color: var(--green); }
+  .btn.amber { color: var(--yellow); }
+  :is(.btn, .t-action, .t-remove, .t-dismiss, .t-editor .md-toolbar button):focus-visible { outline: 1px dotted currentColor; outline-offset: -5px; }
+  .button-divider { background: var(--w95-shade); box-shadow: 1px 0 var(--w95-light); }
+  :is(.segmented, .t-segmented) { --w95-fill: var(--panel); color: var(--text); box-shadow: var(--w95-outset); }
+  :is(.segmented, .t-segmented) > button { color: var(--text); text-shadow: none; }
+  :is(.segmented, .t-segmented) > button[aria-pressed="true"] { --w95-fill: var(--t-segment-selected); --w95-ring: var(--w95-ring-in); --w95-ring-in-top: var(--w95-shade); --w95-r: 4px; color: var(--text); box-shadow: var(--w95-inset); }
+  :is(.segmented, .t-segmented) > button + button::before { background: var(--w95-shade); box-shadow: 1px 0 var(--w95-light); }
+
+  /* White recessed wells, joined to an outset action where appropriate. */
+  input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]), textarea, .t-select-caption, .t-select-popup .t-select-search,
+  .t-editor, .editor-source, .code-sample, .table-scroll, .dropzone, :is(.console, .t-well, .t-fieldset), .diff {
+    --w95-fill: var(--input);
+    --w95-ring: var(--w95-ring-in);
+    color: var(--text);
+    border: 1px solid transparent;
+    box-shadow: var(--w95-inset);
+  }
+  :is(.t-select-trigger, .t-input-action) > :is(.t-select-caption, input) { border-inline-end: 0; }
+  .t-select-trigger:hover:not(:disabled) .t-select-arrow { --w95-fill: var(--w95-hover); }
+  input[aria-invalid="true"], .t-select-trigger[aria-invalid="true"] .t-select-caption { outline: 1px solid var(--red); outline-offset: -2px; }
+  .t-editor { --md-bg: var(--input); --md-text: var(--text); --md-border: var(--edge); }
+  .t-editor .md-toolbar, .code-title, thead, .diff-hunk { background: var(--panel); color: var(--text); box-shadow: var(--w95-outset); }
+  .t-editor textarea.md-input { background: transparent; border: 0; box-shadow: none; }
+  .code-sample code { color: var(--accent); }
+
+  :is(input:is([type="checkbox"], [type="radio"]):not(.switch, [role="switch"]), .t-select-mark),
+  :is(input:is([type="checkbox"], [type="radio"]):not(.switch, [role="switch"]):checked, input[type="checkbox"]:not(.switch):indeterminate, .t-select-option[aria-selected="true"] .t-select-mark) {
+    background: var(--input);
+    border-color: var(--w95-dark) var(--w95-light) var(--w95-light) var(--w95-dark);
+    box-shadow: var(--w95-inset);
+  }
+  :is(input:is([type="checkbox"], [type="radio"]):not(.switch, [role="switch"]), .t-select-mark)::before { content: none; }
+  :is(input[type="checkbox"]:not(.switch):checked, .t-select-popup[data-multiple="true"] .t-select-option[aria-selected="true"] .t-select-mark)::after { border-color: var(--text); }
+  :is(input[type="radio"]:checked, input[type="checkbox"]:not(.switch):indeterminate, .t-select-popup[data-multiple="false"] .t-select-option[aria-selected="true"] .t-select-mark)::after { background: var(--text); }
+  input:is([type="checkbox"], [type="radio"]):not(.switch):is(:checked, :indeterminate):hover:not(:disabled) { background-image: none; }
+  input.switch { background: #aaa; border-color: var(--w95-dark) var(--w95-light) var(--w95-light) var(--w95-dark); box-shadow: var(--w95-inset); }
+  input.switch:checked { background: var(--accent); }
+  input.switch::before { background: var(--w95-face); border: 1px solid; border-color: var(--w95-light) var(--w95-dark) var(--w95-dark) var(--w95-light); box-shadow: var(--w95-outset); }
+  .range::-webkit-slider-thumb { background: var(--w95-face); border-color: var(--w95-dark); border-radius: 4px; box-shadow: var(--w95-outset); }
+  .range::-moz-range-thumb { background: var(--w95-face); border-color: var(--w95-dark); border-radius: 4px; box-shadow: var(--w95-outset); }
+  progress, .progress { background: #eee; box-shadow: var(--w95-inset); }
+  progress::-webkit-progress-value { background: var(--accent); }
+  progress::-moz-progress-bar { background: var(--accent); }
+
+  .t-choice:is(.active, .selected, [aria-selected="true"], [aria-pressed="true"], [aria-current]:not([aria-current="false"])) { background: var(--accent); color: #fff; }
+  .t-choice[aria-selected="true"] .t-select-detail { color: #fff; opacity: .85; }
+  .t-picker-cell[aria-selected="true"] { background: var(--accent); color: #fff; }
+  .t-picker-cell:hover:not(:disabled, [aria-selected="true"]) { background: var(--w95-hover); }
+  .t-picker-cell[aria-selected="true"]:hover { background: color-mix(in srgb, var(--accent) 80%, #fff); }
+  .t-picker-cell[data-today="true"] { box-shadow: inset 0 0 0 1px var(--w95-dark); }
+  .local-nav .selected .count { color: #fff; background: #ffffff20; border-color: #ffffff80; }
+  tbody tr:has(input:checked) { background: var(--accent); color: #fff; }
+  tbody tr:has(input:checked) .muted { color: #fff; }
+  .t-supplement:not(.t-hover), .badge, .count { background-image: none; box-shadow: none; border-color: var(--edge); }
+  .t-file { background: var(--card); border-color: var(--edge); }
+  .t-file-icon { color: var(--accent); }
+  .t-alert { --w95-fill: var(--card); --w95-r: 8px; box-shadow: var(--w95-raised); }
+  :is(.popup, .t-notice), .t-select-popup, dialog, .toast {
+    --w95-fill: var(--panel);
+    --w95-r: 8px;
+    color: var(--text);
+    box-shadow: var(--w95-outset), var(--popup-shadow);
+  }
+  dialog { --w95-r: 12px; }
+
+  :scope[data-theme="dark"] {
+    color-scheme: dark;
+    --workspace: #202020; --panel: #303030; --card: #3c3c3c;
+    --input: #252525; --toolbar: #383838; --edge: #8c8c8c;
+    --text: #f0f0f0; --muted: #c7c7c7; --neutral: #484848;
+    --green: #a0dfb2; --red: #ffaaa5; --yellow: #efcf89;
+    --w95-face: #484848; --w95-hover: #565656;
+    --w95-light: #a0a0a0; --w95-mid: #777; --w95-shade: #222; --w95-dark: #111;
+    --t-hover-fill: #515151; --t-selection: #555;
+    --t-segment-face: #484848; --t-segment-selected: #606060;
+  }
+  .t-panel, .t-card, .t-record { --w95-fill: var(--panel); --w95-r: 10px; box-shadow: var(--w95-raised); }
+  .t-record, .t-card { --w95-fill: var(--card); --w95-r: 8px; }
+  .t-dialog-head, .t-dialog-foot { background: var(--panel); }
+  .t-segmented > button.active { --w95-ring: var(--w95-ring-in); background: var(--t-segment-selected); color: var(--text); box-shadow: var(--w95-inset); border-color: var(--w95-shade); }
+  .t-segmented .t-counter { color: inherit; border-color: var(--edge); background: transparent; }
+  .t-action--danger { color: var(--red); }
+  .t-action--success { color: var(--green); }
+  .t-action--warning { color: var(--yellow); }
+  .t-action.active { --w95-ring: var(--w95-ring-in); box-shadow: var(--w95-inset); }
+  .t-choice[aria-current="page"] .t-counter { color: #fff; background: #ffffff20; border-color: #ffffff80; }
+  @media (forced-colors: active) {
+    .t-select-option[aria-selected="true"] .t-select-mark::after { border-color: HighlightText; }
+    .t-select-popup[data-multiple="false"] .t-select-option[aria-selected="true"] .t-select-mark::after { background: HighlightText; }
+  }
+}

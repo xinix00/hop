@@ -1,0 +1,44 @@
+/* Tactile — shared dark palette. Product CSS only maps its domain colours. */
+:root {
+  color-scheme: dark;
+  --workspace: #1e1e1e; --panel: #242424; --card: #2a2a2a;
+  --input: #222; --toolbar: #353533; --edge: #484844;
+  --text: #f0f0f0; --muted: #b4b4ae;
+  --accent: #811b76; --accent-light: #edb8e6; --accent-ink: #fff;
+  --neutral: #4a4a4a; --green: #a0dfb2; --red: #ffaaa5; --yellow: #efcf89;
+  --danger-face: #a32424; --success-face: #25653a; --warning-face: #eaa800;
+  --gloss: linear-gradient(to bottom,#ffffff61 0%,#ffffff24 50%,#0000004d 50%,#00000038 100%);
+  --hover-gloss: linear-gradient(to bottom,#ffffff8f 0%,#ffffff47 50%,#0000000f 50%,#ffffff0a 100%);
+  --pressed-gloss: linear-gradient(to bottom,#00000038 0%,#0000004d 50%,#ffffff24 50%,#ffffff61 100%);
+  --pressed-hover-gloss: linear-gradient(to bottom,#ffffff0a 0%,#0000000f 50%,#ffffff47 50%,#ffffff8f 100%);
+  --rim: #ffffff73; --button-edge: #0009; --contour: #000c;
+  --shadow: 0 2px 3px #0009; --popup-shadow: 0 8px 24px #0007,0 2px 4px #0005;
+  --mono: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+}
+
+/* Light mode uses small grey steps from the page into its surfaces. */
+:root[data-theme="light"] {
+  color-scheme:light;
+  --workspace:#fafafa;
+  --panel:#f2f2f2;
+  --card:#e9e9e9;
+  --input:#fff;
+  --toolbar:#e2e2e2;
+  --edge:#a5a5a5;
+  --text:#292925;
+  --muted:#62625c;
+  --gloss:linear-gradient(to bottom,#ffffff80 0%,#ffffff38 50%,#00000038 50%,#0000001f 100%);
+  --hover-gloss:linear-gradient(to bottom,#ffffffb3 0%,#ffffff61 50%,#0000000f 50%,#ffffff14 100%);
+  --pressed-gloss:linear-gradient(to bottom,#0000001f 0%,#00000038 50%,#ffffff38 50%,#ffffff80 100%);
+  --pressed-hover-gloss:linear-gradient(to bottom,#ffffff14 0%,#0000000f 50%,#ffffff61 50%,#ffffffb3 100%);
+  --rim:#ffffffd9;
+  --button-edge:#0006;
+  --contour:#000b;
+  --shadow:0 2px 3px #0003;
+  --popup-shadow:0 8px 24px #0003,0 2px 4px #0002;
+  --neutral:#dedede;
+  --green:#216738;
+  --red:#a42323;
+  --yellow:#775511;
+}

@@ -1,0 +1,268 @@
+/* Tactile application components. Geometry and states, independent of products.
+   Load after tactile-elements.css. Local layouts never restyle these materials. */
+.t-action {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: 6px; min-height: 36px; max-width: 100%; padding: 5px 13px;
+  font: 500 12px/20px var(--sans, system-ui); text-align: center;
+  vertical-align: middle; cursor: pointer; border-radius: 6px;
+  transition: transform 50ms, box-shadow 100ms;
+}
+.t-action--neutral { --t-button-ink: var(--text); --t-button-face: var(--neutral, #4a4a4a); }
+.t-action--danger { --t-button-face: var(--danger-face, #a32424); }
+.t-action--success { --t-button-face: var(--success-face, #25653a); }
+.t-action--warning { --t-button-ink: #3a2a00; --t-button-face: var(--warning-face, #eaa800); color: #3a2a00; text-shadow: -1px 0 0 #ffffffad, 1px 0 0 #ffffffad, 0 -1px 0 #ffffffad, 0 1px 0 #ffffffad; }
+.t-action:is(.active, [aria-expanded="true"]):not(:disabled) {
+  background-image: var(--pressed-gloss); box-shadow: inset 0 1px 0 #0009;
+}
+.t-action:is(.active, [aria-expanded="true"]):hover:not(:disabled) { background-image: var(--pressed-hover-gloss); }
+.t-action:active:not(:disabled, [aria-disabled="true"]) { transform: translateY(1px); }
+.t-action:focus-visible { outline: 2px solid var(--t-accent); outline-offset: 3px; }
+.t-action.t-icon-button { min-height: max(var(--t-control-min), var(--t-icon-button-size)); padding: 0; }
+.t-action > .material-symbols-outlined { color: inherit; font-size: 20px; }
+.t-action.t-icon-button > .material-symbols-outlined { line-height: 20px; }
+.t-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.t-actions--end { justify-content: flex-end; margin-inline-start: auto; }
+.t-counter { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; min-width: 26px; padding: 1px 7px; border: 1px solid var(--t-edge); border-radius: 999px; background: var(--input); color: var(--muted); font: 11px/18px var(--sans,system-ui); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.t-stack { display: grid; gap: 16px; min-width: 0; }
+.t-muted { color: var(--muted); }
+
+/* Navigation is a flat row, never a collection of little icon tiles. */
+.t-nav { display: grid; gap: 4px; min-width: 0; }
+.t-nav > .t-choice { display: flex; align-items: center; gap: 12px; min-height: 36px; width: 100%; padding: 6px 12px; border: 0; font: 500 13px/20px var(--sans,system-ui); text-align: start; text-decoration: none; cursor: pointer; }
+.t-nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.t-nav > .t-choice > .t-counter { margin-inline-start: auto; }
+.t-nav > .t-choice > .t-icon { color: inherit; background: transparent; border: 0; padding: 0; }
+.t-choice { cursor: pointer; }
+.t-choice--horizontal { --t-choice-indicator: inset 0 -3px 0 var(--t-accent); }
+.t-choice:disabled { opacity: .45; cursor: default; }
+.t-choice:has(input:checked) { background: var(--t-selected-fill); box-shadow: none; }
+.t-choice--row { display: flex; align-items: center; gap: 10px; width: 100%; min-width: 0; min-height: 36px; padding: 6px 10px; border: 0; font: inherit; line-height: 20px; text-align: start; text-decoration: none; }
+.t-choice--row > :not(.t-icon, input) { min-width: 0; }
+
+/* One shared glossy shell, flat choices, deliberately no hover reaction. */
+.t-segmented { position: relative; display: inline-flex; flex-wrap: nowrap; align-items: stretch; gap: 8px; max-width: 100%; padding: 4px; border: 1px solid var(--button-edge); border-radius: 6px; background: var(--gloss),var(--t-segment-face); box-shadow: var(--shadow); overflow-x: auto; }
+.t-segmented::after { content: ''; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px var(--rim); mask-image: linear-gradient(#000,transparent); pointer-events: none; }
+.t-segmented > button { position: relative; display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 6px; min-height: 36px; margin: 0; padding: 5px 12px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: #fff; font: 500 12px/20px var(--sans,system-ui); cursor: pointer; box-shadow: none; text-shadow: none; transform: none; }
+.t-segmented > button + button::before { content: ''; position: absolute; inset: 20% auto 20% -5px; width: 1px; background: #0009; box-shadow: 1px 0 #ffffff20; }
+.t-segmented > button:is(.active,[aria-pressed="true"]) { background: var(--t-segment-selected); border-color: color-mix(in srgb,var(--accent) 60%,#000); box-shadow: inset 0 1px 0 #0009; }
+.t-segmented > button:focus-visible { outline: 2px solid var(--t-accent); outline-offset: -2px; }
+.t-segmented > button:disabled { opacity: .5; cursor: default; }
+.t-segmented .t-counter { border-color: #ffffff30; background: #0002; color: #fff; }
+
+/* Inset controls, including dynamically generated forms. */
+.t-field:not([type="checkbox"],[type="radio"],[type="hidden"],[type="file"]), .t-fieldset {
+  box-sizing: border-box; width: 100%; min-width: 0; min-height: 36px; padding: 5px 11px;
+  border: 1px solid var(--t-edge); border-radius: 6px; background: var(--input);
+  color: var(--text); box-shadow: inset 0 1px 0 #0006; font: inherit; line-height: 20px;
+}
+textarea.t-field { resize: vertical; min-height: 104px; }
+.t-field::placeholder { color: var(--muted); opacity: .8; }
+.t-field:focus-visible { outline: 2px solid var(--t-accent); outline-offset: 2px; }
+.t-field:read-only { color: var(--muted); }
+.t-field:disabled { opacity: .45; cursor: default; }
+.t-field[aria-invalid="true"] { border-color: var(--red); }
+.t-fieldset { margin: 0; padding: 14px; }
+.t-fieldset > legend { padding: 0 6px; font-weight: 600; }
+.t-check-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-height: 36px; color: var(--text); cursor: pointer; font-size: 12px; }
+.t-check-row > input:is([type="checkbox"],[type="radio"]) { margin: 0; }
+.t-check-row > .t-field:not([type="checkbox"],[type="radio"]) { flex: 1 1 180px; width: auto; }
+
+/* Quiet surfaces. Outer panels have only the stronger top edge. */
+.t-card { min-width: 0; border: 1px solid var(--t-edge); border-radius: 8px; background: var(--t-surface); color: var(--text); box-shadow: var(--t-layer-shadow); }
+.t-card--padded { padding: 16px; }
+.t-card--flat { box-shadow: none; }
+.t-well { min-width: 0; background: var(--input); color: var(--text); border: 1px solid var(--t-edge); border-radius: 7px; box-shadow: inset 0 1px 0 #0006; }
+.t-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--t-edge); }
+.t-empty { display: grid; place-items: center; gap: 8px; min-height: 128px; padding: 32px 20px; color: var(--muted); text-align: center; line-height: 1.6; }
+.t-empty > strong { color: var(--text); font-size: 16px; }
+.t-disclosure { min-width: 0; }
+.t-disclosure > summary { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 10px 12px; border-radius: 6px; list-style: none; cursor: pointer; color: var(--text); }
+.t-disclosure > summary::-webkit-details-marker { display: none; }
+.t-disclosure > summary::after { content: 'expand_more'; display: block; flex: 0 0 20px; width: 20px; margin-inline-start: auto; font: 20px/20px 'Material Symbols Outlined'; font-feature-settings: 'liga'; }
+.t-disclosure[open] > summary::after { content: 'expand_less'; }
+.t-disclosure > summary:hover { background: var(--t-hover-fill); }
+.t-disclosure > summary:focus-visible { outline: 2px solid var(--t-accent); outline-offset: -2px; }
+.t-disclosure-body { padding: 12px 16px 16px; min-width: 0; }
+.t-disclosure.t-card > summary { border-radius: 7px; }
+.t-disclosure.t-card[open] > summary { border-bottom: 1px solid var(--t-edge); border-radius: 7px 7px 0 0; }
+.t-code { padding: 14px; overflow: auto; tab-size: 2; font: 12px/1.65 var(--mono,monospace); white-space: pre; }
+.t-prose { color: var(--text); font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.t-prose > :first-child { margin-top: 0; }
+.t-prose > :last-child { margin-bottom: 0; }
+.t-prose :is(h1,h2,h3) { line-height: 1.4; margin: 1.4em 0 .6em; }
+.t-prose h1 { font-size: 24px; } .t-prose h2 { font-size: 20px; } .t-prose h3 { font-size: 16px; }
+.t-prose p { margin: .7em 0; }
+.t-prose :is(ul,ol) { padding-inline-start: 24px; }
+.t-prose a { color: var(--t-accent); text-underline-offset: 3px; }
+.t-prose blockquote { margin: 14px 0; padding: 8px 14px; border-inline-start: 3px solid var(--t-accent); background: var(--panel); color: var(--muted); }
+.t-prose pre { margin: 14px 0; padding: 14px; overflow: auto; background: var(--input); border: 1px solid var(--t-edge); border-radius: 7px; box-shadow: inset 0 1px 0 #0006; }
+.t-prose code { font: .88em/1.65 var(--mono,monospace); }
+.t-prose :not(pre) > code { padding: 2px 4px; background: var(--input); border-radius: 3px; }
+.t-prose :is(img,video) { max-width: 100%; height: auto; border-radius: 6px; }
+.t-table { width: 100%; border-collapse: collapse; font: 12px/1.6 var(--sans,system-ui); font-variant-numeric: tabular-nums; }
+.t-table :is(th,td) { padding: 10px 12px; border-bottom: 1px solid var(--t-edge); text-align: start; vertical-align: middle; }
+.t-table th { background: var(--panel); color: var(--muted); font-weight: 600; }
+.t-table tr:last-child td { border-bottom: 0; }
+.t-table tbody tr:hover { background: var(--t-hover-fill); }
+.t-table tbody tr:has(input:checked) { background: var(--t-selected-fill); }
+.t-table-scroll { min-width: 0; overflow: auto; border: 1px solid var(--t-edge); border-radius: 7px; }
+.t-progress { height: 6px; overflow: hidden; background: var(--input); border: 1px solid var(--t-edge); border-radius: 4px; box-shadow: inset 0 1px 0 #0006; }
+.t-progress > div { height: 100%; background: var(--accent); }
+.t-progress.indeterminate > div { width: 30%; animation: t-progress 1.5s linear infinite; }
+@keyframes t-progress { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+
+/* Dialog and notice geometry shared by gallery and applications. */
+.t-dialog { width: min(var(--t-dialog-width,640px),calc(100vw - 32px)); max-width: none; max-height: calc(100dvh - 32px); margin: auto; padding: 0; border: 1px solid var(--t-edge); border-radius: 12px; background: var(--panel); color: var(--text); box-shadow: var(--popup-shadow); overflow: auto; overscroll-behavior: contain; }
+.t-dialog--fullscreen { width: calc(100vw - 32px); height: calc(100dvh - 32px); max-height: none; overflow: hidden; }
+.t-dialog::backdrop { background: #0009; }
+.t-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px; border-bottom: 1px solid var(--t-edge); background: var(--panel); }
+.t-dialog-head > :first-child { min-width: 0; }
+.t-dialog-head h2 { margin: 0; font-size: 18px; line-height: 1.4; }
+.t-dialog-head p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.t-dialog-head > .t-action { margin-inline-start: auto; }
+.t-dialog-body { padding: 20px; min-width: 0; }
+.t-dialog-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; padding: 16px 20px; border-top: 1px solid var(--t-edge); background: var(--panel); }
+.t-dialog-foot > :first-child:not(.t-action) { flex: 1; min-width: 0; }
+.t-dialog--decision { width: min(480px,calc(100vw - 32px)); }
+.t-dialog--decision .t-dialog-body { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+.t-dialog--decision[data-tone="danger"] .t-dialog-head { border-top: 3px solid var(--red); }
+.t-notice { display: flex; align-items: center; gap: 12px; width: 100%; padding: 14px 16px; border: 1px solid var(--t-edge); border-inline-start: 3px solid var(--t-accent); border-radius: 8px; background: var(--t-surface); color: var(--text); box-shadow: var(--popup-shadow); font: 13px/1.6 var(--sans,system-ui); }
+.t-notice[data-tone="danger"] { border-inline-start-color: var(--red); }
+.t-notice[data-tone="success"] { border-inline-start-color: var(--green); }
+.t-notice > .t-icon { color: var(--t-accent); }
+.t-notice[data-tone="danger"] > .t-icon { color: var(--red); }
+.t-notice[data-tone="success"] > .t-icon { color: var(--green); }
+.t-notice > .t-notification-text { flex: 1; min-width: 0; }
+.t-dropzone { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 24px 18px; border: 1px dashed var(--t-edge); border-radius: 8px; background: var(--input); text-align: center; color: var(--muted); }
+.t-dropzone:is(:hover,:focus-visible,.over,.drag-over) { border-color: var(--t-accent); background: var(--t-hover-fill); }
+.t-dropzone > strong { display: block; margin: 8px 0; color: var(--text); }
+.t-dropzone > .t-action { margin-top: 12px; }
+@media (pointer: coarse), (max-width: 760px) {
+  .t-action { min-height: 36px; }
+  .t-field:not([type="checkbox"],[type="radio"],[type="hidden"],[type="file"]) { min-height: 36px; font-size: 16px; }
+  .t-segmented > button { min-height: 36px; }
+  .t-check-row { min-height: 36px; }
+  .t-dialog--fullscreen { width: calc(100vw - 16px); height: calc(100dvh - 16px); }
+  .t-dialog-head, .t-dialog-body { padding: 16px; }
+  .t-dialog-foot { padding: 14px 16px; }
+}
+@media (prefers-reduced-motion: reduce) { .t-action, .t-progress > div { transition: none; animation: none; } }
+
+.t-combobox { display: flex; width: 100%; }
+.t-combobox-popup { position: fixed; inset: auto; margin: 0; padding: 8px; overflow-y: auto; }
+.t-combobox-empty { padding: 12px; color: var(--muted); font-size: 12px; }
+
+/* Pickers: the native input keeps its value; native indicators and spinners give way to joined actions. */
+.t-picker { display: flex; width: 100%; }
+.t-picker > input::-webkit-calendar-picker-indicator { display: none; -webkit-appearance: none; }
+.t-picker > input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+.t-picker > input[type="number"]::-webkit-inner-spin-button, .t-picker > input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.t-picker > input:is([type="date"],[type="time"])::-webkit-date-and-time-value { text-align: start; }
+.t-input-action > .t-action.t-icon-button + .t-action.t-icon-button { margin-inline-start: -1px; }
+.t-input-action > .t-action.t-icon-button:not(:last-of-type) { border-start-end-radius: 0; border-end-end-radius: 0; }
+/* The focus ring wraps the whole compound control: field and joined action are one thing. */
+.t-input-action:has(> input:focus-visible) { border-radius: 6px; outline: 2px solid var(--t-accent); outline-offset: 2px; }
+.t-input-action > input:focus-visible { outline: none; }
+/* Number: plus above minus in one column of field height. */
+.t-picker-stack { display: flex; flex-direction: column; flex: 0 0 var(--t-icon-button-size); width: var(--t-icon-button-size); height: var(--t-field-height); }
+.t-input-action > .t-picker-stack > .t-action.t-icon-button { flex: 1 1 0; height: auto; min-height: 0; max-height: none; border-radius: 0; }
+.t-input-action > .t-picker-stack > .t-action.t-icon-button:first-child { border-start-end-radius: 6px; }
+.t-input-action > .t-picker-stack > .t-action.t-icon-button:last-child { border-end-end-radius: 6px; margin-top: -1px; }
+.t-input-action > .t-picker-stack > .t-action.t-icon-button > .t-icon { font-size: 12px; line-height: 12px; }
+.t-picker-popup { --t-icon-button-size: 36px; position: fixed; inset: auto; margin: 0; padding: 10px; gap: 8px; }
+.t-picker-head { display: flex; align-items: center; gap: 6px; }
+.t-picker-caption { flex: 1; min-width: 0; text-align: center; font-weight: 600; text-transform: capitalize; }
+.t-picker-grid { display: grid; grid-template-columns: repeat(7, 36px); gap: 2px; }
+.t-picker-row { display: contents; }
+.t-picker-weekday { color: var(--muted); font-size: 11px; font-weight: 600; line-height: 24px; text-align: center; }
+.t-picker-cell { display: flex; align-items: center; justify-content: center; box-sizing: border-box; min-height: 36px; margin: 0; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text); font: inherit; font-variant-numeric: tabular-nums; cursor: pointer; box-shadow: none; text-shadow: none; }
+.t-picker-cell[data-outside="true"] { color: var(--muted); opacity: .7; }
+.t-picker-cell[data-today="true"] { box-shadow: inset 0 0 0 1px var(--t-accent); }
+.t-picker-cell:hover:not(:disabled, [aria-selected="true"]) { background: var(--t-hover-fill); }
+.t-picker-cell[aria-selected="true"] { background: var(--accent); color: var(--accent-ink, #fff); opacity: 1; }
+.t-picker-cell[aria-selected="true"]:hover { background: color-mix(in srgb, var(--accent) 82%, #fff); }
+.t-picker-cell:disabled { opacity: .35; cursor: default; }
+.t-picker-cell:focus-visible { outline: 2px solid var(--t-accent); outline-offset: -2px; }
+.t-picker-columns { display: flex; gap: 8px; }
+.t-picker-column { display: grid; align-content: start; gap: 2px; min-width: 64px; max-height: 240px; padding: 2px; overflow-y: auto; overscroll-behavior: contain; }
+.t-picker-foot { display: flex; justify-content: space-between; gap: 8px; }
+.t-picker-foot > .t-action { min-height: 36px; padding: 5px 12px; }
+@media (pointer: coarse) { .t-picker-popup { --t-icon-button-size: 36px; } .t-picker-grid { grid-template-columns: repeat(7, 40px); } .t-picker-cell { min-height: 36px; } }
+
+/* Compound controls keep a single straight seam after component sizing. */
+.t-input-action > input.t-field { flex: 1 1 0; width: 0; height: var(--t-field-height); min-height: var(--t-field-height); }
+:is(.t-select-trigger,.t-input-action) > :is(.t-select-caption,input) { border-start-end-radius: 0; border-end-end-radius: 0; border-inline-end: 0; }
+:is(.t-select-trigger,.t-input-action) > .t-action.t-icon-button { border-start-start-radius: 0; border-end-start-radius: 0; }
+/* Selectable cards use the same quiet state as every other choice. */
+.t-card.t-choice:is(:hover,[data-active="true"]):not(:disabled,[aria-disabled="true"]) { background: var(--t-hover-fill); }
+.t-card.t-choice:is(.active,.selected,[aria-selected="true"],[aria-pressed="true"]) { background: var(--t-selected-fill); box-shadow: var(--t-choice-indicator,inset 3px 0 0 var(--t-accent)); }
+
+/* Shared switches: a 16px border-box thumb with 2px clearance inside the track. */
+input.switch {
+  appearance:none;
+  position:relative;
+  width:38px;
+  height:22px;
+  border:1px solid var(--edge);
+  border-radius:12px;
+  background:var(--input);
+  box-shadow:inset 0 1px 0 #0008;
+  transition:background-color 100ms
+}
+
+.switch::before {
+  box-sizing:border-box;
+  content:"";
+  position:absolute;
+  top:2px;
+  left:2px;
+  width:16px;
+  height:16px;
+  background:var(--gloss),#92928b;
+  border:1px solid #0009;
+  border-radius:50%;
+  box-shadow:inset 0 1px 0 #ffffff8a,0 1px 2px #0008
+}
+
+.switch:checked {
+  background:var(--accent);
+  border-color:color-mix(in srgb,var(--accent-light) 40%,var(--edge))
+}
+
+.switch:checked::before {
+  left:calc(100% - 18px);
+  background-color:#e6e6e0
+}
+
+
+/* The same ring is used in the gallery and applications, with text supplying its name. */
+.t-spinner, .spinner {
+  display: inline-block; box-sizing: border-box; flex: 0 0 16px;
+  width: 16px; height: 16px; border: 2px solid var(--edge);
+  border-top-color: var(--accent-light); border-radius: 50%;
+  animation: tactile-spin 900ms linear infinite; vertical-align: middle;
+}
+@keyframes tactile-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .t-spinner, .spinner { animation: none; } }
+
+:root[data-theme="light"] :is(.t-action--neutral, .t-dismiss) { --t-button-contour: #ffffffb3; }
+
+.t-action > .t-spinner { border-color: color-mix(in srgb, currentColor 25%, transparent); border-top-color: currentColor; }
+
+/* Closable tabs: a single flat surface with two sibling buttons, never nested.
+   The selection line belongs to the whole tab, including its close target. */
+.t-tab-strip { display: flex; align-items: center; gap: 8px; min-width: 0; overflow-x: auto; padding: 4px; }
+.t-tab-item { position: relative; display: inline-flex; align-items: center; flex: 0 0 auto; gap: 0; padding: 2px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); }
+.t-tab-item:has(> .t-tab:is([aria-pressed="true"], [aria-selected="true"])) { background: var(--t-selected-fill); color: var(--text); }
+.t-tab-item:has(> .t-tab:is([aria-pressed="true"], [aria-selected="true"]))::after { content: ''; position: absolute; inset: auto 6px 0; height: 3px; border-radius: 3px 3px 0 0; background: var(--t-accent); pointer-events: none; }
+.t-tab, .t-tab-close { box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; gap: 8px; margin: 0; border: 0; border-radius: 4px; background: transparent; color: inherit; box-shadow: none; text-shadow: none; font: 500 12px/20px var(--sans, system-ui); cursor: pointer; }
+.t-tab { flex: 1 0 auto; min-height: 36px; padding: 6px 14px; white-space: nowrap; }
+.t-tab-close { flex: 0 0 36px; width: 36px; min-width: 36px; max-width: 36px; height: 36px; min-height: 36px; max-height: 36px; padding: 0; }
+.t-tab-close > .t-icon { font-size: 20px; }
+.t-tab:hover:not(:disabled), .t-tab-close:hover:not(:disabled) { background: var(--t-hover-fill); color: var(--text); }
+.t-tab-close:hover:not(:disabled) { box-shadow: inset 0 0 0 1px var(--t-edge); }
+:is(.t-tab, .t-tab-close):focus-visible { outline: 2px solid var(--t-accent); outline-offset: -3px; }
+:is(.t-tab, .t-tab-close):disabled { opacity: .45; cursor: default; }
+
+/* Explicit status marker keeps material pseudo-elements free for their rim. */
+.t-status-dot { display: inline-block; flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
