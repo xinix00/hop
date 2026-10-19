@@ -30,6 +30,7 @@ members = [
     "apps/hopprom",
     "apps/hoplockserver",
     "apps/hop-gui/server",
+    "apps/cloudflared-lean",
 ]
 
 # Eén tag per buur-repo voor de hele werkruimte: lean en HopOS zijn eigen
@@ -41,9 +42,11 @@ leanhttps = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
 leantls = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
 leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
 leans3http = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
-applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.13" }
-sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.13" }
-abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.13" }
+leanh2 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
+leanrand = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
+applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.14" }
+sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.14" }
+abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.14" }
 types = { path = "types" }
 auth = { path = "auth" }
 api = { path = "api" }
@@ -53,7 +56,7 @@ store = { path = "store" }
 hoplib = { path = "hoplib" }
 
 [workspace.package]
-version = "3.0.11"
+version = "3.0.12"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT"

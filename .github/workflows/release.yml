@@ -98,12 +98,18 @@ jobs:
           cargo build --release --target $T -p hop-gui --features hopos --bin hop-gui-hopos
           cargo build --release --target $T -p hoplb --no-default-features --features hopos --bin hoplb-hopos
           cargo build --release --target $T -p hoplockserver --no-default-features --features hopos --bin hoplockserver-hopos
+          # cloudflared-lean ook voor riscv64: de tunnel draait op elk board.
+          for t in $T riscv64gc-unknown-none-elf; do
+            cargo build --release --target $t -p cloudflared-lean --bin cloudflared-lean
+          done
       - name: Collect
         run: |
           mkdir -p dist
           for a in hopdns hopprom hop-gui hoplb hoplockserver; do
             cp "target/aarch64-unknown-none-softfloat/release/${a}-hopos" "dist/${a}-arm64.elf"
           done
+          cp target/aarch64-unknown-none-softfloat/release/cloudflared-lean dist/cloudflared-lean-arm64.elf
+          cp target/riscv64gc-unknown-none-elf/release/cloudflared-lean dist/cloudflared-lean-riscv64.elf
           ls -l dist
       - uses: actions/upload-artifact@v4
         with:

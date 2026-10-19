@@ -13,15 +13,15 @@
 # HOP_GATE_CORE=1 alleen de kern.
 set -e
 cd "$(dirname "$0")/.."
-APPS="hoplib apps/hopdns apps/hoplb apps/hopprom apps/hoplockserver apps/hop-gui"
+APPS="hoplib apps/hopdns apps/hoplb apps/hopprom apps/hoplockserver apps/hop-gui apps/cloudflared-lean"
 HOST_CRATES="--exclude hostnet --exclude store --exclude agentd --exclude cli"
-APP_CRATES="--exclude hoplib --exclude hopdns --exclude hoplb --exclude hopprom --exclude hoplockserver --exclude hop-gui"
+APP_CRATES="--exclude hoplib --exclude hopdns --exclude hoplb --exclude hopprom --exclude hoplockserver --exclude hop-gui --exclude cloudflared-lean"
 
 echo "== randen"
 # De kern hangt nooit van hoplib of een app af: die staan op Hop, niet andersom.
 # shellcheck disable=SC2086
 tree="$(cargo tree --quiet --workspace $APP_CRATES -e normal,build,dev --prefix none)"
-if printf '%s\n' "$tree" | grep -E '^(hoplib|hopdns|hoplb|hopprom|hoplockserver|hop-gui) '; then
+if printf '%s\n' "$tree" | grep -E '^(hoplib|hopdns|hoplb|hopprom|hoplockserver|hop-gui|cloudflared-lean) '; then
 	echo "ROOD: een kern-crate hangt van hoplib of een app af"
 	exit 1
 fi
