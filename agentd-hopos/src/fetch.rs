@@ -1,4 +1,5 @@
-//! Artifacts ophalen over `http://` en `https://`, en de kale dial van de bewoner.
+//! Artifacts ophalen met de downloader van elke node ([`runner::artifact`]:
+//! `http://`, `https://`, `s3://`), en de kale dial van de bewoner.
 //!
 //! Een job wijst naar een ELF op een URL; op een echt net is dat meestal
 //! een GitHub-release (`https://github.com/.../releases/download/...`), en
@@ -26,16 +27,21 @@
 
 use alloc::format;
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::future::Future;
 
 use leanhttp::Target;
+
+use runner::artifact::{self, Fetch};
+use types::Artifact;
 
 use crate::client::Client;
 use crate::node::{Images, Sink};
 
 /// De leesbuffer van een download: één hap die de runner in brokken naar de kern stroomt.
 pub const DOWNLOAD_BUF: usize = 64 << 10;
+
+/// Hoe lang verbinden en de kop van een download mogen duren.
+const HEADER_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(60);
 
 /// Zoekt een host op.
 pub trait Resolve {
@@ -65,36 +71,6 @@ impl Resolve for IpOnly {
         applib::appnet::parse_ip4(host)
             .ok_or_else(|| format!("{host}: no resolver, only IPv4 addresses"))
     }
-}
-
-/// Het schema van een artifact-URL.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Scheme {
-    /// `http://`.
-    Http,
-    /// `https://`.
-    Https,
-}
-
-/// Het schema van `url`, of waarom het geen artifact-URL is.
-pub fn scheme_of(url: &str) -> Result<Scheme, String> {
-    let (scheme, rest) = url
-        .split_once("://")
-        .ok_or_else(|| format!("{url:?} is not a URL"))?;
-    let s = if scheme.eq_ignore_ascii_case("http") {
-        Scheme::Http
-    } else if scheme.eq_ignore_ascii_case("https") {
-        Scheme::Https
-    } else {
-        return Err(format!(
-            "{url:?}: scheme {scheme:?} is not supported (http or https)"
-        ));
-    };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if host.is_empty() {
-        return Err(format!("{url:?} has no host"));
-    }
-    Ok(s)
 }
 
 /// Wat de kale dial van de laatste hop zag: de host, en waarom hij faalde.
@@ -150,7 +126,8 @@ impl<C: Connect, R: Resolve> leanhttp::Dial for Tcp<'_, C, R> {
 /// vertrouwde wandklok als functie en `E` als bron van handshake-entropie.
 pub type Web<'a, C, R, E> = leanhttps::WebDial<Tcp<'a, C, R>, fn() -> Option<u64>, E>;
 
-/// De downloader van artifacts: `http://` en `https://`, en de bytes via de runner de kooi in.
+/// De downloader van artifacts: [`runner::artifact`] over de dial van de
+/// bewoner, dezelfde als op de host (`http://`, `https://`, `s3://`).
 ///
 /// De artifacts haalt hij in de downloadtaak ([`crate::download`]), naast
 /// de eigenaar: de bytes gaan als berichten naar de node, die ze brok voor
@@ -159,51 +136,61 @@ pub type Web<'a, C, R, E> = leanhttps::WebDial<Tcp<'a, C, R>, fn() -> Option<u64
 /// `objects.githubusercontent.com`), anders dan de aanroepen van de cluster.
 pub struct HttpImages<C, R> {
     client: Client<C, R>,
+    how: Fetch,
 }
 
 impl<C: Connect, R: Resolve> HttpImages<C, R> {
     /// Een downloader; `trusted_secs` is nu in Unix-seconden, alleen als de
-    /// wandklok vertrouwd is, en `rng` de willekeur van de handshakes.
+    /// wandklok vertrouwd is (de keten van https), `wall_secs` de wandklok
+    /// voor de handtekening van `s3://`, en `rng` de willekeur van de handshakes.
     pub fn new(
         connect: C,
         resolver: R,
         trusted_secs: fn() -> Option<u64>,
+        wall_secs: fn() -> u64,
         rng: applib::rand::Rng,
     ) -> Self {
         Self {
             client: Client::new(connect, resolver, rng, trusted_secs),
+            how: Fetch {
+                timeout: HEADER_TIMEOUT,
+                chunk: DOWNLOAD_BUF,
+                now: Some(wall_secs),
+            },
         }
     }
 }
 
+/// De kern plaatst een image op zijn maat: een download zonder lengte kan niet.
+struct Sized<'s, S> {
+    url: &'s str,
+    sink: &'s mut S,
+}
+
+impl<S: Sink> artifact::Sink for Sized<'_, S> {
+    async fn begin(&mut self, size: Option<u64>) -> Result<(), String> {
+        let size = size.ok_or_else(|| format!("download {}: no Content-Length", self.url))?;
+        self.sink.begin(size).await
+    }
+
+    async fn chunk(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.sink.chunk(bytes).await
+    }
+}
+
 impl<C: Connect, R: Resolve> Images for HttpImages<C, R> {
-    async fn fetch<S: Sink>(&mut self, url: &str, sink: &mut S) -> Result<(), String> {
-        scheme_of(url).map_err(|e| format!("download {url}: {e}"))?;
-        // `get` eist 200 en een Content-Length: een image zonder lengte
-        // kan de kern niet plaatsen.
+    async fn fetch<S: Sink>(&mut self, a: &Artifact, sink: &mut S) -> Result<(), String> {
+        let url = a.url.as_str();
+        let mut sized = Sized { url, sink };
         let mut dial = self.client.web();
-        let got = leanhttp::get(&mut dial, url).await;
+        let got = artifact::fetch(&mut dial, &self.how, a, &mut sized).await;
         let tls = dial.last_error();
         drop(dial);
-        let mut resp =
-            got.map_err(|e| format!("download {url}: {}", self.client.reason(e, tls)))?;
-        let len = resp
-            .length
-            .ok_or_else(|| format!("download {url}: no Content-Length"))?;
-        sink.begin(len).await?;
-        let mut buf = Vec::new();
-        buf.try_reserve_exact(DOWNLOAD_BUF)
-            .map_err(|_| String::from("download buffer: out of memory"))?;
-        buf.resize(DOWNLOAD_BUF, 0);
-        loop {
-            let n = resp
-                .read(&mut buf)
-                .await
-                .map_err(|e| format!("download {url}: {e}"))?;
-            if n == 0 {
-                return Ok(());
-            }
-            sink.chunk(buf.get(..n).unwrap_or_default()).await?;
-        }
+        got.map_err(|e| match e {
+            // De sink zei het zelf al, met de URL erbij.
+            artifact::Error::Sink(why) => why,
+            artifact::Error::Net(e) => format!("download {url}: {}", self.client.reason(e, tls)),
+            e => format!("download {url}: {e}"),
+        })
     }
 }

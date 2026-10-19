@@ -32,6 +32,8 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+/// De downloader van artifacts: dezelfde op de host en op HopOS.
+pub mod artifact;
 mod env;
 mod hopos;
 /// De host-backends (feature `std`): processen, Docker, downloads, uitpakken en isolatie.

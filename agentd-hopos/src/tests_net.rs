@@ -15,7 +15,7 @@ use leanhttp::{AsyncRead, AsyncWrite, Close, IoError};
 
 use applib::rand::Rng;
 
-use crate::fetch::{Connect, HttpImages, IpOnly, Resolve, Scheme, scheme_of};
+use crate::fetch::{Connect, HttpImages, IpOnly, Resolve};
 use crate::sntp::{self, NtpLink, PACKET, SntpError};
 use crate::{Images, Sink};
 
@@ -314,10 +314,32 @@ impl Sink for Keep {
     }
 }
 
+/// Een artifact met alleen een URL.
+fn at(url: &str) -> types::Artifact {
+    types::Artifact {
+        url: String::from(url),
+        ..types::Artifact::default()
+    }
+}
+
+/// De wandklok voor de handtekening van S3: dezelfde dag als [`now`].
+fn wall() -> u64 {
+    1_790_640_000
+}
+
 /// Haalt `url` op met een nep-net dat `script` speelt; de uitkomst, de
 /// sink en wat het net zag.
 fn fetch(
     url: &str,
+    script: &[&[u8]],
+    clock: fn() -> Option<u64>,
+) -> (Result<(), String>, Keep, Seen) {
+    fetch_artifact(&at(url), script, clock)
+}
+
+/// Als [`fetch`], voor een heel artifact (koppen, sleutels).
+fn fetch_artifact(
+    a: &types::Artifact,
     script: &[&[u8]],
     clock: fn() -> Option<u64>,
 ) -> (Result<(), String>, Keep, Seen) {
@@ -326,9 +348,9 @@ fn fetch(
         script: script.iter().map(|s| s.to_vec()).collect(),
         seen: seen.clone(),
     };
-    let mut images = HttpImages::new(net, names(), clock, rng());
+    let mut images = HttpImages::new(net, names(), clock, wall, rng());
     let mut sink = Keep::default();
-    let r = block_on(images.fetch(url, &mut sink));
+    let r = block_on(images.fetch(a, &mut sink));
     (r, sink, seen)
 }
 
@@ -344,13 +366,64 @@ fn now() -> Option<u64> {
 
 #[test]
 fn urls_and_schemes() {
-    assert_eq!(scheme_of("http://10.0.2.2:8000/a.elf"), Ok(Scheme::Http));
-    assert_eq!(scheme_of("HTTPS://github.com/x"), Ok(Scheme::Https));
-    for bad in ["ftp://x/y", "github.com/x", "https://", "https:///x"] {
-        assert!(scheme_of(bad).is_err(), "{bad}");
+    for good in [
+        "http://10.0.2.2:8000/a.elf",
+        "https://github.com/x",
+        "s3://b/k",
+    ] {
+        assert!(runner::artifact::check(&at(good)).is_ok(), "{good}");
+    }
+    for bad in ["ftp://x/y", "github.com/x"] {
+        assert!(runner::artifact::check(&at(bad)).is_err(), "{bad}");
     }
     let (r, _, seen) = fetch("ftp://artifacts.local/a.elf", &[OK], now);
-    assert!(r.unwrap_err().contains("not supported"));
+    assert!(r.unwrap_err().contains("unsupported scheme"));
+    assert!(seen.borrow().is_empty());
+}
+
+#[test]
+fn s3_is_signed_and_streams_like_http() {
+    // Hetzelfde artifact als op de host: de sleutels in `auth`, een eigen
+    // endpoint (Bunny, MinIO) en path-style. Getekend, zonder redirect, en de
+    // bytes met hun lengte naar dezelfde sink als http.
+    let mut a = at("s3://haas-software/artifacts/lumen.elf");
+    for (k, v) in [
+        ("access_key", "haas-software"),
+        ("secret_key", "secret"),
+        ("region", "de"),
+        ("endpoint", "http://artifacts.local:8000"),
+        ("path_style", "true"),
+    ] {
+        a.auth.insert(String::from(k), String::from(v)).unwrap();
+    }
+    let (r, sink, seen) = fetch_artifact(&a, &[OK], now);
+    r.unwrap();
+    assert_eq!(
+        (sink.len, sink.bytes.as_slice()),
+        (Some(10), &b"\x7fELF-image"[..])
+    );
+    let seen = seen.borrow();
+    assert_eq!((seen[0].0, seen[0].1), ([10, 0, 2, 2], 8000));
+    let req = seen[0].2.borrow();
+    let req = core::str::from_utf8(&req).unwrap();
+    assert!(
+        req.starts_with("GET /haas-software/artifacts/lumen.elf HTTP/1.1\r\n"),
+        "{req}"
+    );
+    assert!(
+        req.contains("AWS4-HMAC-SHA256 Credential=haas-software/20260929/de/s3/"),
+        "{req}"
+    );
+    assert!(
+        !req.contains("secret"),
+        "the secret never goes over the wire"
+    );
+}
+
+#[test]
+fn s3_without_keys_is_refused_before_the_net() {
+    let (r, _, seen) = fetch("s3://haas-software/a.elf", &[OK], now);
+    assert!(r.unwrap_err().contains("access_key"));
     assert!(seen.borrow().is_empty());
 }
 
@@ -378,12 +451,12 @@ fn the_same_url_is_fetched_whole_every_time() {
         script: vec![OK.to_vec(), NEW.to_vec()],
         seen: seen.clone(),
     };
-    let mut images = HttpImages::new(net, names(), now, rng());
-    let url = "http://artifacts.local/a.elf";
+    let mut images = HttpImages::new(net, names(), now, wall, rng());
+    let url = at("http://artifacts.local/a.elf");
     let mut first = Keep::default();
-    block_on(images.fetch(url, &mut first)).unwrap();
+    block_on(images.fetch(&url, &mut first)).unwrap();
     let mut second = Keep::default();
-    block_on(images.fetch(url, &mut second)).unwrap();
+    block_on(images.fetch(&url, &mut second)).unwrap();
     assert_eq!(first.bytes, b"\x7fELF-image");
     assert_eq!(second.bytes, b"\x7fELF-new");
     let seen = seen.borrow();
@@ -551,9 +624,16 @@ fn real_github_release_download() {
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut seed))
         .unwrap();
-    let mut images = HttpImages::new(StdNet, StdDns, std_secs, Rng::from_seed(&seed, std_ns));
+    let wall = || std_secs().unwrap_or(0);
+    let mut images = HttpImages::new(
+        StdNet,
+        StdDns,
+        std_secs,
+        wall,
+        Rng::from_seed(&seed, std_ns),
+    );
     let mut sink = Keep::default();
-    let r = block_on(images.fetch(&url, &mut sink));
+    let r = block_on(images.fetch(&at(&url), &mut sink));
     std::println!(
         "download {url}: {r:?}, length {:?}, {} bytes",
         sink.len,

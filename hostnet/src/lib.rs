@@ -48,7 +48,10 @@ mod conn;
 mod exec;
 mod s3;
 
-pub use client::{Call, Error, HostConn, Http, Open, Reply, Result, entropy, unix_secs};
+pub use client::{
+    Call, Error, HostConn, Http, Open, Reply, Result, Tcp, Trace, Web, WebDialer, entropy,
+    unix_secs,
+};
 pub use conn::{Socket, StdConn};
 pub use exec::block_on;
 pub use s3::{S3Response, S3Transport, s3_http};

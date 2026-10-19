@@ -22,7 +22,7 @@ leader/     scheduling, placement, updates, failover: the cluster brain
 agent/      the node: tasks, heartbeats, restarts, state persistence
 api/        the HTTP API as pure handlers over request/response types
 discovery/  finding nodes on the LAN
-runner/     the task backends: HopOS slots, processes, docker
+runner/     the task backends: HopOS slots, processes, docker; and the artifact downloader of every node
 hopos-runner/  runner::SystemApi over applib's system client (the kernel frames)
 hop-http/   the HTTP adapter: leanhttp over an applib TcpStream, api in and out
 agentd-hopos/  Hop as the HopOS resident: agent + leader in a slot (lib + no_std bin)
@@ -48,6 +48,24 @@ products of their own and come in on one tag each, set in the root
 `tools/gate.sh` is the gate for the whole workspace: the core, then every
 app's own `tools/gate.sh` (its `std` and `hopos` builds apart).
 `HOP_GATE_CORE=1` runs the core only.
+
+## Artifacts
+
+Every node downloads the same way (`runner::artifact`): a host writes the
+bytes to the task directory, a HopOS node streams them into the slot. Only
+the connection and the sink differ.
+
+| URL | how |
+| --- | --- |
+| `http://`, `https://` | redirects followed; `headers` of the artifact, Basic auth from `auth.username`/`auth.password` |
+| `s3://bucket/key` | signed with `auth.access_key`, `auth.secret_key`, `auth.region`; `auth.endpoint` for a non-AWS store (Bunny, MinIO) and `auth.path_style = "true"` |
+
+```json
+"artifacts": [{ "url": "s3://haas-software/artifacts/lumen/lumen.elf",
+                "match": { "node.arch": "arm64" },
+                "auth": { "access_key": "…", "secret_key": "…", "region": "de",
+                          "endpoint": "https://de-s3.storage.bunnycdn.com", "path_style": "true" } }]
+```
 
 ## On a host
 

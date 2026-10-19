@@ -848,6 +848,7 @@ async fn resident(app: &'static App) {
         SlotConnect { net, exec },
         SlotResolver,
         trusted_secs,
+        wall_secs,
         entropy(app),
     );
     // De artifacts haalt de downloadtaak; de node houdt een eigen
@@ -865,6 +866,7 @@ async fn resident(app: &'static App) {
         SlotConnect { net, exec },
         SlotResolver,
         trusted_secs,
+        wall_secs,
         quiet_rng(app, 5),
     );
     // Het adres zoals de andere nodes deze node zien (achter een NAT anders

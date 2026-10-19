@@ -25,6 +25,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use types::Artifact;
 
 use sync::mpsc::Mailbox;
 use sync::spsc::{Channel, Receiver, Sender};
@@ -45,12 +46,12 @@ pub const PIECES: usize = 2;
 pub const ORDERS: usize = 4;
 
 /// Een download voor de downloadtaak.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct Order {
     /// Het nummer, vanaf 1; elk [`Piece`] draagt het terug.
     pub seq: u64,
-    /// De URL van het artifact.
-    pub url: String,
+    /// Het artifact: URL, koppen en sleutels.
+    pub artifact: Artifact,
 }
 
 /// Een stap van een download, van de downloadtaak naar de eigenaar.
@@ -105,7 +106,7 @@ pub async fn download<I: Images>(
         tx,
         wanted,
     };
-    let r = images.fetch(&order.url, &mut hand).await;
+    let r = images.fetch(&order.artifact, &mut hand).await;
     if hand.is_wanted() {
         hand.tx.send((order.seq, Piece::End(r))).await;
     }

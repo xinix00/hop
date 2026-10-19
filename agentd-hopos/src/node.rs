@@ -46,7 +46,7 @@ use runner::{
     SystemApi, TaskRef,
 };
 use types::time::{MILLISECOND, SECOND};
-use types::{Driver, Job, Map, Nanos, SysUsage, Telemetry, Time};
+use types::{Artifact, Driver, Job, Map, Nanos, SysUsage, Telemetry, Time};
 
 use crate::VERSION;
 use crate::download::{Order, Piece};
@@ -110,15 +110,17 @@ pub trait Sink {
     fn chunk(&mut self, bytes: &[u8]) -> impl Future<Output = Result<(), String>>;
 }
 
-/// De downloader van artifacts: haalt `url` op en voert de bytes aan `sink`.
+/// De downloader van artifacts: haalt `artifact` op en voert de bytes aan `sink`.
 ///
-/// Generiek over de sink (zie de moduledoc): een future-methode is niet
-/// object-safe.
+/// Het hele artifact, niet alleen zijn URL: de koppen en de sleutels in
+/// `auth` (Basic, `s3://`) horen bij de download, zoals op de host
+/// ([`runner::artifact`]). Generiek over de sink (zie de moduledoc): een
+/// future-methode is niet object-safe.
 pub trait Images {
     /// Haalt het artifact op; een fout is een tekst voor de log van de taak.
     fn fetch<K: Sink>(
         &mut self,
-        url: &str,
+        artifact: &Artifact,
         sink: &mut K,
     ) -> impl Future<Output = Result<(), String>>;
 }
@@ -130,7 +132,7 @@ struct Loading {
     seq: u64,
     task_id: String,
     job: String,
-    url: String,
+    artifact: Artifact,
     ports: BTreeMap<String, u16>,
     /// De opdracht is de downloadtaak in gegaan.
     sent: bool,
@@ -955,13 +957,13 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             Ok(Started::Running { pid }) => Ok(pid),
             Ok(Started::Aborted) => Err((StartError::Failed, String::from("aborted"))),
             Ok(Started::AwaitImage) => {
-                let url = artifact.map_or("", |a| a.url.as_str());
+                let artifact = artifact.cloned().unwrap_or_default();
                 if self.loads.try_reserve(1).is_ok() {
                     self.loads.push_back(Loading {
                         seq: self.next_seq,
                         task_id: String::from(task_id),
                         job: job.name.clone(),
-                        url: String::from(url),
+                        artifact,
                         ports,
                         sent: false,
                         placed: None,
@@ -1028,7 +1030,7 @@ impl<S: SystemApi, I: Images> Node<S, I> {
         front.sent = true;
         Some(Order {
             seq: front.seq,
-            url: front.url.clone(),
+            artifact: front.artifact.clone(),
         })
     }
 
@@ -1128,7 +1130,7 @@ impl<S: SystemApi, I: Images> Node<S, I> {
                 return;
             };
             let mut pieces = Collect(Vec::new());
-            let r = self.images.fetch(&order.url, &mut pieces).await;
+            let r = self.images.fetch(&order.artifact, &mut pieces).await;
             pieces.0.push(Piece::End(r));
             for p in pieces.0 {
                 self.on_piece(order.seq, p, now).await;

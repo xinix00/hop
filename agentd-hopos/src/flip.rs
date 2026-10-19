@@ -143,7 +143,12 @@ where
         slot: None,
         done: false,
     };
-    let fetched = images.fetch(url, &mut sink).await;
+    // De bundel is een gewoon artifact: alleen een URL.
+    let artifact = types::Artifact {
+        url: String::from(url),
+        ..types::Artifact::default()
+    };
+    let fetched = images.fetch(&artifact, &mut sink).await;
     let (slot, done) = (sink.slot, sink.done);
     let r = match (fetched, slot, done) {
         (Ok(()), Some(slot), true) => return Ok(slot),
@@ -218,7 +223,11 @@ mod tests {
     }
 
     impl Images for OneFile {
-        async fn fetch<K: Sink>(&mut self, _url: &str, sink: &mut K) -> Result<(), String> {
+        async fn fetch<K: Sink>(
+            &mut self,
+            _: &types::Artifact,
+            sink: &mut K,
+        ) -> Result<(), String> {
             sink.begin(self.bytes.len() as u64).await?;
             for c in self.bytes.get(..self.send).unwrap_or_default().chunks(7) {
                 sink.chunk(c).await?;

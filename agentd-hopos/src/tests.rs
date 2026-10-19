@@ -51,7 +51,8 @@ impl MemImages {
 }
 
 impl Images for MemImages {
-    async fn fetch<K: Sink>(&mut self, url: &str, sink: &mut K) -> Result<(), String> {
+    async fn fetch<K: Sink>(&mut self, a: &types::Artifact, sink: &mut K) -> Result<(), String> {
+        let url = a.url.as_str();
         let bytes = self.0.borrow().get(url).cloned();
         let bytes = bytes.ok_or_else(|| format!("404 {url}"))?;
         sink.begin(bytes.len() as u64).await?;
@@ -720,7 +721,8 @@ fn a_fresh_resident_stops_what_the_kernel_still_runs() {
 struct SlowImages(MemImages);
 
 impl Images for SlowImages {
-    async fn fetch<K: Sink>(&mut self, url: &str, sink: &mut K) -> Result<(), String> {
+    async fn fetch<K: Sink>(&mut self, a: &types::Artifact, sink: &mut K) -> Result<(), String> {
+        let url = a.url.as_str();
         let bytes = self.0.0.borrow().get(url).cloned();
         let bytes = bytes.ok_or_else(|| format!("404 {url}"))?;
         sink.begin(bytes.len() as u64).await?;

@@ -643,8 +643,8 @@ fn the_relay_answers_now_and_learns_from_the_agent() {
 struct NoImages;
 
 impl Images for NoImages {
-    async fn fetch<K: Sink>(&mut self, url: &str, _sink: &mut K) -> Result<(), String> {
-        Err(format!("404 {url}"))
+    async fn fetch<K: Sink>(&mut self, a: &types::Artifact, _sink: &mut K) -> Result<(), String> {
+        Err(format!("404 {}", a.url))
     }
 }
 

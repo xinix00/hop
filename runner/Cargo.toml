@@ -9,16 +9,18 @@ description = "De taak-backends achter één trait: HopOS-slots (via de bevoegde
 
 [dependencies]
 types = { path = "../types" }
+# De downloader van artifacts (`artifact`), op elke node: http(s) over
+# leanhttp, s3 getekend door leans3. Allebei no_std; de verbinding is van
+# het platform. Op de host ook de Docker-API over de unix-socket.
+leanhttp = { workspace = true }
+leans3 = { workspace = true }
 # Alleen met de feature `std` (de host-backends): het net van de host.
 hostnet = { path = "../hostnet", optional = true }
-leans3 = { workspace = true, optional = true }
-# De Docker-API over de unix-socket: één verzoek per verbinding (`leanhttp::send`).
-leanhttp = { workspace = true, optional = true }
 
 [features]
 # De host-backends (processen, docker, downloads, isolatie); zonder deze
 # feature is de crate no_std, zoals de HopOS-bewoner hem gebruikt.
-std = ["dep:hostnet", "dep:leans3", "dep:leanhttp"]
+std = ["dep:hostnet"]
 
 [lints]
 workspace = true

@@ -5,7 +5,11 @@ use std::os::unix::fs::PermissionsExt;
 
 use types::{Artifact, Map};
 
-use super::super::download::{base64, download_artifact, download_http, s3_client};
+use std::path::Path;
+
+use crate::artifact::{base64, s3_client};
+
+use super::super::download::{download_artifact, download_to};
 use super::super::{HostError, prepare};
 use super::{TempDir, config, gzip, ok, one_shot, spec, tar, zip};
 
@@ -63,8 +67,9 @@ fn download_artifact_unsupported_scheme() {
 fn download_http_success() {
     let (addr, _h) = one_shot(ok(b"binary content here"));
     let mut out = Vec::new();
-    download_http(
+    download_to(
         &artifact(&format!("http://{addr}/app.bin")),
+        Path::new("mem"),
         &mut out,
         &mut |_, _| {},
     )
@@ -78,7 +83,7 @@ fn download_http_basic_auth() {
     let (addr, h) = one_shot(ok(b"ok"));
     let mut a = artifact(&format!("http://{addr}/app.bin"));
     a.auth = smap(&[("username", "deploy"), ("password", "secret123")]);
-    download_http(&a, &mut Vec::new(), &mut |_, _| {}).unwrap();
+    download_to(&a, Path::new("mem"), &mut Vec::new(), &mut |_, _| {}).unwrap();
     let head = h.join().unwrap();
     let want = format!("Authorization: Basic {}\r\n", base64(b"deploy:secret123"));
     assert!(head.contains(&want), "{head}");
@@ -93,7 +98,7 @@ fn download_http_custom_headers() {
         ("Authorization", "Bearer token123"),
         ("X-API-Key", "secret-key"),
     ]);
-    download_http(&a, &mut Vec::new(), &mut |_, _| {}).unwrap();
+    download_to(&a, Path::new("mem"), &mut Vec::new(), &mut |_, _| {}).unwrap();
     let head = h.join().unwrap();
     assert!(
         head.contains("Authorization: Bearer token123\r\n"),
@@ -108,8 +113,9 @@ fn download_http_404() {
     let (addr, _h) = one_shot(
         b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
     );
-    let err = download_http(
+    let err = download_to(
         &artifact(&format!("http://{addr}/missing.bin")),
+        Path::new("mem"),
         &mut Vec::new(),
         &mut |_, _| {},
     )
@@ -273,4 +279,49 @@ fn base64_matches_rfc4648() {
     ] {
         assert_eq!(base64(i.as_bytes()), o);
     }
+}
+
+// Een s3-download gaat door dezelfde sink als http: getekend door leans3,
+// zonder redirect gestuurd, en de body met zijn lengte naar het bestand.
+#[test]
+fn download_s3_streams_through_the_same_sink() {
+    let (addr, h) = one_shot(ok(b"elf bytes"));
+    let mut a = artifact("s3://builds/apps/app.elf");
+    let endpoint = format!("http://{addr}");
+    a.auth = smap(&[
+        ("access_key", "k"),
+        ("secret_key", "s"),
+        ("region", "de"),
+        ("endpoint", &endpoint),
+        ("path_style", "true"),
+    ]);
+    let mut out = Vec::new();
+    let mut seen = (0, None);
+    download_to(&a, Path::new("mem"), &mut out, &mut |n, total| {
+        seen = (n, total)
+    })
+    .unwrap();
+    assert_eq!(out, b"elf bytes");
+    assert_eq!(seen, (9, Some(9)));
+    let head = h.join().unwrap();
+    assert!(head.starts_with("GET /builds/apps/app.elf "), "{head}");
+    assert!(head.contains("AWS4-HMAC-SHA256 Credential=k/"), "{head}");
+}
+
+// Een geweigerde s3-download zegt de status van de server.
+#[test]
+fn download_s3_refusal_names_the_status() {
+    let (addr, _h) = one_shot(
+        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+    );
+    let mut a = artifact("s3://builds/app.elf");
+    let endpoint = format!("http://{addr}");
+    a.auth = smap(&[
+        ("access_key", "k"),
+        ("secret_key", "s"),
+        ("endpoint", &endpoint),
+        ("path_style", "true"),
+    ]);
+    let err = download_to(&a, Path::new("mem"), &mut Vec::new(), &mut |_, _| {}).unwrap_err();
+    assert!(err.to_string().contains("403"), "{err}");
 }

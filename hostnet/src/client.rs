@@ -137,15 +137,16 @@ pub fn entropy() -> std::io::Result<[u8; Entropy::LEN]> {
 pub type HostConn = Link<StdConn<TcpStream>>;
 
 /// Wat de std-dial van de laatste hop zag: de host, en waarom hij faalde.
+/// Wat de laatste dial zag: de host, en waarom hij faalde.
 #[derive(Debug, Default)]
-pub(crate) struct Trace {
+pub struct Trace {
     host: String,
     why: Option<String>,
 }
 
 /// De kale TCP-dial van de host: opzoeken met de resolver van het OS, TCP
 /// met een termijn, binnen de totale grens van de aanroep.
-pub(crate) struct Tcp<'t> {
+pub struct Tcp<'t> {
     timeout: Duration,
     /// De totale grens van de aanroep; de verbinding krijgt hem mee.
     limit: Option<Instant>,
@@ -216,7 +217,7 @@ impl leanhttp::Dial for Tcp<'_> {
 
 /// De webdialer van de host: [`Tcp`] eronder, TLS met de Mozilla-wortels
 /// op de systeemklok en entropie van het OS.
-pub(crate) type Web<'t> = WebDial<Tcp<'t>, fn() -> Option<u64>, fn() -> Option<Entropy>>;
+pub type Web<'t> = WebDial<Tcp<'t>, fn() -> Option<u64>, fn() -> Option<Entropy>>;
 
 /// Nu als wandklok voor de keten: de systeemklok.
 #[expect(clippy::unnecessary_wraps, reason = "de vorm van de klok van WebDial")]
@@ -246,6 +247,36 @@ fn failure(e: leanhttp::Error, tls: Option<leanhttps::Error>, trace: &mut Trace)
             "no entropy from the OS (/dev/urandom); https refused",
         )),
         (None, None) => Error::Http(e),
+    }
+}
+
+/// De dial van een download die een ander (`runner::artifact`) uitvoert:
+/// de webdialer van de host met een eigen [`Trace`], zodat een mislukking
+/// dezelfde zin krijgt als bij [`Http`].
+#[derive(Debug)]
+pub struct WebDialer {
+    timeout: Duration,
+    trace: Trace,
+}
+
+impl WebDialer {
+    /// Een dialer met `timeout` per fase (verbinden, kop, elke lees).
+    pub fn new(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            trace: Trace::default(),
+        }
+    }
+
+    /// De webdialer voor één download; zijn `last_error` hoort bij [`WebDialer::failure`].
+    pub fn dial(&mut self) -> Web<'_> {
+        web(Tcp::new(self.timeout, None, Some(&mut self.trace)))
+    }
+
+    /// De fout van een mislukte download als [`Error`]: de TLS-reden, de stap
+    /// van de dial, of de fout van leanhttp.
+    pub fn failure(&mut self, e: leanhttp::Error, tls: Option<leanhttps::Error>) -> Error {
+        failure(e, tls, &mut self.trace)
     }
 }
 
