@@ -219,3 +219,30 @@ fn idle_turns_no_timeout_into_the_idle_bound() {
         [Some(Duration::from_secs(60)), Some(Duration::from_secs(5))]
     );
 }
+
+#[test]
+fn idle_silence_restarts_after_every_read_but_a_set_deadline_does_not() {
+    let mut c = Idle::new(FakeConn::default(), Duration::from_secs(60));
+    c.get_mut().reply = Some(b"0123456789".to_vec());
+    c.get_mut().sent = b"GET / HTTP/1.1\r\n\r\n".to_vec();
+    let waker = core::task::Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let mut buf = [0u8; 4];
+    // Een kop-termijn blijft een vaste deadline: een read zet hem niet opnieuw.
+    c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    assert!(matches!(c.poll_read(&mut cx, &mut buf), Poll::Ready(Ok(4))));
+    assert_eq!(c.get_mut().timeouts, [Some(Duration::from_secs(10))]);
+    // Na de kop: de stilte, en elke read met bytes begint hem opnieuw.
+    c.set_read_timeout(None).unwrap();
+    assert!(matches!(c.poll_read(&mut cx, &mut buf), Poll::Ready(Ok(4))));
+    assert!(matches!(c.poll_read(&mut cx, &mut buf), Poll::Ready(Ok(2))));
+    assert_eq!(
+        c.get_mut().timeouts,
+        [
+            Some(Duration::from_secs(10)),
+            Some(Duration::from_secs(60)),
+            Some(Duration::from_secs(60)),
+            Some(Duration::from_secs(60))
+        ]
+    );
+}

@@ -111,16 +111,29 @@ impl Dialer for SlotDial {
 }
 
 /// Een verbinding waarop "geen termijn" een stiltetermijn is.
+///
+/// Een termijn van applib's `TcpConn` is een vaste deadline vanaf het zetten;
+/// een gelukte read zet hem niet opnieuw. Een stilte is iets anders: na
+/// elke read die bytes bracht begint hij opnieuw. Zonder dat ging een
+/// `/v1/events`-stroom precies [`IDLE`] na zijn kop dicht, ook met de
+/// keepalive van de agent elke 15 s (19-10, spin-service). Een termijn die
+/// de aanroeper zelf zet (de kop) blijft een vaste deadline.
 #[derive(Debug)]
 pub struct Idle<C> {
     conn: C,
     idle: Duration,
+    /// Of de leestermijn nu de stilte is (de aanroeper zei "geen termijn").
+    silence: bool,
 }
 
 impl<C> Idle<C> {
     /// Omhult `conn`; een lees of schrijf zonder termijn krijgt `idle`.
     pub fn new(conn: C, idle: Duration) -> Self {
-        Self { conn, idle }
+        Self {
+            conn,
+            idle,
+            silence: false,
+        }
     }
 
     /// De omhulde verbinding.
@@ -131,10 +144,19 @@ impl<C> Idle<C> {
 
 impl<C: AsyncRead> AsyncRead for Idle<C> {
     fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<Result<usize, IoError>> {
-        self.conn.poll_read(cx, buf)
+        let read = self.conn.poll_read(cx, buf);
+        if self.silence
+            && let Poll::Ready(Ok(n)) = read
+            && n > 0
+        {
+            // De stilte begint opnieuw; lukt dat niet, dan geldt de oude.
+            let _ = self.conn.set_read_timeout(Some(self.idle));
+        }
+        read
     }
 
     fn set_read_timeout(&mut self, t: Option<Duration>) -> Result<(), IoError> {
+        self.silence = t.is_none();
         self.conn.set_read_timeout(Some(t.unwrap_or(self.idle)))
     }
 }
