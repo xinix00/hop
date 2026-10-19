@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "agent"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "config",
  "types",
@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "agentd"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "agent",
  "api",
@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "agentd-hopos"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "abi",
  "agent",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "api"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "agent",
  "auth",
@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "auth"
-version = "3.0.12"
+version = "3.0.13"
 
 [[package]]
 name = "bounded"
@@ -99,7 +99,7 @@ source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.14#8b16608d1e1887e8c
 
 [[package]]
 name = "cli"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "auth",
  "hostnet",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "cloudflared-lean"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "applib",
  "leanh2",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "types",
 ]
@@ -133,7 +133,7 @@ source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.14#8b16608d1e1887e8c
 
 [[package]]
 name = "discovery"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "types",
 ]
@@ -154,7 +154,7 @@ source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.14#8b16608d1e1887e8c
 
 [[package]]
 name = "hop-gui"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "applib",
  "hostnet",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "hop-http"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "api",
  "applib",
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "hopdns"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "applib",
  "hoplib",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "hoplb"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "applib",
  "hoplib",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "hoplib"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "api",
  "applib",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "hoplockserver"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "applib",
  "auth",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "hopos-runner"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "abi",
  "agent",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "hopprom"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "abi",
  "applib",
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "hostnet"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "leanhttp",
  "leanhttps",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "leader"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "config",
  "types",
@@ -328,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "runner"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "hostnet",
  "leanhttp",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "store"
-version = "3.0.12"
+version = "3.0.13"
 dependencies = [
  "config",
  "discovery",
@@ -358,4 +358,4 @@ dependencies = [
 
 [[package]]
 name = "types"
-version = "3.0.12"
+version = "3.0.13"
