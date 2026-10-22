@@ -122,16 +122,57 @@ impl<S: SystemApi> HopRunner<S> {
         self.in_use.len()
     }
 
+    /// Neemt de kooien over van taken die de kern nog draait (na een herstart
+    /// van Hop); geeft de taken die hij overnam.
+    ///
+    /// Dit is geen tweede waarheid over wat er draait, alleen EIGENDOM: welke
+    /// taak deze kooi straks mag stoppen. Zonder deze stap is zo'n bewoner niet
+    /// meer te stoppen (GEMETEN 02-09 op de M4: welcome verwijderd, node meldde
+    /// hem nog live). Een slot neemt hij alleen over als de kern het als
+    /// draaiend meldt ([`SlotState::Running`]) en het nog van niemand is: een
+    /// slot dat leeg is, stroomt of in quarantaine staat, is niet meer de taak
+    /// uit de staat, en die plaatst de leader opnieuw. Slot 0 is de kern.
+    /// Idempotent; pakt nooit een kooi af die al uitgedeeld is.
+    pub async fn adopt_running(&mut self, slots: &[(String, Slot)]) -> Vec<String> {
+        let mut adopted = Vec::new();
+        for (id, slot) in slots {
+            if slot.0 < 1 || self.cages.contains_key(id) || self.in_use.contains_key(slot) {
+                continue;
+            }
+            if self.sys.slot_status(*slot).await.state != SlotState::Running {
+                continue;
+            }
+            if adopted.try_reserve(1).is_err() {
+                break;
+            }
+            self.in_use.insert(*slot, id.clone());
+            // INVARIANT: het slot staat nu in `in_use` onder `id`, en de kooi
+            // van `id` is gearmd op datzelfde slot.
+            self.cages.insert(
+                id.clone(),
+                Cage {
+                    phase: Phase::Armed(*slot),
+                    fault_logged: false,
+                },
+            );
+            self.logs.open(id);
+            adopted.push(id.clone());
+        }
+        adopted
+    }
+
     /// Stopt de bewoners die van niemand zijn en geeft hun slots.
     ///
-    /// Na een herstart van Hop draaien de apps door, en wie niet in de
-    /// bewaarde staat stond (een job die rond de herstart verwijderd werd,
-    /// een record dat de leader kwijt is) houdt zijn slot tot de volgende
-    /// koude boot: de kern kiest het laagste vrije slot en kent geen
-    /// eigenaar. GEMETEN 01-10 op de Pi 4: twee uitgemeten benches in slot 3
-    /// en 4 die Hop niet kende; elke plaatsing en elke flip liep daarna op
-    /// "slot 5 out of range 1..4". Een node heeft één Hop, dus een bewoner
-    /// die hij niet kent, is van
+    /// Na een herstart van Hop draaien de apps door. Wat de vorige Hop bij
+    /// de kern neerlegde, neemt de nieuwe eerst over
+    /// ([`adopt_running`](Self::adopt_running)); wie daarna nog een slot
+    /// houdt (een job die rond de herstart verwijderd werd, een taak die
+    /// startte na de laatste staat, een kern die geen staat bewaart) houdt
+    /// zijn slot anders tot de volgende koude boot: de kern kiest het
+    /// laagste vrije slot en kent geen eigenaar. GEMETEN 01-10 op de Pi 4:
+    /// twee uitgemeten benches in slot 3 en 4 die Hop niet kende; elke
+    /// plaatsing en elke flip liep daarna op "slot 5 out of range 1..4". Een
+    /// node heeft één Hop, dus een bewoner die hij niet kent, is van
     /// niemand. Alleen de slots boven het eigen (1); een stop die de kern
     /// niet bevestigt, blijft zijn quarantaine (hij wordt niet hergebruikt).
     pub async fn sweep_strays(&mut self) -> Vec<Slot> {

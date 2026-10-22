@@ -8,7 +8,7 @@
 //!
 //! - de eigenaar: bezit de [`Node`], handelt de verzoeken uit de [`Hub`]
 //!   af en tikt elke seconde. Wat de node bij de kern vraagt (een slot, een
-//!   brok image, een status, de staat op hopfs) is een `.await`: de
+//!   brok image, een status, de staat bij de kern) is een `.await`: de
 //!   eigenaar geeft dan de core terug, en de netstack en de
 //!   verbindingstaken draaien door. Er wordt nergens een executor-ronde
 //!   binnen een taak gedraaid (handboek §4);
@@ -28,12 +28,27 @@
 //!   wandklok voor `https` (een keten heeft een datum nodig).
 //!
 //! Artifacts komen over `http://` en `https://` (`agentd_hopos::fetch`):
-//! TLS met de Mozilla-wortels, hostnamen via de resolver. Bij een schone
-//! boot (niets overgenomen uit de bewaarde staat) zaait de node de
-//! init-jobs uit `HOPOS_INIT_JOBS` of `/hop/init-jobs.json`.
+//! TLS met de Mozilla-wortels, hostnamen via de resolver.
+//!
+//! De start, in deze volgorde: de staat van de vorige Hop uit de kern
+//! (`Node::restore`: de kooien die nog draaien worden van deze Hop), dan de
+//! veger (wat daarna nog draait is van niemand), dan de cluster (de
+//! boot-claim; de registratie bij een leader meldt de overgenomen taken al),
+//! en alleen bij een schone start de init-jobs uit `HOPOS_INIT_JOBS` of
+//! `/hop/init-jobs.json` (standalone; geclusterd zaait de leider op een
+//! schone clusterstaat). Neemt de kern een herstart aan (`POST /restart`,
+//! `agentd_hopos::restart`), dan wacht de eigenaar tot de werker die het
+//! verzoek droeg zijn 202 geschreven en de verbinding gesloten heeft
+//! (hoogstens `REPLY_GRACE`), legt de staat een laatste keer bij de kern
+//! neer en keert terug; de main-schil van applib doet het net-afscheid en
+//! de exit, en de apps draaien door. Luidt de kern eerst de stop-bel
+//! (`app.stopped()`), dan dezelfde laatste staat en terug.
 //!
 //! Markers op het log: `HOP_UP`, `HOP_LEADER`, `HOP_JOB_PLACED slot=N`,
-//! `HOP_CLOCK_SYNCED`, `HOP_INIT_SEEDED`, en de weigeringen en degradaties
+//! `HOP_CLOCK_SYNCED`, `HOP_INIT_SEEDED`, `HOP_ADOPTED n=N`,
+//! `HOP_STRAY_STOPPED slot=N`, `HOP_RESTART`, `HOP_RESTART_ACCEPTED`,
+//! `HOP_RESTART_LEAVING why=replied|grace|bell`, `HOP_STOPPING`, en de weigeringen en degradaties `HOP_RESTART_FAIL`,
+//! `HOP_KERNEL_STATE_NONE`, `HOP_KERNEL_STATE_FAIL`, `HOP_ADOPT_SKIPPED`,
 //! `HOPOS_API_NO_AUTH`, `HOPOS_API_INSECURE`, `HOP_NET_FAIL`,
 //! `HOP_SNTP_FAIL`, `HOP_CLOCK_FAIL`, `HOP_TLS_ENTROPY_WEAK`, `HOP_TLS_ENTROPY_HW`,
 //! `HOP_INIT_FAIL`, `HOP_JOB_REFUSED` (een job die de leader-API weigerde,
@@ -73,6 +88,7 @@ use agentd_hopos::env::INIT_JOBS_FILE;
 use agentd_hopos::forward::{self, Routed, STREAM_IDLE};
 use agentd_hopos::lock::{self, ClusterConfig};
 use agentd_hopos::mail::{DispatchQueue, Inbox, LeaseQueue, LinkQueue, Mail, Nap, StateQueue};
+use agentd_hopos::restart;
 use agentd_hopos::sntp::{self, NtpLink, PACKET};
 use agentd_hopos::{
     Answer, BootConfig, ClusterParts, Connect, Handoff, HttpImages, Hub, Images, Node, Port,
@@ -160,6 +176,12 @@ static PIECES: Pieces = sync::spsc::Channel::new();
 /// De download die de eigenaar nog wil (`Node::wanted`); één schrijver, de
 /// eigenaar in [`flush`].
 static WANTED: AtomicU64 = AtomicU64::new(0);
+
+/// De kern nam een herstart aan: elke werker sluit zijn verbinding na het
+/// lopende antwoord (`Connection: close`), zodat de werker van `POST
+/// /restart` vrij is zodra zijn 202 geschreven is. Eén schrijver, de
+/// eigenaar; een vlag, geen protocol.
+static LEAVING: AtomicBool = AtomicBool::new(false);
 
 /// Hoe lang een aanroep van de cluster (lease, staat, link, dispatch) na
 /// zijn kop mag zwijgen: een lease of snapshot is klein.
@@ -563,10 +585,15 @@ enum Woke {
     Piece(u64, Piece),
     /// De bus of de tik: de lus kijkt zelf.
     Look,
+    /// De stop-bel van de kern.
+    Stop,
 }
 
 /// Wacht op een verzoek in de bus, een bericht van de cluster, een brok van
-/// de downloadtaak, of de tik.
+/// de downloadtaak, de tik, of de stop-bel.
+///
+/// De bel gaat vóór alles: wat na hem nog binnenkomt, kent de volgende Hop
+/// niet, dus de eigenaar handelt het niet meer af.
 ///
 /// Een brok gaat vóór de bus: de lus handelt de bus bovenaan toch helemaal
 /// af, dus zo krijgen ze om de beurt een ronde (één brok, dan alle
@@ -576,12 +603,17 @@ async fn wake(
     inbox: &Inbox,
     pieces: &mut PieceRx<'_>,
     tick: impl Future<Output = ()>,
+    stop: impl Future<Output = ()>,
 ) -> Woke {
     let mut a = pin!(hub.wait());
     let mut b = pin!(inbox.recv());
     let mut d = pieces.recv();
     let mut c = pin!(tick);
+    let mut s = pin!(stop);
     poll_fn(|cx| {
+        if s.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Woke::Stop);
+        }
         if let Poll::Ready(m) = b.as_mut().poll(cx) {
             return Poll::Ready(Woke::Mail(m));
         }
@@ -655,7 +687,7 @@ fn now(app: &App, exec: &Exec) -> u64 {
 /// de rij van de downloadtaak.
 fn flush<S, I>(node: &mut Node<S, I>)
 where
-    S: runner::SystemApi,
+    S: runner::SystemApi + agent::Store,
     I: Images,
 {
     for line in node.take_lines() {
@@ -754,11 +786,37 @@ async fn work(
             &mut streams,
             &mut client,
             port,
-            || pool.none_free(),
+            || pool.none_free() || LEAVING.load(Relaxed),
         )
         .await;
         pool.free(i);
     }
+}
+
+/// Vertrekt na een aangenomen herstart: wacht tot de werker in vak `slot`
+/// zijn antwoord geschreven en zijn verbinding gesloten heeft (hoogstens
+/// `REPLY_GRACE`, of tot de stop-bel), en legt dan de staat een laatste
+/// keer bij de kern neer. De aanroeper keert daarna terug uit main.
+async fn leave<S, I>(
+    node: &mut Node<S, I>,
+    app: &'static App,
+    exec: &'static Exec,
+    agent_pool: Option<&'static Handoff<TcpStream>>,
+    slot: usize,
+) where
+    S: runner::SystemApi + agent::Store,
+    I: Images,
+{
+    // De agent-poort heeft de vakken 0..WORKERS, één per werker.
+    let replied = async move {
+        match agent_pool {
+            Some(pool) if slot < WORKERS => pool.freed(slot).await,
+            _ => core::future::pending::<()>().await,
+        }
+    };
+    let why = restart::depart(replied, exec.after(restart::REPLY_GRACE), app.stopped()).await;
+    node.leave(now(app, exec), why).await;
+    flush(node);
 }
 
 /// Bindt een poort, of zegt luid waarom niet.
@@ -895,9 +953,11 @@ async fn resident(app: &'static App) {
             }
         }
     };
-    // Hop begint leeg: zijn staat komt uit de object-store (geclusterd) of
-    // uit de init-jobs, nooit uit een bestand op hopfs. Wat de kern nog aan
-    // bewoners heeft, is van niemand.
+    // Eerst de staat van de vorige Hop uit de kern: wat nog draait, wordt
+    // van deze, vóór de veger en vóór de eerste registratie bij een leader.
+    // Een blob in kerngeheugen sterft met de boot, dus geen spook van een
+    // vorige (7726782). Wat daarna nog draait, is van niemand.
+    let kept = node.restore(now(app, exec)).await;
     node.sweep_strays().await;
     flush(&mut node);
     if clustered {
@@ -905,7 +965,10 @@ async fn resident(app: &'static App) {
         node.cluster_boot(now(app, exec));
         flush(&mut node);
     }
-    if !clustered && let Some(specs) = init_specs(&cfg, net).await {
+    if !clustered
+        && kept.is_clean()
+        && let Some(specs) = init_specs(&cfg, net).await
+    {
         if let Err(e) = node.seed_init_jobs(&specs, now(app, exec)).await {
             log!("hop: init jobs not seeded: {e} HOP_INIT_FAIL");
         }
@@ -922,11 +985,17 @@ async fn resident(app: &'static App) {
         (0, Port::Agent, cfg.port),
         (WORKERS, Port::Leader, cfg.leader_port()),
     ];
+    // De pool van de agent-poort: daar komt `POST /restart` binnen, en de
+    // eigenaar wacht na een aangenomen herstart op de werker die hem droeg.
+    let mut agent_pool: Option<&'static Handoff<TcpStream>> = None;
     for (first_slot, port, number) in ports {
         let Some(l) = bind(net, number) else {
             continue;
         };
         let pool: &'static Handoff<TcpStream> = Box::leak(Box::new(Handoff::new(WORKERS)));
+        if port == Port::Agent {
+            agent_pool = Some(pool);
+        }
         let mut spawned = exec.spawn(accept(l, exec, pool, number));
         for i in 0..WORKERS {
             if spawned.is_err() {
@@ -963,7 +1032,18 @@ async fn resident(app: &'static App) {
                         Routed::Reply(r) => Answer::Reply(r),
                         Routed::Forward(f) => Answer::Forward(f),
                     };
+                    let leaving = node.take_leaving();
+                    if leaving {
+                        // Vóór het antwoord: de werker leest de vlag zodra
+                        // hij het heeft, en sluit erna.
+                        LEAVING.store(true, Relaxed);
+                    }
                     hub.answer(slot, answer);
+                    if leaving {
+                        flush(&mut node);
+                        leave(&mut node, app, exec, agent_pool, slot).await;
+                        return;
+                    }
                 }
                 Question::Poll(ask) => {
                     let chunk = node.poll(&ask, now(app, exec));
@@ -987,10 +1067,17 @@ async fn resident(app: &'static App) {
         }
         let wait = Duration::from_nanos(next_tick.saturating_sub(now(app, exec)));
         // Hoogstens één brok per ronde: daarna eerst weer de bus (bovenaan).
-        match wake(hub, &INBOX, &mut pieces, exec.after(wait)).await {
+        match wake(hub, &INBOX, &mut pieces, exec.after(wait), app.stopped()).await {
             Woke::Mail(m) => node.on_mail(m, now(app, exec)),
             Woke::Piece(seq, p) => node.on_piece(seq, p, now(app, exec)).await,
             Woke::Look => {}
+            Woke::Stop => {
+                // De laatste staat, dan terug: applib doet het net-afscheid
+                // en de exit, binnen de gratie van de kern.
+                node.on_stop(now(app, exec)).await;
+                flush(&mut node);
+                return;
+            }
         }
         flush(&mut node);
     }

@@ -30,7 +30,7 @@ use sync::spsc::Channel;
 
 use crate::download::{Orders, Pieces, download_task};
 use crate::env::{BootConfig, BootError, ColdFlip};
-use crate::{Answer, Handoff, Hub, Images, Node, Port, Question, Sink};
+use crate::{Answer, Handoff, Hub, Images, Kept, Node, Port, Question, Sink};
 
 const KEY: &[u8] = b"test-key";
 const T0: u64 = 1_788_220_800 * types::time::SECOND;
@@ -690,6 +690,8 @@ fn block_on_ready<F: Future>(f: F) -> bool {
 #[test]
 fn a_fresh_resident_stops_what_the_kernel_still_runs() {
     let (mut n, k) = node();
+    // Een kern zonder de staat-ops (v3.0.14): er is niets over te nemen.
+    k.0.borrow_mut().no_state_ops = true;
     // Slot 1 is Hop zelf; de veger blijft daar vanaf.
     k.0.borrow_mut().slots.insert(
         1,
@@ -701,10 +703,12 @@ fn a_fresh_resident_stops_what_the_kernel_still_runs() {
     http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
     tick(&mut n, T0 + types::time::SECOND);
     assert_eq!(k.0.borrow().slots.len(), 2);
-    // Een nieuwe Hop over dezelfde kern kent niets: geen staat op hopfs,
-    // dus de bewoner in slot 2 is van niemand en gaat weg.
+    // Een nieuwe Hop over dezelfde kern kent niets: de kern hield geen
+    // staat, dus de bewoner in slot 2 is van niemand en gaat weg.
     let sys = KernSys::new(k.client(), 4);
     let mut again = Node::new(&cfg(), sys, MemImages::new(BTreeMap::new()), T0);
+    assert_eq!(block_on(again.restore(T0)), Kept::Unsupported);
+    assert!(Kept::Unsupported.is_clean(), "the init jobs seed as before");
     block_on(again.sweep_strays());
     assert_eq!(k.0.borrow().slots.keys().copied().collect::<Vec<_>>(), [1]);
     assert!(
@@ -1234,4 +1238,457 @@ fn the_dashboard_gets_cors_on_every_agent_answer() {
     // De leader-poort is geen browserpoort: daar geen koppen, zoals in Go.
     let r = block_on(n.handle(Port::Leader, &signed(Method::Get, "/v1/status"), T0));
     assert_eq!(allow_origin(&r), None);
+}
+
+// ---- De herstart van Hop: de staat bij de kern ----------------------------------
+
+const SECOND: u64 = types::time::SECOND;
+
+/// Een node met web geplaatst in slot 1, en een nieuw image van Hop op de server.
+fn placed_for_a_restart() -> (TestNode, FakeKern) {
+    let k = FakeKern::new(4);
+    let sys = KernSys::new(k.client(), 4);
+    let mut n = Node::new(&cfg(), sys, MemImages::new(restart_images()), T0);
+    http(&mut n, Port::Leader, wire("POST", "/v1/jobs", JOB));
+    assert!(k.0.borrow().slots[&1].placed);
+    n.take_lines();
+    (n, k)
+}
+
+fn restart_images() -> BTreeMap<String, Vec<u8>> {
+    let mut images = BTreeMap::new();
+    images.insert(String::from("http://images/web.elf"), ELF.to_vec());
+    images.insert(
+        String::from("http://images/agentd-hopos"),
+        b"\x7fELF-a-new-hop".to_vec(),
+    );
+    images
+}
+
+/// De volgende Hop over dezelfde kern, zoals de kern hem in slot 2 zet.
+fn next_hop(k: &FakeKern) -> TestNode {
+    let sys = KernSys::new(k.client(), 4);
+    let mut n = Node::new(&cfg(), sys, MemImages::new(restart_images()), T0);
+    n.take_lines();
+    n
+}
+
+fn puts(k: &FakeKern) -> u32 {
+    k.0.borrow().state_puts
+}
+
+#[test]
+fn the_state_reaches_the_kernel_after_a_change_and_on_the_beat() {
+    let (mut n, k) = placed_for_a_restart();
+    assert_eq!(puts(&k), 0, "a request alone writes nothing yet");
+    // De tik is de debounce: wat in de vorige seconde veranderde, gaat nu.
+    tick(&mut n, T0 + SECOND);
+    assert_eq!(puts(&k), 1);
+    let blob = String::from_utf8(k.0.borrow().state.clone()).unwrap();
+    assert!(blob.contains("\"web\""), "{blob}");
+    assert!(
+        blob.contains("\"leader\""),
+        "standalone: the leader's jobs travel along"
+    );
+    // Niets veranderd: geen nieuwe schrijf, tot het ritme.
+    tick(&mut n, T0 + 2 * SECOND);
+    tick(&mut n, T0 + 3 * SECOND);
+    let quiet = puts(&k);
+    assert!(
+        quiet <= 2,
+        "{quiet}: one more at most (the leader's own debounce)"
+    );
+    // Een warme kern-flip: de nieuwe kern heeft niets. Het ritme legt het
+    // blob opnieuw neer.
+    k.0.borrow_mut().state.clear();
+    tick(&mut n, T0 + 9 * SECOND);
+    assert!(k.0.borrow().state.is_empty(), "not yet: the beat is 10 s");
+    tick(&mut n, T0 + 14 * SECOND);
+    assert!(!k.0.borrow().state.is_empty(), "the beat put it back");
+}
+
+#[test]
+fn a_restarted_hop_adopts_what_the_kernel_still_runs() {
+    let (mut n, k) = placed_for_a_restart();
+    tick(&mut n, T0 + SECOND);
+    let id = n.agent().tasks().next().unwrap().id.clone();
+    drop(n);
+
+    let mut again = next_hop(&k);
+    let kept = block_on(again.restore(T0 + 2 * SECOND));
+    assert_eq!(kept, Kept::Adopted(1));
+    assert!(!kept.is_clean(), "no init jobs over an adopted state");
+    let lines = again.take_lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "hop: adopted 1 running cage(s) from the kernel's state HOP_ADOPTED n=1"),
+        "{lines:?}"
+    );
+    // De veger laat de overgenomen kooi staan.
+    block_on(again.sweep_strays());
+    assert_eq!(k.0.borrow().slots.len(), 1);
+    assert_eq!(again.runner().slot_of(&id), Some(runner::Slot(1)));
+    let t = again.agent().task(&id).unwrap();
+    assert_eq!((t.state, t.pid), (types::TaskState::Running, 1));
+    // De standalone leader kent zijn job weer en telt de taak als geplaatst:
+    // geen tweede plaatsing, ook niet na zijn eigen tik.
+    let (_, jobs) = http(&mut again, Port::Leader, wire("GET", "/v1/jobs", ""));
+    assert!(jobs.contains("\"web\""), "{jobs}");
+    tick(&mut again, T0 + 12 * SECOND);
+    tick(&mut again, T0 + 23 * SECOND);
+    assert_eq!(k.0.borrow().slots.len(), 1, "no second web");
+    assert!(
+        !k.0.borrow().ops.contains(&PrivOp::StopSlot.op()),
+        "nothing was stopped"
+    );
+    placed_matches_the_agent(&mut again);
+    // De init-jobs zaaien niet in een leader met jobs.
+    let specs = format!("[{JOB}]");
+    assert_eq!(block_on(again.seed_init_jobs(&specs, T0)), Ok(0));
+}
+
+#[test]
+fn a_task_whose_slot_stopped_is_not_adopted_and_placed_again() {
+    let (mut n, k) = placed_for_a_restart();
+    tick(&mut n, T0 + SECOND);
+    drop(n);
+    // De app viel weg terwijl Hop herstartte: het slot is leeg.
+    k.0.borrow_mut().slots.clear();
+
+    let mut again = next_hop(&k);
+    assert_eq!(block_on(again.restore(T0 + 2 * SECOND)), Kept::Adopted(0));
+    let lines = again.take_lines();
+    assert!(
+        lines.iter().any(|l| l.contains("HOP_ADOPTED n=0")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("HOP_ADOPT_SKIPPED n=1")),
+        "{lines:?}"
+    );
+    // De leader kent de job nog, ziet hem niet geplaatst, en plaatst hem
+    // meteen opnieuw (de registratie na de overname reconcilet): een nieuwe
+    // taak die op zijn image wacht, geen overgenomen kooi.
+    assert!(
+        again.agent().tasks().all(|t| t.pid == 0),
+        "{:?}",
+        again.agent().tasks().collect::<Vec<_>>()
+    );
+    tick(&mut again, T0 + 12 * SECOND);
+    assert!(k.0.borrow().slots[&1].placed, "web placed again");
+    placed_matches_the_agent(&mut again);
+}
+
+#[test]
+fn the_own_slot_of_hop_is_never_adopted() {
+    // Een staat die het slot van Hop zelf noemt (slot 2 in deze config):
+    // dat draait altijd, en is nooit een taak. Een slot dat stroomt of al
+    // van een ander is, toetst de runner (`runner/src/tests.rs`).
+    let (mut n, k) = placed_for_a_restart();
+    tick(&mut n, T0 + SECOND);
+    let id = n.agent().tasks().next().unwrap().id.clone();
+    drop(n);
+    let blob = String::from_utf8(k.0.borrow().state.clone()).unwrap();
+    assert_eq!(blob.matches("\"pid\":1").count(), 1, "{blob}");
+    k.0.borrow_mut().state = blob.replace("\"pid\":1", "\"pid\":2").into_bytes();
+    let mut again = next_hop(&k);
+    assert_eq!(block_on(again.restore(T0 + 2 * SECOND)), Kept::Adopted(0));
+    assert_eq!(again.runner().slot_of(&id), None);
+    assert!(again.agent().tasks().all(|t| t.pid != 2));
+}
+
+#[test]
+fn an_unreadable_state_is_not_a_clean_one() {
+    let k = FakeKern::new(4);
+    k.0.borrow_mut().state = b"{\"version\":1,\"tasks\":{}}".to_vec();
+    let mut n = next_hop(&k);
+    let kept = block_on(n.restore(T0));
+    assert_eq!(kept, Kept::Unreadable);
+    assert!(!kept.is_clean());
+    assert!(
+        n.take_lines()
+            .iter()
+            .any(|l| l.contains("HOP_KERNEL_STATE_FAIL"))
+    );
+    // Niets: een schone start.
+    let k = FakeKern::new(4);
+    assert_eq!(block_on(next_hop(&k).restore(T0)), Kept::Clean);
+}
+
+#[test]
+fn an_older_kernel_keeps_no_state_and_refuses_a_restart() {
+    let (mut n, k) = placed_for_a_restart();
+    k.0.borrow_mut().no_state_ops = true;
+    k.0.borrow_mut().restart_ok = true;
+    tick(&mut n, T0 + SECOND);
+    let lines = n.take_lines();
+    let none: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("HOP_KERNEL_STATE_NONE"))
+        .collect();
+    assert_eq!(none.len(), 1, "{lines:?}");
+    // Niet elke tik opnieuw: alleen op het ritme.
+    let calls = |k: &FakeKern| k.0.borrow().ops.iter().filter(|&&o| o == 0x4B).count();
+    let before = calls(&k);
+    for s in 2..9 {
+        tick(&mut n, T0 + s * SECOND);
+    }
+    assert_eq!(calls(&k), before, "no put per tick on an older kernel");
+    // Een herstart zonder staat zou elke app stoppen: 502, en Hop draait door.
+    let (status, body) = http(&mut n, Port::Agent, wire("POST", "/restart", ""));
+    assert_eq!(status, 502, "{body}");
+    assert!(body.contains("keeps no state"), "{body}");
+    let lines = n.take_lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "hop: restart of Hop requested (same image) HOP_RESTART"),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("HOP_RESTART_FAIL")),
+        "{lines:?}"
+    );
+    assert!(!k.0.borrow().ops.contains(&0x4D), "no HOP_RESTART asked");
+    assert!(k.0.borrow().restarts.is_empty());
+}
+
+#[test]
+fn the_stop_bell_hands_the_last_state_to_the_kernel() {
+    let (mut n, k) = placed_for_a_restart();
+    // Geen tik sinds de plaatsing: alleen de stop-bel legt hem nog neer.
+    assert!(k.0.borrow().state.is_empty());
+    block_on(n.on_stop(T0 + SECOND / 2));
+    let blob = String::from_utf8(k.0.borrow().state.clone()).unwrap();
+    assert!(blob.contains("\"web\""), "{blob}");
+    let lines = n.take_lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("state of 1 task(s) handed to the kernel")
+                && l.ends_with("HOP_STOPPING")),
+        "{lines:?}"
+    );
+    // En de volgende neemt hem over.
+    assert_eq!(
+        block_on(next_hop(&k).restore(T0 + SECOND)),
+        Kept::Adopted(1)
+    );
+}
+
+#[test]
+fn restart_with_the_same_image() {
+    let (mut n, k) = placed_for_a_restart();
+    k.0.borrow_mut().restart_ok = true;
+    let (status, body) = http(&mut n, Port::Agent, wire("POST", "/restart", ""));
+    assert_eq!(status, 202, "{body}");
+    {
+        let st = k.0.borrow();
+        assert_eq!(st.restarts, [(0, String::new(), 0)]);
+        // De staat ging vlak vóór de vraag naar de kern, zonder tik.
+        let at = |op: u8| st.ops.iter().rposition(|&o| o == op).unwrap();
+        assert!(at(0x4B) < at(0x4D));
+        assert!(String::from_utf8_lossy(&st.state).contains("\"web\""));
+    }
+    let lines = n.take_lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "hop: restart of Hop requested (same image) HOP_RESTART"),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l
+            == "hop: the kernel took the restart; this Hop stops now and the next one adopts its cages HOP_RESTART_ACCEPTED"),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn restart_with_a_new_image_streams_it_raw_first() {
+    let (mut n, k) = placed_for_a_restart();
+    k.0.borrow_mut().restart_ok = true;
+    let sum = "ab".repeat(32);
+    let body = format!(r#"{{"url":"http://images/agentd-hopos","sha256":"{sum}"}}"#);
+    let (status, reply) = http(&mut n, Port::Agent, wire("POST", "/restart", &body));
+    assert_eq!(status, 202, "{reply}");
+    let st = k.0.borrow();
+    // Het image kwam in slot 2 onder de jobnaam van de kern, en de kern nam
+    // het over (het slot is weer vrij).
+    assert_eq!(st.restarts, [(2, sum, 0)]);
+    assert_eq!(st.slots.keys().copied().collect::<Vec<_>>(), [1]);
+    let start = PrivOp::StartSlot.op();
+    let raw = st
+        .frames
+        .iter()
+        .filter(|f| f.windows(15).any(|w| w == b"hopos.hop-image"));
+    assert_eq!(raw.count(), 1, "one raw slot for the image");
+    assert!(st.ops.contains(&start));
+    drop(st);
+    assert!(n.take_lines().iter().any(
+        |l| l == "hop: restart of Hop requested (image http://images/agentd-hopos) HOP_RESTART"
+    ));
+}
+
+#[test]
+fn a_refused_restart_is_a_502_and_cleans_the_image_slot() {
+    let (mut n, k) = placed_for_a_restart();
+    // restart_ok staat uit: de kern weigert.
+    let sum = "cd".repeat(32);
+    let body = format!(r#"{{"url":"http://images/agentd-hopos","sha256":"{sum}"}}"#);
+    let (status, reply) = http(&mut n, Port::Agent, wire("POST", "/restart", &body));
+    assert_eq!(status, 502, "{reply}");
+    assert!(reply.contains("kernel refused the restart"), "{reply}");
+    assert!(n.take_lines().iter().any(|l| {
+        l.starts_with("hop: restart of Hop failed: kernel refused the restart")
+            && l.ends_with("HOP_RESTART_FAIL")
+    }));
+    assert_eq!(
+        k.0.borrow().slots.keys().copied().collect::<Vec<_>>(),
+        [1],
+        "the image slot is gone, web runs on"
+    );
+    // Een image dat niet bestaat: geen staat en geen vraag aan de kern.
+    let before = k.0.borrow().ops.len();
+    let body = format!(r#"{{"url":"http://images/nope","sha256":"{sum}"}}"#);
+    let (status, _) = http(&mut n, Port::Agent, wire("POST", "/restart", &body));
+    assert_eq!(status, 502);
+    assert!(!k.0.borrow().ops[before..].contains(&0x4D));
+}
+
+/// Geen net: een doorgifte kan hier niet (de herstart is een gewoon antwoord).
+struct NoNet;
+
+impl crate::fetch::Connect for NoNet {
+    type Conn = Mem;
+    async fn connect(&mut self, _ip: [u8; 4], _port: u16) -> Result<Mem, String> {
+        Err(String::from("no network in this test"))
+    }
+}
+
+/// 22-10, `qemu-test-hop-restart.sh`: het 202 op `POST /restart` kwam nooit
+/// aan, want de kern stopte Hop 500 ms na zijn OK. Nu vertrekt Hop zelf, en
+/// pas als zijn antwoord de deur uit is: de werker en de eigenaar om de
+/// beurt zoals op de app-core, met een bel die nooit gaat.
+#[test]
+fn the_restart_reply_is_out_before_hop_leaves() {
+    use crate::restart::{Departure, depart};
+    let (mut n, k) = placed_for_a_restart();
+    k.0.borrow_mut().restart_ok = true;
+    // Twee werkers: de pool is niet vol, dus alleen de vlag sluit.
+    let pool: Handoff<Mem> = Handoff::new(2);
+    let hub = Hub::new(1);
+    let leaving = core::cell::Cell::new(false);
+    let out = Rc::new(RefCell::new(Vec::new()));
+    // Keep-alive: zonder de vlag bleef de verbinding open tot de leestermijn.
+    let mut raw = wire("POST", "/restart", "");
+    let at = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    raw.splice(at..at, b"\r\nConnection: keep-alive".iter().copied());
+    pool.give(Mem {
+        input: raw,
+        at: 0,
+        out: out.clone(),
+    })
+    .unwrap_or_else(|_| panic!("a free worker"));
+
+    let mut client = crate::client::Client::new(
+        NoNet,
+        crate::fetch::IpOnly,
+        applib::rand::Rng::from_seed(b"t", || 0),
+        || None,
+    );
+    let mut none = NoStreams;
+    let written_at_leave = Rc::new(RefCell::new(None));
+    let why = {
+        let mut worker = pin!(async {
+            let conn = pool.take(0).await;
+            crate::forward::serve(
+                conn,
+                async |req: Request| hub.ask_routed(0, Port::Agent, req).await,
+                &mut none,
+                &mut client,
+                Port::Agent,
+                || pool.none_free() || leaving.get(),
+            )
+            .await
+            .unwrap();
+            pool.free(0);
+        });
+        let mut owner = pin!(async {
+            hub.wait().await;
+            let (slot, q) = hub.next().unwrap();
+            let Question::Http(port, req) = q else {
+                panic!("{q:?}")
+            };
+            let answer = match n.handle_routed(port, &req, T0).await {
+                crate::forward::Routed::Reply(r) => Answer::Reply(r),
+                crate::forward::Routed::Forward(f) => Answer::Forward(f),
+            };
+            assert!(n.take_leaving(), "the kernel took it: leave");
+            leaving.set(true);
+            hub.answer(slot, answer);
+            let why = depart(
+                pool.freed(slot),
+                core::future::pending::<()>(),
+                core::future::pending::<()>(),
+            )
+            .await;
+            *written_at_leave.borrow_mut() = Some(String::from_utf8(out.borrow().clone()).unwrap());
+            n.leave(T0 + SECOND / 10, why).await;
+            why
+        });
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut why = None;
+        let mut worker_done = false;
+        for _ in 0..10_000 {
+            if !worker_done {
+                worker_done = worker.as_mut().poll(&mut cx).is_ready();
+            }
+            if let Poll::Ready(w) = owner.as_mut().poll(&mut cx) {
+                why = Some(w);
+                break;
+            }
+        }
+        why
+    };
+    assert_eq!(
+        why,
+        Some(Departure::Replied),
+        "left without a bell, after the reply"
+    );
+    let text = written_at_leave.borrow().clone().unwrap();
+    assert!(text.starts_with("HTTP/1.1 202"), "{text}");
+    assert!(text.contains("Connection: close"), "{text}");
+    let lines = n.take_lines();
+    assert!(
+        lines.iter().any(|l| l
+            == "hop: the restart reply is out; leaving for the new Hop HOP_RESTART_LEAVING why=replied"),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l
+            .starts_with("hop: leaving for the restart; state of 1 task(s) handed to the kernel")
+            && l.ends_with("HOP_STOPPING")),
+        "{lines:?}"
+    );
+    assert_eq!(k.0.borrow().restarts.len(), 1);
+    assert!(String::from_utf8_lossy(&k.0.borrow().state).contains("\"web\""));
+}
+
+#[test]
+fn the_bell_or_the_grace_ends_the_wait_for_the_reply() {
+    use crate::restart::{Departure, depart};
+    let never = || core::future::pending::<()>();
+    let now = || core::future::ready(());
+    assert_eq!(block_on(depart(never(), never(), now())), Departure::Bell);
+    assert_eq!(
+        block_on(depart(never(), now(), never())),
+        Departure::GraceOver
+    );
+    assert_eq!(
+        block_on(depart(now(), never(), now())),
+        Departure::Bell,
+        "the bell wins"
+    );
 }

@@ -377,8 +377,8 @@ pub async fn pump<C: Conn, S: Streams>(
 /// - `Proxy` naar een andere leader: 502 met het adres. Op HopOS draait de
 ///   leader in fase 1 op dezelfde node (standalone), en dat verzoek handelt
 ///   de eigenaar-taak zelf af voordat hij hier komt.
-/// - `Flip`: 501, want de kern-flip over de system-API (op 0x46) is nog niet
-///   aangesloten.
+/// - `Flip` en `Restart`: 501, de weg van een adapter zonder kern; de
+///   bewoner op HopOS voert ze zelf uit voordat hij hier komt.
 /// - `Logs`: 404; de eigenaar-taak beantwoordt hem uit de logring als hij
 ///   de taak kent.
 pub fn refuse(effect: &Effect) -> Option<Response> {
@@ -391,6 +391,10 @@ pub fn refuse(effect: &Effect) -> Option<Response> {
         Effect::Flip { .. } => Some(Response::error(
             501,
             "hop on HopOS: kernel flip over the system API is not wired yet",
+        )),
+        Effect::Restart { .. } => Some(Response::error(
+            501,
+            "hop on HopOS: a restart of Hop over the system API is not wired here",
         )),
         Effect::Logs { task_id, .. } => {
             Some(Response::error(404, &format!("no logs for task {task_id}")))

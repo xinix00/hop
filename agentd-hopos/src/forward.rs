@@ -409,6 +409,10 @@ fn head_of(req: &Request) -> Request {
 /// derde op de stilte van de eerste (gemeten: 2, 4, 6 s voor leader,
 /// agents en jobs op het dashboard). Go had een goroutine per verbinding
 /// en kende dit wachten niet.
+///
+/// `crowded` wordt ook ná de handler gevraagd: een verzoek dat de node laat
+/// vertrekken (`POST /restart`), krijgt zo zijn antwoord met `Connection:
+/// close`, en de werker is vrij zodra het geschreven is.
 pub async fn serve<X, H, S, C, R>(
     conn: X,
     mut handler: H,
@@ -430,7 +434,11 @@ where
             hop_http::close_after(ex)?;
         }
         let cors = (port == Port::Agent).then(|| head_of(&req));
-        match handler(req).await {
+        let routed = handler(req).await;
+        if crowded() {
+            hop_http::close_after(ex)?;
+        }
+        match routed {
             Routed::Reply(reply) => {
                 let Reply::Stream {
                     ref head,

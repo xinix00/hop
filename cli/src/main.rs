@@ -3,15 +3,16 @@
 //!
 //! Commando's: `apply` (een jobspec-bestand of vlaggen), `jobs`, `status`,
 //! `agents [id]`, `logs <job|taak>` (met `--follow` een levende tail),
-//! `events`, `delete <job>`, `flip <url> <sha256> [--cold]`, en `image`: de
-//! node-config in het config-venster van een HopOS-image, een flipbundel of
-//! een kaart, en een kaart schrijven (`image.rs`, de Hop-imager van v2, de
-//! enige zonder netwerk). De rest gaat naar de leader (`--leader`,
-//! standaard `localhost:9080`, of `HOP_LEADER`): de
-//! taken via `/v1/tasks`, logs en de capaciteit van een agent via de
-//! doorgifte `/v1/agents/{id}/...`. Alleen de flip gaat naar een agent zelf
-//! (`--agent`). Alles is ondertekend met `--api-key` (of `HOP_API_KEY`); de
-//! sleutel komt nooit in een melding.
+//! `events`, `delete <job>`, `flip <url> <sha256> [--cold]`, `restart
+//! [<url> <sha256>]`, en `image`: de node-config in het config-venster van
+//! een HopOS-image, een flipbundel of een kaart, en een kaart schrijven
+//! (`image.rs`, de Hop-imager van v2, de enige zonder netwerk). De rest gaat
+//! naar de leader (`--leader`, standaard `localhost:9080`, of
+//! `HOP_LEADER`): de taken via `/v1/tasks`, logs en de capaciteit van een
+//! agent via de doorgifte `/v1/agents/{id}/...`. Alleen de flip en de
+//! herstart van Hop gaan naar een agent zelf (`--agent`). Alles is
+//! ondertekend met `--api-key` (of `HOP_API_KEY`); de sleutel komt nooit in
+//! een melding.
 //!
 //! Waarom via de leader: een agent staat vaak op een adres dat de CLI niet
 //! ziet (het slot-LAN van HopOS, een privénet achter de leader), en de
@@ -61,6 +62,7 @@ Commands:
   events                 Follow the cluster events (SSE /v1/events)
   delete <job>           Delete a job and all its tasks
   flip <url> <sha256>    Replace the kernel of a HopOS node (--agent; --cold stops the apps first)
+  restart [<url> <sha256>]  Restart Hop on a HopOS node under its apps, with the same or a new image (--agent)
   image <file|device>    Show or set the node config in a HopOS image, bundle or card; write a card (hop image --help)
 
 Environment: HOP_LEADER, HOP_AGENT, HOP_API_KEY";
@@ -131,6 +133,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "events" => events(&client),
         "delete" => delete(&client, args),
         "flip" => flip(&client, args),
+        "restart" => restart(&client, args),
         "image" => image::run(args),
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
@@ -752,6 +755,35 @@ fn flip(c: &Client, args: &[String]) -> Result<(), String> {
     }
     body.push('}');
     let r = c.agent_at(&c.agent, "POST", "/flip", Some(body.as_bytes()))?;
+    let v = json::parse(&r.body).unwrap_or(Value::Null);
+    println!("{}: {}", c.agent, field_str(&v, "status"));
+    Ok(())
+}
+
+fn restart(c: &Client, args: &[String]) -> Result<(), String> {
+    // Zonder argumenten hetzelfde image; met een URL en een som een nieuw
+    // (de ELF van agentd-hopos). De apps draaien door: Hop legt zijn staat
+    // bij de kern, en de nieuwe Hop neemt hun kooien over.
+    let body = match args {
+        [] => String::new(),
+        [url, sum] => {
+            if sum.len() != 64 || !sum.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(String::from("sha256 must be 64 hex characters"));
+            }
+            let mut body = String::from("{\"url\":");
+            json::write_string(url, &mut body).map_err(|e| e.to_string())?;
+            body.push_str(",\"sha256\":");
+            json::write_string(sum, &mut body).map_err(|e| e.to_string())?;
+            body.push('}');
+            body
+        }
+        _ => {
+            return Err(String::from(
+                "usage: hop restart [<url> <sha256>] [--agent host:port]",
+            ));
+        }
+    };
+    let r = c.agent_at(&c.agent, "POST", "/restart", Some(body.as_bytes()))?;
     let v = json::parse(&r.body).unwrap_or(Value::Null);
     println!("{}: {}", c.agent, field_str(&v, "status"));
     Ok(())

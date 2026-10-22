@@ -337,6 +337,54 @@ fn handle_flip() {
 }
 
 #[test]
+fn handle_restart() {
+    let mut a = agent();
+    let req = |b: &str| Request::new(Method::Post, "/restart", b.as_bytes());
+    let off = NodeApi::new(b"", false);
+    assert_eq!(off.handle(&mut a, T0, None, &req("")).0.status, 501);
+    let on = NodeApi::new(b"", true);
+    // Zonder body (of een leeg object): hetzelfde image.
+    for same in ["", "  ", "{}"] {
+        let (r, e) = on.handle(&mut a, T0, None, &req(same));
+        assert_eq!(r.status, 202, "{same:?}");
+        assert_eq!(
+            e,
+            Effect::Restart {
+                url: String::new(),
+                sha256: String::new()
+            }
+        );
+    }
+    let sum = "c".repeat(64);
+    let good = alloc::format!(r#"{{"url":"https://x/agentd-hopos","sha256":"{sum}"}}"#);
+    let (r, e) = on.handle(&mut a, T0, None, &req(&good));
+    assert_eq!(r.status, 202);
+    assert_eq!(
+        e,
+        Effect::Restart {
+            url: String::from("https://x/agentd-hopos"),
+            sha256: sum.clone()
+        }
+    );
+    for bad in [
+        "{x",
+        "[]",
+        r#"{"url":"x","sha256":""}"#,
+        r#"{"url":"https://x/h","sha256":"zz"}"#,
+        r#"{"sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}"#,
+    ] {
+        let (r, e) = on.handle(&mut a, T0, None, &req(bad));
+        assert_eq!(r.status, 400, "{bad}");
+        assert_eq!(e, Effect::None);
+    }
+    let get = Request::new(Method::Get, "/restart", b"");
+    assert_eq!(on.handle(&mut a, T0, None, &get).0.status, 405);
+    // Achter de HMAC, zoals /flip.
+    let signed = NodeApi::new(b"secret", true);
+    assert_eq!(signed.handle(&mut a, T0, None, &req("")).0.status, 401);
+}
+
+#[test]
 fn auth_rejects_unsigned_and_accepts_signed() {
     let mut a = agent();
     let api = NodeApi::new(b"secret", false);

@@ -228,6 +228,12 @@ fn unwired_effects_are_refused_loudly() {
     })
     .unwrap();
     assert_eq!(f.status, 501);
+    let r = refuse(&Effect::Restart {
+        url: String::new(),
+        sha256: String::new(),
+    })
+    .unwrap();
+    assert_eq!(r.status, 501);
     let l = refuse(&Effect::Logs {
         task_id: String::from("t1"),
         stream: LogStream::Stdout,

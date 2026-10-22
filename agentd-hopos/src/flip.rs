@@ -24,11 +24,17 @@
 //! `n` van de FLIP ([`FLIP_COLD`](abi::systemapi::FLIP_COLD)) en één stap ertussen: na de download en
 //! vóór de FLIP stopt Hop zijn eigen taken op deze node (`node.rs`), zodat
 //! de kern alleen nog stopt wat Hop niet kende. De kern springt dan zonder
-//! bewoners over te dragen en start Hop koud; de jobs staan in de
-//! agent-staat op hopfs en worden daarna opnieuw geplaatst. De agent houdt
-//! de gestopte taken vast tot dan: weigert de kern (de FLIP geeft een fout,
-//! of hij nam hem aan en sprong toch niet, de Pi 5 op 03-10), dan herstarten
-//! ze (`HOP_FLIP_COLD_BACK`) en klopt de telling van de leader nog.
+//! bewoners over te dragen en start Hop koud. Geclusterd plaatst de leader
+//! de jobs daarna opnieuw (de clusterstaat staat in de object-store);
+//! standalone komen alleen de init-jobs terug, want de staat die Hop bij
+//! de kern legt ([`hopos_runner::state`]) sterft met de oude kern. De agent
+//! houdt de gestopte taken vast tot de sprong: weigert de kern (de FLIP
+//! geeft een fout, of hij nam hem aan en sprong toch niet, de Pi 5 op
+//! 03-10), dan herstarten ze (`HOP_FLIP_COLD_BACK`) en klopt de telling van
+//! de leader nog.
+//!
+//! Dezelfde stroom draagt een nieuw image van Hop zelf ([`fetch_raw`] met
+//! [`hopos_runner::state::HOP_IMAGE_JOB`], zie [`crate::restart`]).
 //!
 //! Wat Hop al weet, vraagt hij niet: zegt het board-contract van de kern
 //! (`HOPOS_COLD_FLIP`, [`crate::env::ColdFlip`]) dat koud niet kan (`no`,
@@ -89,6 +95,10 @@ impl<C: Call> KernFlip for KernSys<C> {
 /// De download als stroom in het gereserveerde slot.
 struct Bundle<'a, S> {
     sys: &'a mut S,
+    /// De jobnaam waarmee de kern het slot rauw reserveert.
+    job: &'static str,
+    /// Wat er stroomt, voor de fouttekst ("bundle", "image").
+    what: &'static str,
     slot: Option<Slot>,
     done: bool,
 }
@@ -107,26 +117,28 @@ impl<S: SystemApi> Sink for Bundle<'_, S> {
             env: Default::default(),
             mounts: Default::default(),
             ports: Default::default(),
-            job: String::from(FLIP_BUNDLE_JOB),
+            job: String::from(self.job),
         };
+        let what = self.what;
         let slot = self
             .sys
             .start_slot(&spec)
             .await
-            .map_err(|e| format!("reserve a slot for the bundle: {e:?}"))?;
+            .map_err(|e| format!("reserve a slot for the {what}: {e:?}"))?;
         self.slot = Some(slot);
         Ok(())
     }
 
     async fn chunk(&mut self, bytes: &[u8]) -> Result<(), String> {
-        let slot = self.slot.ok_or_else(|| String::from("no bundle slot"))?;
+        let what = self.what;
+        let slot = self.slot.ok_or_else(|| format!("no slot for the {what}"))?;
         match self.sys.stream_image(slot, bytes).await {
             Ok(Streamed::More) => Ok(()),
             Ok(Streamed::Placed) => {
                 self.done = true;
                 Ok(())
             }
-            Ok(Streamed::Failed(e)) | Err(e) => Err(format!("stream the bundle: {e:?}")),
+            Ok(Streamed::Failed(e)) | Err(e) => Err(format!("stream the {what}: {e:?}")),
         }
     }
 }
@@ -138,8 +150,27 @@ where
     S: SystemApi,
     I: Images,
 {
+    fetch_raw(sys, images, url, FLIP_BUNDLE_JOB, "bundle").await
+}
+
+/// Haalt `url` op en stroomt het rauw in een slot dat de kern onder de
+/// jobnaam `job` reserveert (een flip-bundel, een nieuw image van Hop);
+/// `what` noemt het in een fout. Een fout ruimt het slot op.
+pub async fn fetch_raw<S, I>(
+    sys: &mut S,
+    images: &mut I,
+    url: &str,
+    job: &'static str,
+    what: &'static str,
+) -> Result<Slot, String>
+where
+    S: SystemApi,
+    I: Images,
+{
     let mut sink = Bundle {
         sys: &mut *sys,
+        job,
+        what,
         slot: None,
         done: false,
     };
@@ -152,7 +183,7 @@ where
     let (slot, done) = (sink.slot, sink.done);
     let r = match (fetched, slot, done) {
         (Ok(()), Some(slot), true) => return Ok(slot),
-        (Ok(()), _, _) => Err(format!("download {url}: the bundle ended early")),
+        (Ok(()), _, _) => Err(format!("download {url}: the {what} ended early")),
         (Err(e), _, _) => Err(e),
     };
     if let Some(slot) = slot {

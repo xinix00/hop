@@ -29,7 +29,7 @@ agentd-hopos/  Hop as the HopOS resident: agent + leader in a slot (lib + no_std
 hostnet/    the host side of the net (std): std sockets for leanhttp, block_on, HTTP(S) client, S3 transport
 store/      the lease and the committed cluster state on the host: S3, hoplockserver, a file
 agentd/     the daemon binary (Linux, macOS): agent, election, leader, both APIs, processes and docker
-cli/        the `hop` command: apply, jobs, status, agents, logs, events, delete, flip, image
+cli/        the `hop` command: apply, jobs, status, agents, logs, events, delete, flip, restart, image
 hoplib/     the client for plugins: signed requests, typed replies, the /v1/events stream
 
 apps/       the apps Hop ships, each a host daemon (`std`) and a HopOS resident (`hopos`)
@@ -83,8 +83,8 @@ Every command talks to the leader only (`--leader`, or `HOP_LEADER`): the
 tasks come from `GET /v1/tasks`, and logs and an agent's capacity go through
 the leader to that agent (`/v1/agents/{id}/logs/...`, `/capacity`). An agent
 may sit on an address the CLI cannot reach (a HopOS slot LAN, a private
-network behind the leader); the leader reaches them all. Only `flip` goes to
-an agent itself (`--agent`).
+network behind the leader); the leader reaches them all. Only `flip` and
+`restart` go to an agent itself (`--agent`).
 
 `hop image` talks to no one: it is the HopOS imager. Every HopOS kernel
 carries its node config (`hopos.cfg`) in a 16 KiB config window (a
@@ -114,6 +114,36 @@ the process comes and goes; `cargo test -p agentd --test streams` does the
 same for events, `/v1/tasks` and a live log through the leader.
 Cross-build for Linux: `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld
 cargo build --release -p agentd -p cli --target aarch64-unknown-linux-musl`.
+
+## Restarting Hop under its apps
+
+On HopOS, Hop can restart itself, with the same image or a new one, without
+its apps noticing:
+
+```
+hop --agent 192.168.1.20:8080 restart                                  # the same image
+hop --agent 192.168.1.20:8080 restart https://.../agentd-hopos <sha256>  # a new Hop
+```
+
+That is `POST /restart` on the agent port, behind the same HMAC as `/flip`,
+with an optional body `{"url": ..., "sha256": ...}`. With a URL the node
+fetches the ELF into a raw slot (the way of a flip bundle). Then Hop hands
+its state (its jobs and tasks, and on a standalone node the leader's jobs)
+to the kernel and asks `HOP_RESTART`: 202 once the kernel took it, 502 with
+the reason when it refused. The kernel rings Hop's stop bell, Hop puts its
+state down once more and exits, and the kernel starts the new Hop in the
+same slot. The new Hop reads the state back, adopts every cage the kernel
+still reports as running (`HOP_ADOPTED n=N`), and only then stops what nobody
+owns and registers with its leader, which counts the adopted tasks as placed.
+
+The state lives in kernel memory and dies with the boot, so a cold boot can
+never adopt a cage of a previous boot. Hop writes it on every tick that
+changed something (1 s), again every 10 s (a warm kernel flip leaves the new
+kernel empty), before a restart and at the stop bell. Within the 30 s of the
+lease and the leader's agent timeout, a restart is invisible to the cluster:
+the same node takes its own lease back at once. A kernel without the state
+calls says so (`HOP_KERNEL_STATE_NONE`); Hop then behaves as before and
+refuses `/restart`.
 
 ## Een cluster van HopOS-nodes
 

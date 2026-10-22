@@ -29,6 +29,8 @@ use abi::systemapi::{
 };
 use applib::sys::{self, ConnError};
 
+use crate::state;
+
 /// De foutstatus van de kern.
 const STATUS_ERROR: u16 = hopabi::STATUS_ERROR;
 
@@ -98,6 +100,18 @@ pub struct KernState {
     /// De FLIP lukt: de kern neemt de bundel aan en geeft het slot terug,
     /// zoals `kern::system` vóór de sprong. Zonder: een weigering.
     pub flip_ok: bool,
+    /// Het blob dat Hop bij de kern neerlegde (`STATE_PUT`); leeg is niets.
+    pub state: Vec<u8>,
+    /// Hoe vaak Hop zijn staat neerlegde.
+    pub state_puts: u32,
+    /// Een oudere kern zonder de staat-ops en zonder `HOP_RESTART`: hij
+    /// antwoordt zoals `kern::system` op een op die hij niet kent.
+    pub no_state_ops: bool,
+    /// `HOP_RESTART` lukt: de kern neemt het (nieuwe) image aan, zoals
+    /// vóór de stop van Hop. Zonder: een weigering.
+    pub restart_ok: bool,
+    /// Elke aangenomen `HOP_RESTART`: (slot of 0, som, termijn in ms).
+    pub restarts: Vec<(u64, String, u64)>,
 }
 
 /// Eén store-call van een app in de nep-kern. De bestanden van de app zijn
@@ -291,6 +305,46 @@ impl FakeKern {
         let ok = |size: u64, data: &[u8]| answer(req.op, req.seq, hopabi::STATUS_OK, size, data);
         let err = |msg: &str| answer(req.op, req.seq, STATUS_ERROR, 0, msg.as_bytes());
         let path = core::str::from_utf8(req.path).unwrap_or("");
+        // De ops van de staat en de herstart van Hop, als getal: de getagde
+        // `abi` kent ze nog niet (zie `crate::state`).
+        match req.op {
+            state::OP_STATE_PUT | state::OP_STATE_GET | state::OP_HOP_RESTART if k.no_state_ops => {
+                // `kern::system` op een onbekende op: `Error::Kind`.
+                return err("wrong kind (file or directory)");
+            }
+            state::OP_STATE_PUT => {
+                if req.data.len() > state::HOP_STATE_MAX {
+                    return err("state larger than HOP_STATE_MAX");
+                }
+                k.state = req.data.to_vec();
+                k.state_puts += 1;
+                return ok(0, b"");
+            }
+            state::OP_STATE_GET => {
+                let at = usize::try_from(req.n)
+                    .unwrap_or(usize::MAX)
+                    .min(k.state.len());
+                return ok(k.state.len() as u64, k.state.get(at..).unwrap_or_default());
+            }
+            state::OP_HOP_RESTART => {
+                if !k.restart_ok {
+                    return err("hop restart not in the fake kernel");
+                }
+                if req.off != 0 {
+                    let complete = k
+                        .slots
+                        .get(&req.off)
+                        .is_some_and(|s| s.job == state::HOP_IMAGE_JOB && s.placed);
+                    if !complete {
+                        return err("no complete hop image in that slot");
+                    }
+                    k.slots.remove(&req.off);
+                }
+                k.restarts.push((req.off, String::from(path), req.n));
+                return ok(0, b"");
+            }
+            _ => {}
+        }
         match PrivOp::from_op(req.op) {
             Some(PrivOp::StartSlot) => {
                 let Ok(s) = StartReq::decode(req) else {

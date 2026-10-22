@@ -7,7 +7,7 @@
 //! in de volgorde waarin de agent het vroeg.
 //!
 //! Die ingangen zijn `async`: een actie die de kern raakt (een slot, een
-//! brok image, een status, de staat op hopfs) wacht met `.await` op de
+//! brok image, een status, de staat bij de kern) wacht met `.await` op de
 //! verbinding, en de eigenaar-taak geeft dan de core terug. De netstack,
 //! de verbindingstaken en de rest draaien intussen door; alleen de staat van
 //! de node wacht, want die heeft één eigenaar (handboek §1 en §4).
@@ -25,6 +25,13 @@
 //! `&mut dyn Sink`. Elke downloader (de downloadtaak, en de flip van de
 //! node) heeft één soort sink, dus dat kost niets.
 //!
+//! De staat van de agent (en standalone die van de leader) legt hij bij de
+//! kern neer, zodat een herstarte Hop zijn taken terugvindt
+//! ([`Node::restore`], `crate::restart`): na elke tik waarin hij veranderde
+//! (de tik is de debounce, 1 s, zoals `leader::PERSIST_DEBOUNCE`), elke
+//! [`STATE_REFRESH`] opnieuw, vlak vóór een herstart, en een laatste keer
+//! bij de stop-bel ([`Node::on_stop`]).
+//!
 //! De markers voor de console verzamelt hij als regels ([`Node::take_lines`]);
 //! de binary zet ze met `applib::log!` op het log, een test leest ze.
 
@@ -34,7 +41,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::future::Future;
 
-use agent::{Action, Agent, Event, Settings, StartError, StartOk, Status};
+use agent::{
+    Action, Agent, Event, Handoff, Settings, StartError, StartOk, Status, Store, StoreError,
+};
 use api::{
     Effect, EventLog, LeaderApi, LeaderCluster, LeaderEffect, LogStream, Method, NodeApi, Request,
     Response,
@@ -87,6 +96,55 @@ const ACTION_ROUNDS: usize = 16;
 /// halve seconde, de bevriezing van hopfs (hoogstens 2 s), elke bewoner
 /// die Hop liet staan (hoogstens 3 s per stuk) en de app-cores (1 s) over.
 const COLD_FLIP_WAIT: Nanos = 30 * SECOND;
+
+/// Hoe vaak Hop zijn staat bij de kern opnieuw neerlegt, ook als er niets
+/// veranderde.
+///
+/// Na een warme kern-flip draait Hop door, maar het blob ligt in het
+/// geheugen van de óude kern: de nieuwe heeft niets. Hop ziet de wissel
+/// niet (de system-client verbindt stil opnieuw), dus legt hij het blob
+/// gewoon op dit ritme opnieuw neer. Dat is één call met een paar KB per
+/// tien seconden; een herstart binnen tien seconden na een flip is de enige
+/// die dan nog een lege kern treft. Een oudere kern die de ops weigerde,
+/// krijgt op dit ritme ook zijn tweede kans (een flip naar een nieuwe kern).
+pub(crate) const STATE_REFRESH: Nanos = 10 * SECOND;
+
+/// Wat [`Node::restore`] bij de start aantrof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kept {
+    /// De kern had niets voor Hop: een schone start.
+    Clean,
+    /// De kern houdt geen staat (een oudere kern): schoon, zoals vóór de
+    /// kern-staat.
+    Unsupported,
+    /// De staat van de vorige Hop, met zoveel overgenomen kooien.
+    Adopted(usize),
+    /// Er lag iets, maar het was niet te lezen. Een staat die niet te lezen
+    /// is, is geen lege staat: dan geen init-jobs (Go: nooit zaaien op een
+    /// opslagfout).
+    Unreadable,
+}
+
+impl Kept {
+    /// Of dit een schone start is: alleen dan zaait een standalone node zijn init-jobs.
+    pub fn is_clean(self) -> bool {
+        matches!(self, Self::Clean | Self::Unsupported)
+    }
+}
+
+/// De staat bij de kern: wanneer hij weer moet.
+#[derive(Debug, Default)]
+struct Keep {
+    /// Veranderd sinds de laatste geslaagde schrijf.
+    dirty: bool,
+    /// De kern weigerde de staat-ops (een oudere kern): alleen het ritme
+    /// van [`STATE_REFRESH`] probeert het nog.
+    refused: bool,
+    /// Wanneer het blob hoe dan ook weer moet.
+    next: Nanos,
+    /// Mislukte schrijfpogingen op rij (luid, drie keer, dan tellen).
+    failures: u32,
+}
 
 /// Welke API een verzoek krijgt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,9 +255,14 @@ pub struct Node<S, I> {
     loads: VecDeque<Loading>,
     /// Het nummer van de volgende opdracht.
     next_seq: u64,
+    /// De staat bij de kern ([`Node::keep_state`]).
+    keep: Keep,
+    /// De kern nam een herstart aan: deze Hop vertrekt zodra zijn antwoord
+    /// de deur uit is ([`Node::take_leaving`], `crate::restart`).
+    leaving: bool,
 }
 
-impl<S: SystemApi, I: Images> Node<S, I> {
+impl<S: SystemApi + Store, I: Images> Node<S, I> {
     /// Een node volgens `cfg`, met de kern achter `sys`, artifacts via `images`, op tijd `now`.
     ///
     /// De leader draait hier (standalone) en kent de eigen agent vanaf het
@@ -209,6 +272,8 @@ impl<S: SystemApi, I: Images> Node<S, I> {
     /// Synchroon: hier wordt niets bij de kern gevraagd. Wat de agent na de
     /// registratie nog wil, blijft in zijn rij staan tot de eerste
     /// [`Node::restore`], [`Node::handle`] of [`Node::tick`] het uitvoert.
+    /// Na een overname ([`Node::restore`]) registreert de agent zich
+    /// opnieuw, met wat hij dan draait.
     pub fn new(cfg: &BootConfig, sys: S, images: I, now: Nanos) -> Self {
         let mut node = Self::build(cfg, sys, images, now);
         node.register_self(now);
@@ -272,28 +337,17 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             app_core_used: cfg.hop_group != agent::SYSTEM_GROUP,
             loads: VecDeque::new(),
             next_seq: 1,
+            keep: Keep {
+                next: now.saturating_add(STATE_REFRESH),
+                ..Keep::default()
+            },
+            leaving: false,
         }
     }
 
     /// Meldt de eigen agent bij de eigen leader.
     fn register_self(&mut self, now: Nanos) {
-        let me = types::Agent {
-            id: String::from(self.agent.id()),
-            endpoint: String::from(self.agent.endpoint()),
-            version: String::from(VERSION),
-            ..types::Agent::default()
-        };
-        let pool = self.runner.pool_largest();
-        let mut net = Local {
-            agent: &mut self.agent,
-            now,
-            pool_largest: pool,
-            relay: self.cluster.as_mut().map(Cluster::relay_mut),
-        };
-        match self
-            .leader
-            .register_agent(me, Map::new(), Time(now), &mut net)
-        {
+        match self.register_with_placed(now) {
             Ok(_) => {
                 let line = format!(
                     "hop: leader for cluster, agent {} registered HOP_LEADER leader={}",
@@ -306,6 +360,30 @@ impl<S: SystemApi, I: Images> Node<S, I> {
                 "hop: leader refused own agent: {e} HOP_LEADER_FAIL"
             )),
         }
+    }
+
+    /// De registratie bij de eigen (standalone) leader, met wat de agent al
+    /// draait: na een overname telt de leader die taken als geplaatst en
+    /// plaatst hij ze niet nog eens.
+    fn register_with_placed(&mut self, now: Nanos) -> leader::Result<bool> {
+        let me = types::Agent {
+            id: String::from(self.agent.id()),
+            endpoint: String::from(self.agent.endpoint()),
+            version: String::from(VERSION),
+            ..types::Agent::default()
+        };
+        let mut placed = Map::new();
+        for (name, n) in self.agent.placed_task_counts() {
+            placed.insert(name, u32::try_from(n).unwrap_or(u32::MAX))?;
+        }
+        let pool = self.runner.pool_largest();
+        let mut net = Local {
+            agent: &mut self.agent,
+            now,
+            pool_largest: pool,
+            relay: self.cluster.as_mut().map(Cluster::relay_mut),
+        };
+        self.leader.register_agent(me, placed, Time(now), &mut net)
     }
 
     /// Legt het gemeten gebruik van een taak vast: cpu als procent van zijn
@@ -375,15 +453,17 @@ impl<S: SystemApi, I: Images> Node<S, I> {
 
     /// Stopt de bewoners die de kern nog heeft maar deze Hop niet kent.
     ///
-    /// Hop houdt geen staat op hopfs: wat hij weet komt uit de leader-staat
-    /// in de object-store (S3) of uit de init-jobs, en bij een warme flip
-    /// draait hij door (`HOPOS_HOP_RESUMED`). Een bewoner die hier nog
-    /// staat terwijl Hop vers begint, is dus van niemand; zonder deze stap
-    /// hield hij zijn slot tot de volgende koude boot (GEMETEN 01-10 op de
-    /// Pi 4). Een staat uit een bestand overnemen was erger: na een koude
-    /// boot werd die een spook op het slot van de volgende bewoner (02-10,
-    /// de M4: twee minuten 503 "port 80 is taken" tot Hop het slot met de
-    /// echte spin erin stopte).
+    /// Roep hem NA [`Node::restore`]: wat de vorige Hop bij de kern
+    /// neerlegde en nog draait, is dan van deze. Wat overblijft, is van
+    /// niemand: een taak die startte na de laatste staat, een job die rond
+    /// de herstart verwijderd werd, alles na een koude boot (het blob sterft
+    /// met de kern) of op een kern die geen staat houdt. Zonder deze stap
+    /// hield zo'n bewoner zijn slot tot de volgende koude boot (GEMETEN
+    /// 01-10 op de Pi 4). Een staat uit een bestand op hopfs overnemen was
+    /// erger: na een koude boot werd die een spook op het slot van de
+    /// volgende bewoner (02-10, de M4: twee minuten 503 "port 80 is taken"
+    /// tot Hop het slot met de echte spin erin stopte); het blob in de kern
+    /// kent geen vorige boot, en de overname eist een slot dat draait.
     pub async fn sweep_strays(&mut self) {
         for slot in self.runner.sweep_strays().await {
             self.lines.push(format!(
@@ -393,13 +473,245 @@ impl<S: SystemApi, I: Images> Node<S, I> {
         }
     }
 
+    /// Neemt de staat van de vorige Hop over uit de kern: zijn jobs, en de
+    /// taken waarvan de kern het slot als draaiend meldt.
+    ///
+    /// Vóór [`Node::sweep_strays`] en vóór de eerste registratie bij een
+    /// leader: de leader ziet de taken dan meteen als geplaatst. Standalone
+    /// komt ook de gecommitte staat van de leader terug, en registreert de
+    /// agent zich opnieuw met wat hij nu draait. Een taak waarvan het slot
+    /// niet meer draait, of al van een ander is, neemt hij niet over: die
+    /// plaatst de leader opnieuw.
+    pub async fn restore(&mut self, now: Nanos) -> Kept {
+        let blob = match self.runner.system_mut().load().await {
+            Ok(Some(b)) => b,
+            Ok(None) => return Kept::Clean,
+            Err(e @ StoreError::Refused { .. }) => {
+                self.keep.refused = true;
+                self.lines.push(format!(
+                    "hop: this kernel keeps no state for Hop ({e}); a restart of Hop stops every app HOP_KERNEL_STATE_NONE"
+                ));
+                return Kept::Unsupported;
+            }
+            Err(e) => {
+                self.lines.push(format!(
+                    "hop: the kernel's state for Hop not read: {e}; starting empty HOP_KERNEL_STATE_FAIL"
+                ));
+                return Kept::Unreadable;
+            }
+        };
+        let h = match Handoff::parse(&blob) {
+            Ok(Some(h)) => h,
+            Ok(None) => return Kept::Clean,
+            Err(e) => {
+                self.lines.push(format!(
+                    "hop: the kernel's state for Hop is unreadable ({} bytes): {e}; starting empty HOP_KERNEL_STATE_FAIL",
+                    blob.len()
+                ));
+                return Kept::Unreadable;
+            }
+        };
+        drop(blob);
+        let n = self.adopt(now, h).await;
+        Kept::Adopted(n)
+    }
+
+    /// De overname zelf: de kooien bij de runner, de records bij de agent,
+    /// standalone de leader. Geeft het aantal overgenomen kooien.
+    async fn adopt(&mut self, now: Nanos, h: Handoff) -> usize {
+        let own = self.own_slot;
+        let mut want = Vec::new();
+        for t in &h.tasks {
+            let Some(pid) = u32::try_from(t.pid)
+                .ok()
+                .filter(|&p| p > 0 && Slot(p) != own)
+            else {
+                continue;
+            };
+            if want.try_reserve(1).is_err() {
+                break;
+            }
+            want.push((t.id.clone(), Slot(pid)));
+        }
+        let adopted = self.runner.adopt_running(&want).await;
+        let total = h.tasks.len();
+        let tasks: Vec<types::Task> = h
+            .tasks
+            .into_iter()
+            .filter(|t| adopted.contains(&t.id))
+            .collect();
+        let n = tasks.len();
+        self.agent.adopt(h.jobs, tasks);
+        if n > 0 {
+            // Zonder zekerheid ja (zie het veld): een overgenomen kooi kan
+            // op een app-core staan.
+            self.app_core_used = true;
+        }
+        if self.cluster.is_none() {
+            if let Some(l) = h.leader
+                && let Err(e) = self.leader.load_committed_state(Some(l.as_bytes()))
+            {
+                self.lines.push(format!(
+                    "hop: the leader's state in the kernel's state is unreadable: {e} HOP_KERNEL_STATE_FAIL"
+                ));
+            }
+            if let Err(e) = self.register_with_placed(now) {
+                self.lines.push(format!(
+                    "hop: leader refused own agent after the restore: {e} HOP_LEADER_FAIL"
+                ));
+            }
+        }
+        self.lines.push(format!(
+            "hop: adopted {n} running cage(s) from the kernel's state HOP_ADOPTED n={n}"
+        ));
+        let gone = total.saturating_sub(n);
+        if gone > 0 {
+            self.lines.push(format!(
+                "hop: {gone} task(s) in the kernel's state no longer run; the leader places them again HOP_ADOPT_SKIPPED n={gone}"
+            ));
+        }
+        self.drain(now).await;
+        n
+    }
+
+    /// Legt de staat bij de kern neer als hij veranderde of als het ritme
+    /// het zegt ([`STATE_REFRESH`]); na elke tik.
+    async fn keep_state(&mut self, now: Nanos) {
+        let mut changed = self.agent.take_dirty();
+        // Standalone is de leader van deze node ook staat die Hop moet
+        // meenemen; zijn eigen debounce zegt wanneer hij veranderde.
+        if self.cluster.is_none() && matches!(self.leader.poll_snapshot(Time(now)), Ok(Some(_))) {
+            changed = true;
+        }
+        if changed && !self.keep.refused {
+            self.keep.dirty = true;
+        }
+        if self.keep.dirty || now >= self.keep.next {
+            let _ = self.save_state(now).await;
+        }
+    }
+
+    /// Legt de staat nu bij de kern neer; geeft de maat van het blob.
+    async fn save_state(&mut self, now: Nanos) -> Result<usize, String> {
+        self.keep.next = now.saturating_add(STATE_REFRESH);
+        let leader = if self.cluster.is_none() {
+            match self.leader.snapshot(Time(now)) {
+                Ok(s) => Some(s),
+                Err(e) => return Err(self.state_failed(&format!("the leader's snapshot: {e}"))),
+            }
+        } else {
+            None
+        };
+        let r = self
+            .agent
+            .save_to(self.runner.system_mut(), leader.as_deref())
+            .await;
+        match r {
+            Ok(n) => {
+                self.keep.dirty = false;
+                self.keep.failures = 0;
+                if self.keep.refused {
+                    self.keep.refused = false;
+                    self.lines.push(String::from(
+                        "hop: the kernel keeps Hop's state now HOP_KERNEL_STATE_KEPT",
+                    ));
+                }
+                Ok(n)
+            }
+            Err(agent::Error::Store(e @ StoreError::Refused { .. })) => {
+                // Een oudere kern: niet elke tik opnieuw, alleen op het ritme.
+                self.keep.dirty = false;
+                if !self.keep.refused {
+                    self.keep.refused = true;
+                    self.lines.push(format!(
+                        "hop: this kernel keeps no state for Hop ({e}); a restart of Hop stops every app HOP_KERNEL_STATE_NONE"
+                    ));
+                }
+                Err(format!("this kernel keeps no state for Hop: {e}"))
+            }
+            Err(e @ agent::Error::Store(StoreError::TooBig { .. })) => {
+                // Groeit niet vanzelf weer in: niet elke tik een blob van
+                // een megabyte maken, alleen op het ritme.
+                self.keep.dirty = false;
+                Err(self.state_failed(&format!("{e}")))
+            }
+            Err(e) => Err(self.state_failed(&format!("{e}"))),
+        }
+    }
+
+    /// Een schrijf die mislukte: luid, drie keer, dan eens per honderd
+    /// (handboek §6). De vlag blijft staan: de volgende tik probeert opnieuw.
+    fn state_failed(&mut self, why: &str) -> String {
+        self.keep.failures = self.keep.failures.saturating_add(1);
+        let n = self.keep.failures;
+        if n <= 3 || n.is_multiple_of(100) {
+            self.lines.push(format!(
+                "hop: state for the kernel not saved ({n}x): {why} HOP_KERNEL_STATE_FAIL"
+            ));
+        }
+        String::from(why)
+    }
+
+    /// De kern luidde de stop-bel (een stop van het slot, of een herstart
+    /// die niet op Hop wachtte): de staat een laatste keer naar de kern,
+    /// binnen de gratie.
+    ///
+    /// Daarna doet de eigenaar niets meer: wat na dit blob nog veranderde,
+    /// zou de volgende Hop niet kennen.
+    pub async fn on_stop(&mut self, now: Nanos) {
+        self.hand_over(now, "stop requested").await;
+    }
+
+    /// Of de kern net een herstart aannam (één keer `true`): de eigenaar
+    /// laat dan eerst het antwoord wegschrijven en roept [`Node::leave`].
+    pub fn take_leaving(&mut self) -> bool {
+        core::mem::take(&mut self.leaving)
+    }
+
+    /// Vertrekt na een aangenomen herstart: één regel waarom nu, de staat
+    /// een laatste keer naar de kern, en daarna niets meer (zoals
+    /// [`Node::on_stop`]).
+    pub async fn leave(&mut self, now: Nanos, why: crate::restart::Departure) {
+        use crate::restart::{Departure, REPLY_GRACE};
+        let line = match why {
+            Departure::Replied => {
+                String::from("hop: the restart reply is out; leaving for the new Hop")
+            }
+            Departure::GraceOver => format!(
+                "hop: the restart reply was not out within {} ms; leaving for the new Hop anyway",
+                REPLY_GRACE.as_millis()
+            ),
+            Departure::Bell => {
+                String::from("hop: the kernel rang the stop bell before the restart reply was out")
+            }
+        };
+        self.lines
+            .push(format!("{line} HOP_RESTART_LEAVING why={}", why.as_str()));
+        self.hand_over(now, "leaving for the restart").await;
+    }
+
+    /// De staat een laatste keer naar de kern, met de regel `HOP_STOPPING`.
+    async fn hand_over(&mut self, now: Nanos, what: &str) {
+        let r = self.save_state(now).await;
+        let tasks = self.agent.tasks().count();
+        match r {
+            Ok(n) => self.lines.push(format!(
+                "hop: {what}; state of {tasks} task(s) handed to the kernel ({n} bytes) HOP_STOPPING"
+            )),
+            Err(e) => self.lines.push(format!(
+                "hop: {what}; the state did not reach the kernel: {e} HOP_STOPPING"
+            )),
+        }
+    }
+
     /// Zaait de init-jobs uit `specs` (een JSON-array van jobspecs, zoals
     /// `hopos.init[]`) bij een schone boot; geeft hoeveel jobs de leader
     /// kreeg.
     ///
     /// "Schoon" is aan de aanroeper én hier: de binary roept dit alleen aan
-    /// als [`Node::restore`] niets overnam (en niet faalde: een staat die
-    /// niet te lezen is, is geen lege staat), en hier zaait hij alleen in
+    /// als [`Node::restore`] geen staat vond ([`Kept::is_clean`]; een staat
+    /// die niet te lezen is, is geen lege staat, en een staat zonder jobs
+    /// is een operator die alles verwijderde), en hier zaait hij alleen in
     /// een leader zonder jobs. Zo overschrijft een zaadje nooit wat een
     /// operator of een vorige bewoner neerzette (Go: `agentloop`,
     /// `cleanBoot && len(l.GetJobs()) == 0`). Een spec die niet klopt, is
@@ -466,7 +778,7 @@ impl<S: SystemApi, I: Images> Node<S, I> {
     /// [`Node::handle_routed`]) kan hier niet: dat wordt een luide 502.
     pub async fn handle(&mut self, port: Port, req: &Request, now: Nanos) -> Reply
     where
-        S: crate::flip::KernFlip,
+        S: crate::flip::KernFlip + crate::restart::KernRestart,
     {
         match self.handle_routed(port, req, now).await {
             Routed::Reply(r) => r,
@@ -478,7 +790,7 @@ impl<S: SystemApi, I: Images> Node<S, I> {
     /// een andere node die de verbindingstaak uitvoert (`forward::serve`).
     pub async fn handle_routed(&mut self, port: Port, req: &Request, now: Nanos) -> Routed
     where
-        S: crate::flip::KernFlip,
+        S: crate::flip::KernFlip + crate::restart::KernRestart,
     {
         let mut routed = match port {
             Port::Leader => self.leader_reply(req, now),
@@ -499,6 +811,21 @@ impl<S: SystemApi, I: Images> Node<S, I> {
                         Err(e) => {
                             self.lines
                                 .push(format!("hop: kernel flip failed: {e} HOP_FLIP_FAIL"));
+                            Routed::Reply(Reply::Plain(Response::error(502, &e)))
+                        }
+                    }
+                } else if let Effect::Restart { url, sha256 } = &effect {
+                    match self.restart(url, sha256, now).await {
+                        Ok(()) => {
+                            self.leaving = true;
+                            self.lines.push(String::from(
+                                "hop: the kernel took the restart; this Hop stops now and the next one adopts its cages HOP_RESTART_ACCEPTED",
+                            ));
+                            Routed::Reply(Reply::Plain(resp))
+                        }
+                        Err(e) => {
+                            self.lines
+                                .push(format!("hop: restart of Hop failed: {e} HOP_RESTART_FAIL"));
                             Routed::Reply(Reply::Plain(Response::error(502, &e)))
                         }
                     }
@@ -531,9 +858,9 @@ impl<S: SystemApi, I: Images> Node<S, I> {
     ///
     /// De taken stoppen pas ná de download: een URL die niet werkt, laat
     /// alles draaien. Ze stoppen via de agent (`hold_for_flip`, dezelfde
-    /// Stop-acties als een preemptie, maar de records blijven), dus de jobs
-    /// blijven in de staat op hopfs en de koud herstarte Hop plaatst ze
-    /// opnieuw. Weigert de kern (de FLIP geeft een fout, of deze Hop leeft
+    /// Stop-acties als een preemptie, maar de records blijven), zodat de
+    /// telling van de leader klopt als de kern toch niet springt; springt
+    /// hij, dan plaatst de leader van de cluster ze opnieuw. Weigert de kern (de FLIP geeft een fout, of deze Hop leeft
     /// na [`COLD_FLIP_WAIT`] nog), dan herstarten ze hier
     /// ([`Node::cold_flip_back`]).
     async fn flip(&mut self, url: &str, sha256: &str, cold: bool, now: Nanos) -> Result<(), String>
@@ -562,6 +889,40 @@ impl<S: SystemApi, I: Images> Node<S, I> {
             Err(_) => self.cold_flip_back(now).await,
         }
         r
+    }
+
+    /// RESTART: haal een nieuw image als er een `url` is, leg de staat nu
+    /// bij de kern neer, en vraag de herstart (crate::restart).
+    ///
+    /// Zonder staat geen herstart: de nieuwe Hop zou elke app als bewoner
+    /// van niemand stoppen. Een weigering laat alles draaien en ruimt het
+    /// slot van het image op.
+    async fn restart(&mut self, url: &str, sha256: &str, now: Nanos) -> Result<(), String>
+    where
+        S: crate::restart::KernRestart,
+    {
+        let what = if url.is_empty() {
+            String::from("same image")
+        } else {
+            format!("image {url}")
+        };
+        self.lines.push(format!(
+            "hop: restart of Hop requested ({what}) HOP_RESTART"
+        ));
+        let slot = if url.is_empty() {
+            None
+        } else {
+            Some(crate::restart::fetch(self.runner.system_mut(), &mut self.images, url).await?)
+        };
+        if let Err(e) = self.save_state(now).await {
+            if let Some(slot) = slot {
+                let _ = self.runner.system_mut().stop_slot(slot, 0).await;
+            }
+            return Err(format!(
+                "the state did not reach the kernel, so no restart: {e}"
+            ));
+        }
+        crate::restart::ask(self.runner.system_mut(), slot, sha256).await
     }
 
     /// Waarom dit board nu niet koud kan flippen, als Hop dat al weet: het
@@ -826,6 +1187,7 @@ impl<S: SystemApi, I: Images> Node<S, I> {
         self.runner.pump_logs(now / MILLISECOND).await;
         self.cluster_tick(now);
         self.collect_events();
+        self.keep_state(now).await;
     }
 
     /// Voert acties uit tot de agent niets meer vraagt (begrensd).

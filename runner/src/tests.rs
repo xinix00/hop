@@ -660,6 +660,72 @@ fn kern_picks_the_slot_at_image_begin() {
 }
 
 #[test]
+fn hop_runner_adoption_and_reuse_keep_neighbor() {
+    let mut r = runner(3, &[]);
+    r.system_mut().live(1);
+    r.system_mut().live(2);
+    let got = bl(r.adopt_running(&[("smp".into(), Slot(1)), ("shared".into(), Slot(2))]));
+    assert_eq!(got, ["smp", "shared"]);
+    assert_eq!(run(&mut r, "new", &hop_job()).unwrap(), 3);
+    bl(r.stop(0, &TaskRef { id: "smp", pid: 1 })).unwrap();
+    assert_eq!(run(&mut r, "again", &hop_job()).unwrap(), 1);
+    assert_eq!(r.slot_of("shared"), Some(Slot(2)));
+    assert!(bl(r.system_mut().slot_status(Slot(2))).core_on);
+}
+
+#[test]
+fn adoption_takes_only_running_slots_nobody_owns() {
+    let mut r = runner(4, &[]);
+    r.system_mut().live(1);
+    assert_eq!(run(&mut r, "mine", &hop_job()).unwrap(), 2);
+    // Slot 3 is leeg (de app stopte na de laatste staat), slot 4 stroomt
+    // (een nieuwe start na de laatste staat), slot 0 is de kern.
+    r.system_mut().slots.insert(
+        4,
+        FakeSlot {
+            streaming: true,
+            ..Default::default()
+        },
+    );
+    let want = [
+        (String::from("old"), Slot(1)),
+        (String::from("gone"), Slot(3)),
+        (String::from("streams"), Slot(4)),
+        (String::from("kern"), Slot(0)),
+        (String::from("twin"), Slot(2)),
+        (String::from("mine"), Slot(1)),
+    ];
+    assert_eq!(bl(r.adopt_running(&want)), ["old"]);
+    assert_eq!(r.slot_of("old"), Some(Slot(1)));
+    assert_eq!(r.slot_of("gone"), None);
+    assert_eq!(r.slot_of("twin"), None, "slot 2 is already mine");
+    assert_eq!(
+        r.slot_of("mine"),
+        Some(Slot(2)),
+        "an owned task keeps its cage"
+    );
+    assert_eq!(r.cages_in_use(), 2);
+    // Wat niet overgenomen is, is van niemand: de veger stopt het stromende slot niet
+    // (geen Running), en raakt de overgenomen kooien niet.
+    assert!(bl(r.sweep_strays()).is_empty());
+}
+
+#[test]
+fn adopt_running_restores_logs() {
+    let mut r = runner(3, &[]);
+    r.system_mut().live(2);
+    r.system_mut()
+        .slots
+        .get_mut(&2)
+        .unwrap()
+        .logs
+        .push_back("na de herstart".into());
+    assert_eq!(bl(r.adopt_running(&[("kept".into(), Slot(2))])), ["kept"]);
+    bl(r.pump_logs(0));
+    assert_eq!(tail(&r, 0, "kept"), ["na de herstart"]);
+}
+
+#[test]
 fn sweep_strays_stops_only_the_residents_nobody_owns() {
     let mut r = runner(4, &[]);
     r.system_mut().live(1);

@@ -1304,6 +1304,104 @@ fn update_job_never_resurrects_deleted() {
     assert!(!a.set_job_priority(T0, "gone", 1));
 }
 
+// ---- De overdracht (handoff.rs) -------------------------------------------------
+
+#[test]
+fn handoff_round_trip() {
+    let mut a = hop_agent();
+    let mut j = hop_job("app", 4 << 20);
+    j.command = String::new();
+    let id = a.run(T0, j, false, None).unwrap();
+    a.on_started(T0, &id, Driver::Hop, ok(3));
+    let blob = a.snapshot(Some("{\"jobs\":[]}")).unwrap();
+    let h = Handoff::parse(blob.as_bytes()).unwrap().unwrap();
+    assert_eq!(h.leader.as_deref(), Some("{\"jobs\":[]}"));
+    assert_eq!(h.tasks.len(), 1);
+    assert_eq!((h.tasks[0].id.as_str(), h.tasks[0].pid), (id.as_str(), 3));
+    let mut b = hop_agent();
+    b.adopt(h.jobs, h.tasks);
+    assert_eq!(b.task(&id).unwrap().state, TaskState::Running);
+    assert!(b.get_job("app").is_some());
+    // De reservering reist mee, en de leader telt hem als geplaatst.
+    assert_eq!(b.resource_usage(), a.resource_usage());
+    assert_eq!(b.placed_task_counts().get("app"), Some(&1));
+    // Zonder leader geen veld.
+    let bare = a.snapshot(None).unwrap();
+    assert!(
+        Handoff::parse(bare.as_bytes())
+            .unwrap()
+            .unwrap()
+            .leader
+            .is_none()
+    );
+}
+
+#[test]
+fn handoff_refuses_nonsense() {
+    assert!(Handoff::parse(b"").unwrap().is_none());
+    assert!(Handoff::parse(b"{nee").is_err());
+    assert_eq!(
+        Handoff::parse(br#"{"version":1}"#).unwrap_err(),
+        Error::Version(1),
+        "the file of hopfs (up to 7726782) is not this blob"
+    );
+}
+
+#[test]
+fn every_change_makes_the_state_dirty_once() {
+    let mut a = agent();
+    assert!(!a.take_dirty(), "a fresh agent has nothing to save");
+    let id = run_ok(&mut a, T0, job("keep"));
+    assert!(a.take_dirty());
+    assert!(!a.take_dirty(), "the flag is taken");
+    // Een tik zonder iets te doen verandert niets.
+    a.tick(T0 + S);
+    assert!(!a.take_dirty());
+    assert!(a.stop_task(&id));
+    assert!(a.take_dirty());
+    a.delete_job(T0 + 2 * S, "keep");
+    assert!(a.take_dirty());
+}
+
+/// Eén poll: de opslag hieronder antwoordt meteen, en een host-test heeft geen executor.
+fn ready<F: core::future::Future>(f: F) -> F::Output {
+    let mut f = core::pin::pin!(f);
+    let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+    match f.as_mut().poll(&mut cx) {
+        core::task::Poll::Ready(v) => v,
+        core::task::Poll::Pending => panic!("de geheugen-opslag wacht nooit"),
+    }
+}
+
+/// Een opslag in het geheugen.
+#[derive(Default)]
+struct MemStore(Option<Vec<u8>>);
+
+impl Store for MemStore {
+    async fn save(&mut self, blob: &[u8]) -> core::result::Result<(), StoreError> {
+        self.0 = Some(blob.to_vec());
+        Ok(())
+    }
+    async fn load(&mut self) -> core::result::Result<Option<Vec<u8>>, StoreError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[test]
+fn state_survives_restart_via_store() {
+    let mut a = agent();
+    run_ok(&mut a, T0, job("keep"));
+    let mut store = MemStore::default();
+    let n = ready(a.save_to(&mut store, None)).unwrap();
+    assert_eq!(store.0.as_ref().map(Vec::len), Some(n));
+    let blob = ready(store.load()).unwrap().unwrap();
+    let h = Handoff::parse(&blob).unwrap().unwrap();
+    let mut b = agent();
+    b.adopt(h.jobs, h.tasks);
+    assert_eq!(b.placed_task_counts().get("keep"), Some(&1));
+    assert!(b.take_dirty(), "an adopted state is written again");
+}
+
 // ---- agentloop/loop_test.go ----------------------------------------------------
 
 /// Een discoverer met vaste antwoorden.

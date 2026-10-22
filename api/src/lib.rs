@@ -5,9 +5,9 @@
 //! ...) en de leader-API ([`LeaderApi`], poort P + 1000: `/v1/...`). Hij
 //! bezit GEEN sockets, geen streams en geen klok: een handler krijgt een
 //! [`Request`] en geeft een [`Response`], en waar het antwoord een stroom of
-//! een doorgifte is (een SSE-log, een proxy naar de leader, de kern-flip)
-//! geeft hij er een [`Effect`] (agent-API) of [`LeaderEffect`] (leader-API)
-//! bij dat de adapter uitvoert. De vorm van die stromen op de draad (SSE)
+//! een doorgifte is (een SSE-log, een proxy naar de leader, de kern-flip,
+//! de herstart van Hop zelf) geeft hij er een [`Effect`] (agent-API) of
+//! [`LeaderEffect`] (leader-API) bij dat de adapter uitvoert. De vorm van die stromen op de draad (SSE)
 //! en de rij van meldingen voor `/v1/events` staan ook hier ([`EventLog`]),
 //! zodat de daemon op de host en de bewoner op HopOS dezelfde bytes sturen.
 //!

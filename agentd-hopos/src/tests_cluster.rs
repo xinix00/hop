@@ -1439,3 +1439,158 @@ fn a_failed_forward_is_a_loud_502() {
         "{body}"
     );
 }
+
+// ---- Een herstart van Hop binnen de TTL: er is niets gebeurd -------------------
+
+#[test]
+fn a_hop_restarted_within_the_ttl_keeps_its_lease() {
+    let net = hoplockserver("lock-secret");
+    let cfg = hoplock_cfg();
+    let now = 1_000_000;
+    let mut a = lock::open_lease(&cfg, net.client(), wall_secs);
+    let mut da = Discovery::new(String::from("10.0.0.5:9080"), cfg.ttl_ms);
+    assert_eq!(block_on(lease::claim(&mut da, &mut a, now)), Ok(()));
+    // De herstarte Hop: een nieuwe Discovery en een nieuwe client, hetzelfde
+    // adres. Hij pakt zijn eigen lease meteen terug, ruim binnen de TTL en
+    // zonder nieuwe generatie; een andere node krijgt hem intussen niet.
+    let later = now + 5_000;
+    let mut b = lock::open_lease(&cfg, net.client(), wall_secs);
+    let mut again = Discovery::new(String::from("10.0.0.5:9080"), cfg.ttl_ms);
+    assert_eq!(block_on(lease::claim(&mut again, &mut b, later)), Ok(()));
+    let (got, _) = block_on(b.read()).unwrap();
+    assert_eq!((got.owner.as_str(), got.generation), ("10.0.0.5:9080", 1));
+    let mut c = lock::open_lease(&cfg, net.client(), wall_secs);
+    let mut other = Discovery::new(String::from("10.0.0.6:9080"), cfg.ttl_ms);
+    assert_eq!(
+        block_on(lease::claim(&mut other, &mut c, later + 1)),
+        Err(discovery::Error::LeaseHeld)
+    );
+}
+
+/// De staat die de vorige Hop bij de kern legde: welcome in slot 1, dat de
+/// kern nog als draaiend meldt.
+fn kernel_with_welcome() -> FakeKern {
+    let k = FakeKern::new(4);
+    k.0.borrow_mut().slots.insert(
+        1,
+        hopos_runner::fake::FakeSlot {
+            job: String::from("welcome"),
+            placed: true,
+            memory_limit: 8 << 20,
+            ..Default::default()
+        },
+    );
+    let job = types::Job::from_value(&types::json::parse_str(WELCOME).unwrap(), false).unwrap();
+    let task = types::Task {
+        id: String::from("t-welcome"),
+        job_name: String::from("welcome"),
+        driver: String::from("hop"),
+        state: types::TaskState::Running,
+        pid: 1,
+        cpu_shares: 1024,
+        memory_limit: 8 << 20,
+        ..types::Task::default()
+    };
+    let mut prev = agent::Agent::new(agent::Settings::default());
+    prev.adopt(alloc::vec![job], alloc::vec![task]);
+    k.0.borrow_mut().state = prev.snapshot(None).unwrap().into_bytes();
+    k
+}
+
+/// De gecommitte staat van de cluster in de object-store: welcome, één keer.
+fn committed_welcome() -> Vec<u8> {
+    format!(r#"{{"updated":"2026-10-22T10:00:00Z","jobs":[{WELCOME}]}}"#).into_bytes()
+}
+
+/// Een leider-node na zijn herstart: zijn staat terug (of niet), de
+/// boot-claim raak, de gecommitte staat geladen, en de settle voorbij.
+fn leader_after_restart(adopt: bool) -> (TestNode, Queues, FakeKern) {
+    let k = kernel_with_welcome();
+    let (mut n, q) = clustered_on(&k, || true);
+    if adopt {
+        assert_eq!(block_on(n.restore(T0)), crate::Kept::Adopted(1));
+    }
+    n.cluster_boot(T0);
+    assert_eq!(drain(q.lease), vec![LeaseOp::Claim]);
+    n.on_mail(Mail::Lease(LeaseReply::Claimed(true)), T0);
+    assert_eq!(drain(q.state), vec![StateOp::Load]);
+    n.on_mail(Mail::Loaded(Ok(Some(committed_welcome()))), T0);
+    assert!(said(&mut n, "HOP_STATE_LOADED"));
+    // De settle is één agent-timeout (20 s in deze tests); de leader tikt
+    // om de 10 s.
+    for s in [11, 21, 31, 41] {
+        block_on(n.tick(T0 + s * SECOND));
+    }
+    (n, q, k)
+}
+
+#[test]
+fn a_restarted_leader_does_not_place_its_adopted_tasks_again() {
+    let (n, q, k) = leader_after_restart(true);
+    let tasks: Vec<&types::Task> = n.agent().tasks().collect();
+    assert_eq!(tasks.len(), 1, "{tasks:?}");
+    assert_eq!((tasks[0].id.as_str(), tasks[0].pid), ("t-welcome", 1));
+    assert_eq!(k.0.borrow().slots.len(), 1, "no second welcome");
+    assert!(
+        !drain(q.dispatch)
+            .iter()
+            .any(|c| matches!(c, Remote::Run { .. })),
+        "nothing placed elsewhere either"
+    );
+    assert!(
+        !k.0.borrow()
+            .ops
+            .contains(&abi::systemapi::PrivOp::StopSlot.op())
+    );
+
+    // Zonder de staat uit de kern plaatst dezelfde leader welcome opnieuw
+    // (het verschil dat deze herstart wegneemt).
+    let (n, _q, _k) = leader_after_restart(false);
+    let fresh: Vec<&types::Task> = n.agent().tasks().collect();
+    assert_eq!(fresh.len(), 1, "{fresh:?}");
+    assert_eq!(fresh[0].pid, 0, "a new placement, waiting for its image");
+}
+
+#[test]
+fn a_restarted_follower_reports_the_same_tasks_to_the_leader() {
+    let k = kernel_with_welcome();
+    let (mut n, q) = clustered_on(&k, || true);
+    assert_eq!(block_on(n.restore(T0)), crate::Kept::Adopted(1));
+    n.cluster_boot(T0);
+    drain(q.lease);
+    n.on_mail(Mail::Lease(LeaseReply::Claimed(false)), T0);
+    block_on(n.tick(T0 + 11 * SECOND));
+    assert_eq!(drain(q.lease), vec![LeaseOp::Read]);
+    n.on_mail(
+        Mail::Lease(LeaseReply::Read {
+            leader: Some(String::from("10.0.0.9:9080")),
+            ok: true,
+        }),
+        T0 + 11 * SECOND,
+    );
+    // De eerste registratie bij de leader draagt de overgenomen taak al:
+    // de leader telt hem als geplaatst en plaatst hem niet nog eens.
+    block_on(n.tick(T0 + 22 * SECOND));
+    let jobs = drain(q.link);
+    let [LinkJob::Election { url, body, .. }] = &jobs[..] else {
+        panic!("geen register: {jobs:?}");
+    };
+    assert_eq!(url, "http://10.0.0.9:9080/v1/agents");
+    assert!(body.contains(r#""placed":{"welcome":1}"#), "{body}");
+    // En de takenlijst van de agent (de relay van de leader vraagt hem) noemt hem.
+    let r = routed(
+        &mut n,
+        Port::Agent,
+        &signed_body(Method::Get, "/tasks", ""),
+        T0 + 23 * SECOND,
+    );
+    let Routed::Reply(hop_http::Reply::Plain(resp)) = r else {
+        panic!("{r:?}");
+    };
+    let text = String::from_utf8_lossy(&resp.body);
+    assert!(
+        text.contains("t-welcome") && text.contains(r#""pid":1"#),
+        "{text}"
+    );
+    assert_eq!(k.0.borrow().slots.len(), 1);
+}

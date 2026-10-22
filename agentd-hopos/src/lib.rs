@@ -61,6 +61,7 @@ pub mod mail;
 mod node;
 pub mod objstore;
 pub mod relay;
+pub mod restart;
 pub mod s3;
 pub mod sntp;
 
@@ -68,7 +69,7 @@ pub use env::{BootConfig, BootError};
 pub use fetch::{Connect, HttpImages, Resolve};
 pub use handoff::Handoff;
 pub use hub::{Answer, Hub, Question};
-pub use node::{Cluster, ClusterParts, Images, Node, Port, Sink};
+pub use node::{Cluster, ClusterParts, Images, Kept, Node, Port, Sink};
 
 /// De versie die de agent aan de leader meldt.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

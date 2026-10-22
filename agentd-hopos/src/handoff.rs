@@ -25,6 +25,9 @@ pub struct Handoff<T> {
     /// Welke werker een verbinding heeft (van de overdracht tot [`Handoff::free`]).
     busy: RefCell<Vec<bool>>,
     wakers: RefCell<Vec<Option<Waker>>>,
+    /// Wie wacht tot een werker vrij is ([`Handoff::freed`]): de eigenaar
+    /// die na een herstart van Hop wil weten of zijn antwoord de deur uit is.
+    idle: RefCell<Option<Waker>>,
 }
 
 impl<T> Handoff<T> {
@@ -40,6 +43,7 @@ impl<T> Handoff<T> {
             ready: RefCell::new(ready),
             busy: RefCell::new(busy),
             wakers: RefCell::new(wakers),
+            idle: RefCell::new(None),
         }
     }
 
@@ -85,6 +89,23 @@ impl<T> Handoff<T> {
         if let Some(b) = self.busy.borrow_mut().get_mut(i) {
             *b = false;
         }
+        let w = self.idle.borrow_mut().take();
+        if let Some(w) = w {
+            w.wake();
+        }
+    }
+
+    /// Wacht tot werker `i` zijn verbinding af heeft (geschreven en
+    /// gesloten, [`Handoff::free`]). Eén wachter tegelijk: de eigenaar.
+    pub async fn freed(&self, i: usize) {
+        poll_fn(|cx| {
+            if !self.busy.borrow().get(i).copied().unwrap_or(false) {
+                return Poll::Ready(());
+            }
+            *self.idle.borrow_mut() = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
     }
 
     /// Of elke werker een verbinding heeft: de volgende verbinding zou

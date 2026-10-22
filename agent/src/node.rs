@@ -75,6 +75,9 @@ pub struct Agent {
     refused: BTreeSet<String>,
     next_monitor: Nanos,
     shutting_down: bool,
+    /// De staat veranderde sinds de laatste [`Agent::take_dirty`]: een taak
+    /// kwam of ging, kreeg een kooi of een andere staat, of een job veranderde.
+    dirty: bool,
 }
 
 impl Agent {
@@ -93,6 +96,7 @@ impl Agent {
             refused: BTreeSet::new(),
             next_monitor: 0,
             shutting_down: false,
+            dirty: false,
         }
     }
 
@@ -468,6 +472,7 @@ impl Agent {
     }
 
     fn insert_entry(&mut self, task: Task, first_start: bool) {
+        self.dirty = true;
         self.tasks.insert(
             task.id.clone(),
             Entry {
@@ -546,7 +551,7 @@ impl Agent {
             e.task.state != TaskState::Stopping && self.jobs.contains_key(&e.task.job_name)
         });
         if !alive {
-            self.tasks.remove(id);
+            self.forget(id);
             let task_id = String::from(id);
             self.push(Action::Stop {
                 task_id,
@@ -559,6 +564,7 @@ impl Agent {
             return;
         };
         e.task.state = TaskState::Running;
+        self.dirty = true;
         e.task.pid = ok.pid;
         e.task.ports = ok.ports;
         // Pas vanaf hier draait de app: de aanmaaktijd is geen uptime.
@@ -585,7 +591,7 @@ impl Agent {
     /// Het record weghalen herstelt ook de boekhouding, en dat stopt de storm:
     /// de volgende poging weigert de toelating vooraf (503).
     fn release_unplaceable(&mut self, id: &str) {
-        if let Some(e) = self.tasks.remove(id) {
+        if let Some(e) = self.forget(id) {
             self.push(Action::Notify {
                 job: e.task.job_name,
                 event: Event::Unplaceable,
@@ -598,6 +604,7 @@ impl Agent {
             return;
         };
         e.task.state = TaskState::Failed;
+        self.dirty = true;
         let notify = e.first_start;
         let name = e.task.job_name.clone();
         if notify {
@@ -629,7 +636,7 @@ impl Agent {
         };
         let Some(job) = self.jobs.get(&e.task.job_name) else {
             // De job is weg: de taak ook.
-            self.tasks.remove(id);
+            self.forget(id);
             return;
         };
         let max = job.max_restarts.unwrap_or(DEFAULT_MAX_RESTARTS);
@@ -652,6 +659,7 @@ impl Agent {
         // -1 = onbeperkt; 0 = nooit.
         if max >= 0 && count >= max {
             e.task.state = TaskState::Failed;
+            self.dirty = true;
             e.restart_at = None;
             return;
         }
@@ -674,12 +682,13 @@ impl Agent {
             return;
         };
         let Some(job) = self.jobs.get(&old.task.job_name) else {
-            self.tasks.remove(id);
+            self.forget(id);
             return;
         };
         if self.resolve_job_for_run(job).is_err() {
             if let Some(e) = self.tasks.get_mut(id) {
                 e.task.state = TaskState::Failed;
+                self.dirty = true;
             }
             return;
         }
@@ -694,7 +703,7 @@ impl Agent {
         replacement.restart_count = count.saturating_add(1);
         replacement.last_failed_at = last_failed;
         let new_id = replacement.id.clone();
-        self.tasks.remove(id);
+        self.forget(id);
         self.insert_entry(replacement, false);
         self.begin_start(now, &new_id);
     }
@@ -733,6 +742,7 @@ impl Agent {
                 let name = e.task.job_name.clone();
                 if let Some(e) = self.tasks.get_mut(id) {
                     e.task.state = TaskState::Stopping;
+                    self.dirty = true;
                     e.check = Check::default();
                 }
                 self.push(Action::Notify {
@@ -791,6 +801,7 @@ impl Agent {
         match health::apply(&mut e.check, healthy, now, threshold) {
             Verdict::Unhealthy => {
                 e.task.state = TaskState::Failed;
+                self.dirty = true;
                 e.check = Check::default();
                 self.push(Action::Notify {
                     job: name,
@@ -840,7 +851,7 @@ impl Agent {
     /// Een mislukte fysieke opruiming is runner-quarantaine; hij mag een dode
     /// taak nooit eeuwig in de planner laten staan.
     fn remove_and_stop(&mut self, id: &str) -> bool {
-        match self.tasks.remove(id) {
+        match self.forget(id) {
             Some(e) => {
                 self.push(stop_action(&e.task));
                 true
@@ -878,6 +889,7 @@ impl Agent {
         // De klok mee: zonder deze bump geldt een sync-payload van vóór deze
         // delete nog als nieuwer en importeert hij de job opnieuw (15-07).
         self.state_time = Time(now);
+        self.dirty = true;
         let n = self.stop_job_tasks(name);
         let job = String::from(name);
         self.push(Action::Notify {
@@ -917,6 +929,7 @@ impl Agent {
                 continue;
             }
             e.task.state = TaskState::Stopping;
+            self.dirty = true;
             e.restart_at = None;
             e.held = true;
         }
@@ -940,6 +953,7 @@ impl Agent {
             if let Some(e) = self.tasks.get_mut(id) {
                 e.held = false;
                 e.task.state = TaskState::Failed;
+                self.dirty = true;
             }
             self.restart_fire(now, id);
         }
@@ -1003,6 +1017,7 @@ impl Agent {
         }
         self.jobs.insert(job.name.clone(), job);
         self.state_time = Time(now);
+        self.dirty = true;
         Ok(())
     }
 
@@ -1013,6 +1028,7 @@ impl Agent {
             Some(slot) => {
                 *slot = job;
                 self.state_time = Time(now);
+                self.dirty = true;
                 true
             }
             None => false,
@@ -1025,6 +1041,7 @@ impl Agent {
             Some(j) => {
                 j.priority = Some(priority);
                 self.state_time = Time(now);
+                self.dirty = true;
                 true
             }
             None => false,
@@ -1037,6 +1054,7 @@ impl Agent {
             Some(j) => {
                 j.deploying = deploying;
                 self.state_time = Time(now);
+                self.dirty = true;
                 true
             }
             None => false,
@@ -1048,6 +1066,7 @@ impl Agent {
         self.jobs.remove(name);
         self.refused.remove(name);
         self.state_time = Time(now);
+        self.dirty = true;
     }
 
     /// Wanneer de job-store het laatst veranderde.
@@ -1064,7 +1083,45 @@ impl Agent {
             self.jobs.insert(job.name.clone(), job);
         }
         self.state_time = updated;
+        self.dirty = true;
         Ok(())
+    }
+
+    /// Haalt een taak uit de staat; de staat is dan vies.
+    fn forget(&mut self, id: &str) -> Option<Entry> {
+        self.dirty = true;
+        self.tasks.remove(id)
+    }
+
+    // ---- De overdracht (`crate::handoff`) ---------------------------------------
+
+    /// Of de staat veranderde sinds de vorige aanroep; zet de vlag terug.
+    ///
+    /// Wie de staat ergens neerlegt (op HopOS: bij de kern, zodat een
+    /// herstarte Hop zijn taken terugvindt), vraagt dit na elke ronde en
+    /// schrijft alleen als het `true` is.
+    pub fn take_dirty(&mut self) -> bool {
+        core::mem::take(&mut self.dirty)
+    }
+
+    pub(crate) fn jobs_map(&self) -> &BTreeMap<String, Job> {
+        &self.jobs
+    }
+
+    pub(crate) fn restore_entries(&mut self, jobs: Vec<Job>, tasks: Vec<Task>) {
+        for j in jobs {
+            if !self.jobs.contains_key(&j.name) && self.jobs.len() >= MAX_JOBS {
+                break;
+            }
+            self.jobs.insert(j.name.clone(), j);
+        }
+        self.dirty = true;
+        for t in tasks {
+            if self.tasks.len() >= MAX_TASKS {
+                break;
+            }
+            self.insert_entry(t, false);
+        }
     }
 
     // ---- Voor tests ----------------------------------------------------------

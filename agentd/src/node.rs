@@ -431,10 +431,15 @@ impl Node {
                     }
                 }
             }
-            // De host heeft geen kern om te flippen; NodeApi weigert al met 501.
+            // De host heeft geen kern om te flippen of Hop onder zijn apps te
+            // herstarten; NodeApi weigert al met 501.
             Effect::Flip { .. } => Reply::Plain(Response::error(
                 501,
                 "this node cannot flip its kernel (not a HopOS node)",
+            )),
+            Effect::Restart { .. } => Reply::Plain(Response::error(
+                501,
+                "this node cannot restart Hop under its apps (not a HopOS node)",
             )),
         }
     }

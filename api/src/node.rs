@@ -65,17 +65,27 @@ pub enum Effect {
         /// weigert (HopOS `docs/flip.md`).
         cold: bool,
     },
+    /// Herstart Hop zelf (HopOS): zijn staat bij de kern, de kern stopt hem
+    /// en zet een nieuwe in zijn slot; de apps draaien door.
+    Restart {
+        /// De absolute URL van een nieuw image van Hop; leeg is hetzelfde image.
+        url: String,
+        /// De sha256 van dat image in hex; leeg zonder `url`.
+        sha256: String,
+    },
 }
 
 /// De agent-API.
 #[derive(Clone, Debug, Default)]
 pub struct NodeApi {
     key: Vec<u8>,
+    /// De node is een HopOS-node: `/flip` en `/restart` gaan naar de kern.
     flip_enabled: bool,
 }
 
 impl NodeApi {
-    /// Een API met HMAC-sleutel `key` (leeg = geen authenticatie).
+    /// Een API met HMAC-sleutel `key` (leeg = geen authenticatie);
+    /// `flip_enabled` zet de routes van de kern aan (`/flip`, `/restart`).
     pub fn new(key: &[u8], flip_enabled: bool) -> Self {
         Self {
             key: key.to_vec(),
@@ -130,6 +140,7 @@ impl NodeApi {
             "/tasks" => tasks(agent),
             "/run" => run(agent, now, pool_largest, req),
             "/flip" => return self.flip(req),
+            "/restart" => return self.restart(req),
             _ => {
                 if let Some(name) = path.strip_prefix("/delete/") {
                     delete(agent, now, req, name)
@@ -202,6 +213,61 @@ impl NodeApi {
             "cold flip requested: the tasks on this node stop, the node fetches, verifies and replaces its kernel, and Hop starts again; watch its console and its re-registration"
         } else {
             "flip requested: the node fetches, verifies and replaces its kernel; watch its console and its re-registration"
+        };
+        (reply(202, [("status", s(msg))]), effect)
+    }
+
+    /// `/restart`: Hop herstart zichzelf terwijl de apps doordraaien.
+    ///
+    /// Achter dezelfde HMAC als `/flip`: wie een image van Hop mag
+    /// aanleveren, mag alles. Zonder body (of `{}`) hetzelfde image; met
+    /// `{"url": ..., "sha256": ...}` een nieuw, dat de node eerst ophaalt.
+    /// Het antwoord is een 202 en niet de uitkomst: wie antwoordt, is de
+    /// Hop die zo stopt; de volgende neemt zijn kooien over.
+    fn restart(&self, req: &Request) -> (Response, Effect) {
+        let none = |r| (r, Effect::None);
+        if req.method != Method::Post {
+            return none(Response::error(405, "method not allowed"));
+        }
+        if !self.flip_enabled {
+            return none(Response::error(
+                501,
+                "this node cannot restart Hop under its apps (not a HopOS node)",
+            ));
+        }
+        let parsed;
+        let (url, sum) = if req.body.iter().all(u8::is_ascii_whitespace) {
+            ("", "")
+        } else {
+            let Ok(v) = json::parse(&req.body) else {
+                return none(Response::error(400, "invalid json"));
+            };
+            parsed = v;
+            let Some(o) = parsed.as_object() else {
+                return none(Response::error(400, "body must be an object"));
+            };
+            let field = |k| o.get(k).and_then(Value::as_str).unwrap_or("");
+            (field("url"), field("sha256"))
+        };
+        if url.is_empty() && !sum.is_empty() {
+            return none(Response::error(400, "sha256 without url"));
+        }
+        if !url.is_empty() {
+            if !url.contains("://") {
+                return none(Response::error(400, "url must be absolute"));
+            }
+            if sum.len() != 64 || !sum.bytes().all(|c| c.is_ascii_hexdigit()) {
+                return none(Response::error(400, "sha256 must be 64 hex characters"));
+            }
+        }
+        let msg = if url.is_empty() {
+            "restart requested: Hop hands its state to the kernel and starts again in its slot; the apps keep running"
+        } else {
+            "restart requested: the node fetches and verifies the new Hop, hands its state to the kernel and starts it in its slot; the apps keep running"
+        };
+        let effect = Effect::Restart {
+            url: String::from(url),
+            sha256: String::from(sum),
         };
         (reply(202, [("status", s(msg))]), effect)
     }
