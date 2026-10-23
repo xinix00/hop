@@ -565,14 +565,16 @@ const app = {
     },
 
     // taskCells: de cellen van een taakrij vanaf Core, gedeeld door de takenlijst
-    // van een job en die van een agent. Een systeemtaak heeft geen logs.
+    // van een job en die van een agent. Ook een systeemtaak heeft logs: kern is
+    // de console van HopOS zelf, hop de eigen regels van Hop
+    // (/v1/agents/<id>/logs/kern/stdout en .../hop/stdout).
     taskCells(t) {
         return `<td data-label="Core" class="task-core">${this._esc(this.taskCore(t))}</td>
                     <td data-label="CPU" class="task-cpu">${this.taskCpu(t)}</td>
                     <td data-label="Mem" class="task-mem">${this.taskMem(t)}</td>
                     <td data-label="Restarts" class="task-restarts">${t.restart_count || 0}</td>
                     <td data-label="State"><span class="t-tag t-supplement status task-state ${this._esc(t.state)}">${this._statusContent(this.taskStateLabel(t))}</span></td>
-                    <td class="mobile-actions">${t.state === 'system' ? '' : `<button type="button" class="t-action" data-log-task="${this._esc(t.id)}" data-log-agent="${this._esc(t.agentId)}" data-log-endpoint="${this._esc(t.agentEndpoint || '')}">${icon('terminal')}Logs</button>`}</td>`;
+                    <td class="mobile-actions"><button type="button" class="t-action" data-log-task="${this._esc(t.id)}" data-log-agent="${this._esc(t.agentId)}" data-log-endpoint="${this._esc(t.agentEndpoint || '')}">${icon('terminal')}Logs</button></td>`;
     },
 
     // ── Agent detail ───────────────────────────────

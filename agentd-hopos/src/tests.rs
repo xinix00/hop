@@ -1701,3 +1701,114 @@ fn the_bell_or_the_grace_ends_the_wait_for_the_reply() {
         "the bell wins"
     );
 }
+
+// ---- De logs van de kern en van Hop zelf ----------------------------------------
+
+#[test]
+fn the_kernel_log_reaches_kern_on_the_agent_and_through_the_leader() {
+    let (mut n, k) = node();
+    k.0.borrow_mut().kern_logs.extend([
+        b"HOPOS_BOOT v3.0.17".to_vec(),
+        b"HOPOS_TICK 1 late_ms=0".to_vec(),
+    ]);
+    tick(&mut n, T0 + SECOND);
+    assert!(k.0.borrow().kern_logs.is_empty(), "the tick pumped slot 0");
+    let (status, body) = http(&mut n, Port::Agent, wire("GET", "/logs/kern/stdout", ""));
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("HOPOS_BOOT v3.0.17") && body.contains("HOPOS_TICK 1"),
+        "{body}"
+    );
+    // Via de leader, zoals het dashboard hem vraagt: de levende tail.
+    let dash = signed(Method::Get, "/v1/agents/n1/logs/kern/stdout");
+    let Reply::Stream { ask, .. } = block_on(n.handle(Port::Leader, &dash, T0)) else {
+        panic!("the dashboard's kern log is no live tail");
+    };
+    let c = n.poll(&ask, T0);
+    assert_eq!(
+        (c.text.as_str(), c.seq, c.done),
+        (
+            "data: HOPOS_BOOT v3.0.17\n\ndata: HOPOS_TICK 1 late_ms=0\n\n",
+            2,
+            false
+        )
+    );
+    // En hij loopt door: een nieuwe regel van de kern komt er als enige bij.
+    k.0.borrow_mut()
+        .kern_logs
+        .push_back(b"HOPOS_TICK 2".to_vec());
+    tick(&mut n, T0 + 2 * SECOND);
+    let again = Ask::Logs {
+        task_id: String::from("kern"),
+        stream: api::LogStream::Stdout,
+        seq: c.seq,
+    };
+    let c2 = n.poll(&again, T0 + 2 * SECOND);
+    assert_eq!(
+        (c2.text.as_str(), c2.done),
+        ("data: HOPOS_TICK 2\n\n", false)
+    );
+    n.stream_done();
+}
+
+#[test]
+fn an_older_kernel_without_its_own_log_says_so_once() {
+    let (mut n, k) = node();
+    k.0.borrow_mut().no_kern_logs = true;
+    for s in 1..=10 {
+        tick(&mut n, T0 + s * SECOND);
+    }
+    let lines = n.take_lines();
+    let none: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("HOP_KERN_LOG_NONE"))
+        .collect();
+    assert_eq!(none.len(), 1, "{lines:?}");
+    // Eén vraag naar slot 0 in tien tikken: daarna pas na een minuut.
+    let asked =
+        k.0.borrow()
+            .frames
+            .iter()
+            .filter_map(|f| {
+                abi::hopabi::decode_req(&f[abi::systemapi::HEADER_LEN..])
+                    .ok()
+                    .map(|r| (r.op, r.off))
+            })
+            .filter(|&(op, off)| op == PrivOp::NextLog.op() && off == 0)
+            .count();
+    assert_eq!(asked, 1);
+    // Een flip naar een nieuwe kern: na de minuut komen de regels, met één regel.
+    k.0.borrow_mut().no_kern_logs = false;
+    k.0.borrow_mut()
+        .kern_logs
+        .push_back(b"HOPOS_FLIP_SETTLED".to_vec());
+    tick(&mut n, T0 + 70 * SECOND);
+    assert!(n.take_lines().iter().any(|l| l.contains("HOP_KERN_LOG_ON")));
+    let (_, body) = http(&mut n, Port::Agent, wire("GET", "/logs/kern/stdout", ""));
+    assert!(body.contains("HOPOS_FLIP_SETTLED"), "{body}");
+}
+
+#[test]
+fn hop_keeps_its_own_lines_in_the_ring_of_hop() {
+    let (mut n, _k) = node();
+    // De regels van de node (HOP_LEADER bij de start) gaan erin zodra de
+    // binary ze op de console zet (take_lines), en de regels van de andere
+    // taken via hop_line.
+    let lines = n.take_lines();
+    assert!(lines.iter().any(|l| l.contains("HOP_LEADER")), "{lines:?}");
+    n.hop_line("hop: agent up node=n1 HOP_UP");
+    let (status, body) = http(&mut n, Port::Agent, wire("GET", "/logs/hop/stdout", ""));
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("HOP_LEADER") && body.contains("HOP_UP"),
+        "{body}"
+    );
+    let snap = signed(Method::Get, "/v1/agents/n1/logs/hop/stdout?follow=0");
+    let Reply::Events { lines, .. } = block_on(n.handle(Port::Leader, &snap, T0)) else {
+        panic!("no snapshot of hop");
+    };
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some("hop: agent up node=n1 HOP_UP")
+    );
+}

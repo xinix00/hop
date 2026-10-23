@@ -39,6 +39,33 @@ pub const MAX_CONCURRENT_DOWNLOADS: usize = 4;
 /// Hoe lang een logregel uit de kern maximaal is; langer wordt afgekapt.
 const LOG_LINE_MAX: usize = 512;
 
+/// Hoeveel regels de ringen van de systeemtaken `kern` en `hop` bewaren.
+///
+/// Meer dan een app (50): de kern zet elke seconde een `HOPOS_TICK` op zijn
+/// console, en wie in het dashboard kijkt wat er net gebeurde, wil meer
+/// zien dan de laatste minuut ticks. Twee ringen van 200 regels van
+/// hoogstens 512 bytes is op het slechtste 200 KB, op een node met minstens
+/// 256 MB.
+pub const SYSTEM_LOG_LINES: usize = 200;
+
+/// Hoeveel regels van de kern zelf één pomprond hoogstens haalt: elke
+/// regel is een call naar de kern, en de rest van de tik wacht erop. Wat
+/// blijft liggen, komt de volgende tik.
+const KERN_LINES_PER_PUMP: usize = 256;
+
+/// Na een weigering van de kernlogs (een kern van vóór de kernlogs) vraagt
+/// de pomp het zo vaak opnieuw: een warme flip kan een nieuwe kern brengen.
+pub const KERN_LOG_RETRY_MS: u64 = 60_000;
+
+/// Wat de pomp van de kernlogs de eigenaar te melden heeft.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KernLogNote {
+    /// De kern weigerde de vraag (de eerste keer; daarna stil tot hij wel antwoordt).
+    Refused(SysError),
+    /// De kern geeft zijn regels weer, na een weigering.
+    Back,
+}
+
 /// Waar de start van een taak is.
 #[derive(Debug)]
 enum Phase {
@@ -82,19 +109,66 @@ pub struct HopRunner<S> {
     cages: BTreeMap<String, Cage>,
     in_use: BTreeMap<Slot, String>,
     downloads: usize,
+    /// De kern weigerde zijn eigen regels: vanaf wanneer opnieuw vragen (ms).
+    kern_refused: Option<u64>,
 }
 
 impl<S: SystemApi> HopRunner<S> {
     /// Een runner op `sys`; `node_attrs` gaan als `ER_ATTR_*` mee naar elke app.
     pub fn new(sys: S, node_attrs: BTreeMap<String, String>, logs: LogPolicy) -> Self {
+        let mut logs = LogStore::new(logs);
+        // De systeemtaken hebben hun ring vanaf het begin: `kern` vult de
+        // pomp ([`HopRunner::pump_kern_logs`]), `hop` de eigenaar met zijn
+        // eigen regels ([`HopRunner::system_line`]).
+        logs.open_with(types::KERN_TASK, SYSTEM_LOG_LINES);
+        logs.open_with(types::HOP_TASK, SYSTEM_LOG_LINES);
         Self {
             sys,
             node_attrs,
-            logs: LogStore::new(logs),
+            logs,
             cages: BTreeMap::new(),
             in_use: BTreeMap::new(),
             downloads: 0,
+            kern_refused: None,
         }
+    }
+
+    /// Schrijft een regel in de ring van een systeemtaak (`kern` of `hop`).
+    pub fn system_line(&mut self, task: &str, line: &str) {
+        if let Some(ring) = self.logs.live_mut(task, Stream::Stdout) {
+            ring.write(line);
+        }
+    }
+
+    /// Haalt de consoleregels van de kern zelf in de ring van `kern`.
+    ///
+    /// Zoals [`HopRunner::pump_logs`] voor de apps, met slot 0 (`NEXT_LOG`,
+    /// `off` 0). Weigert de kern (HopOS v3.0.16 en eerder), dan vraagt hij
+    /// het pas na [`KERN_LOG_RETRY_MS`] opnieuw, niet elke tik; de eerste
+    /// weigering en de terugkeer komen als [`KernLogNote`] terug, zodat de
+    /// eigenaar er één regel van maakt.
+    pub async fn pump_kern_logs(&mut self, now: u64) -> Option<KernLogNote> {
+        if self.kern_refused.is_some_and(|at| now < at) {
+            return None;
+        }
+        let was_refused = self.kern_refused.is_some();
+        let mut buf = [0u8; LOG_LINE_MAX];
+        for _ in 0..KERN_LINES_PER_PUMP {
+            match self.sys.next_kern_line(&mut buf).await {
+                Ok(Some(n)) => {
+                    let line = buf.get(..n).unwrap_or(&[]);
+                    let text = core::str::from_utf8(line).unwrap_or("<log line not utf-8>");
+                    self.system_line(types::KERN_TASK, text);
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    self.kern_refused = Some(now.saturating_add(KERN_LOG_RETRY_MS));
+                    return (!was_refused).then_some(KernLogNote::Refused(e));
+                }
+            }
+        }
+        self.kern_refused = None;
+        was_refused.then_some(KernLogNote::Back)
     }
 
     /// De kern-kant (tests en diagnose).

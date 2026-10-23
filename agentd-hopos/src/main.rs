@@ -47,7 +47,8 @@
 //! Markers op het log: `HOP_UP`, `HOP_LEADER`, `HOP_JOB_PLACED slot=N`,
 //! `HOP_CLOCK_SYNCED`, `HOP_INIT_SEEDED`, `HOP_ADOPTED n=N`,
 //! `HOP_STRAY_STOPPED slot=N`, `HOP_RESTART`, `HOP_RESTART_ACCEPTED`,
-//! `HOP_RESTART_LEAVING why=replied|grace|bell`, `HOP_STOPPING`, en de weigeringen en degradaties `HOP_RESTART_FAIL`,
+//! `HOP_RESTART_LEAVING why=replied|grace|bell`, `HOP_STOPPING`,
+//! `HOP_KERN_LOG_ON`, `HOP_KERN_LOG_NONE` (een kern zonder eigen log), en de weigeringen en degradaties `HOP_RESTART_FAIL`,
 //! `HOP_KERNEL_STATE_NONE`, `HOP_KERNEL_STATE_FAIL`, `HOP_ADOPT_SKIPPED`,
 //! `HOPOS_API_NO_AUTH`, `HOPOS_API_INSECURE`, `HOP_NET_FAIL`,
 //! `HOP_SNTP_FAIL`, `HOP_CLOCK_FAIL`, `HOP_TLS_ENTROPY_WEAK`, `HOP_TLS_ENTROPY_HW`,
@@ -168,6 +169,27 @@ static STATE_Q: StateQueue = Mailbox::new();
 static DISPATCH_Q: DispatchQueue = Mailbox::new();
 /// De brievenbus van de eigenaar.
 static INBOX: Inbox = Mailbox::new();
+
+/// De eigen regels van Hop die niet uit de [`Node`] komen (de taken van de
+/// binary: klok, store, de start). [`say!`] zet ze op de console én hier; de
+/// eigenaar zet ze in de ring van de systeemtaak `hop` (`/logs/hop/stdout`),
+/// in het proces en niet via de console van de kern. Vol is droppen: een
+/// logregel mag de node nooit ophouden.
+static HOP_LOG: Mailbox<String, HOP_LOG_Q> = Mailbox::new();
+
+/// Zoveel regels wachten hoogstens op de eigenaar: de start zegt er een stuk
+/// of tien voordat de node bestaat.
+const HOP_LOG_Q: usize = 32;
+
+/// `applib::log!` met een kopie in [`HOP_LOG`]: een regel van Hop op de
+/// console en in de ring van `hop`.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        let line = format!($($arg)*);
+        log!("{line}");
+        let _ = HOP_LOG.try_send(line);
+    }};
+}
 
 /// De rij met opdrachten naar de downloadtaak.
 static ORDERS: Orders = Mailbox::new();
@@ -346,7 +368,7 @@ async fn clock_task(net: &'static Net, exec: &'static Exec, server: String, port
                     Ok(()) => {
                         CLOCK_SYNCED.store(true, Relaxed);
                         fails = 0;
-                        log!(
+                        say!(
                             "hop: clock set from {server} (stratum {}, delay {} us) to {} s HOP_CLOCK_SYNCED",
                             sample.stratum,
                             sample.delay_ns / 1000,
@@ -355,7 +377,7 @@ async fn clock_task(net: &'static Net, exec: &'static Exec, server: String, port
                         NTP_EVERY
                     }
                     Err(e) => {
-                        log!("hop: SET_CLOCK refused by the kernel: {e} HOP_CLOCK_FAIL");
+                        say!("hop: SET_CLOCK refused by the kernel: {e} HOP_CLOCK_FAIL");
                         NTP_RETRY
                     }
                 }
@@ -363,7 +385,7 @@ async fn clock_task(net: &'static Net, exec: &'static Exec, server: String, port
             Err(e) => {
                 fails = fails.saturating_add(1);
                 if fails <= NTP_LOUD || fails.is_multiple_of(12) {
-                    log!(
+                    say!(
                         "hop: SNTP {server}:{port} failed ({fails}x): {e}; the wall clock is not synced, https downloads wait for it HOP_SNTP_FAIL"
                     );
                 }
@@ -408,12 +430,12 @@ async fn store_task(
             trusted_secs,
         );
         if b.is_plain_http() {
-            log!(
+            say!(
                 "hop: object store {} is plain http: requests are signed but readable on the way; use https outside a test HOP_STORE_PLAIN_HTTP",
                 cfg.endpoint
             );
         }
-        log!(
+        say!(
             "hop: object store for apps: {} bucket {} under apps/{cluster}/ HOP_STORE_UP",
             cfg.endpoint,
             cfg.bucket
@@ -421,7 +443,7 @@ async fn store_task(
         b
     });
     if bucket.is_none() {
-        log!(
+        say!(
             "hop: no object store configured (hopos.s3.*); app store calls are refused HOP_STORE_NONE"
         );
     }
@@ -437,7 +459,7 @@ async fn store_task(
                     runner::StoreStatus::Ok | runner::StoreStatus::NotFound
                 ) =>
             {
-                log!(
+                say!(
                     "hop: store {} {} for slot {}: {} HOP_STORE_FAIL",
                     o.task.op.name(),
                     o.task.key,
@@ -445,7 +467,7 @@ async fn store_task(
                     o.why
                 )
             }
-            Ok(Some(o)) if !o.delivered => log!(
+            Ok(Some(o)) if !o.delivered => say!(
                 "hop: store {} {} for slot {}: the task was gone, result dropped HOP_STORE_GONE",
                 o.task.op.name(),
                 o.task.key,
@@ -457,7 +479,7 @@ async fn store_task(
                 // paar keer, dan eens per minuut.
                 refused = refused.saturating_add(1);
                 if refused <= 3 || refused.is_multiple_of(60) {
-                    log!("hop: NEXT_STORE failed ({refused}x): {e} HOP_STORE_KERNEL");
+                    say!("hop: NEXT_STORE failed ({refused}x): {e} HOP_STORE_KERNEL");
                 }
                 exec.after(Duration::from_secs(1)).await;
             }
@@ -473,13 +495,13 @@ async fn store_task(
 fn entropy(app: &App) -> Rng {
     let rng = Rng::open(app);
     match rng.origin() {
-        o if o.is_hardware() => log!(
+        o if o.is_hardware() => say!(
             "hop: TLS randomness from the kernel seed ({o}, hardware) mixed with timer jitter ({JITTER_ROUNDS} samples) HOP_TLS_ENTROPY_HW source={o}"
         ),
-        Origin::None => log!(
+        Origin::None => say!(
             "hop: TLS randomness from timer jitter only ({JITTER_ROUNDS} samples): the kernel put no seed on the control page (an older kernel) HOP_TLS_ENTROPY_WEAK"
         ),
-        o => log!(
+        o => say!(
             "hop: TLS randomness from the kernel seed and timer jitter ({JITTER_ROUNDS} samples), but the kernel seeds itself from {o}: this node has no hardware RNG HOP_TLS_ENTROPY_WEAK"
         ),
     }
@@ -534,7 +556,7 @@ async fn start_cluster(
         cluster_client(app, net, exec, 2, CLUSTER_IDLE),
         wall_secs,
     );
-    log!(
+    say!(
         "hop: cluster state in {} HOP_STATE_STORE",
         lock::StateBackend::describe(&state)
     );
@@ -639,12 +661,12 @@ async fn init_specs(cfg: &BootConfig, net: &'static Net) -> Option<String> {
         Ok(s) => usize::try_from(s).unwrap_or(usize::MAX),
         Err(applib::sys::Error::NotFound { .. }) => return None,
         Err(e) => {
-            log!("hop: {INIT_JOBS_FILE}: {e}; no init jobs HOP_INIT_FAIL");
+            say!("hop: {INIT_JOBS_FILE}: {e}; no init jobs HOP_INIT_FAIL");
             return None;
         }
     };
     if size > INIT_FILE_MAX {
-        log!(
+        say!(
             "hop: {INIT_JOBS_FILE} is {size} bytes, limit {INIT_FILE_MAX}; no init jobs HOP_INIT_FAIL"
         );
         return None;
@@ -663,7 +685,7 @@ async fn init_specs(cfg: &BootConfig, net: &'static Net) -> Option<String> {
             Ok(0) => break,
             Ok(n) => at += n,
             Err(e) => {
-                log!("hop: {INIT_JOBS_FILE}: {e}; no init jobs HOP_INIT_FAIL");
+                say!("hop: {INIT_JOBS_FILE}: {e}; no init jobs HOP_INIT_FAIL");
                 return None;
             }
         }
@@ -672,7 +694,7 @@ async fn init_specs(cfg: &BootConfig, net: &'static Net) -> Option<String> {
     match String::from_utf8(buf) {
         Ok(s) => Some(s),
         Err(_) => {
-            log!("hop: {INIT_JOBS_FILE} is not UTF-8; no init jobs HOP_INIT_FAIL");
+            say!("hop: {INIT_JOBS_FILE} is not UTF-8; no init jobs HOP_INIT_FAIL");
             None
         }
     }
@@ -699,7 +721,7 @@ where
             // Kan alleen met afgebroken opdrachten die de taak nog niet
             // oversloeg; de volgende flush probeert het opnieuw.
             node.order_back(&back);
-            log!(
+            say!(
                 "hop: download {seq} waits: the download queue is full ({}) HOP_DOWNLOAD_QUEUE_FULL",
                 download::ORDERS
             );
@@ -722,7 +744,7 @@ async fn accept(
         let mut stream = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
-                log!("hop: accept on :{number}: {e}");
+                say!("hop: accept on :{number}: {e}");
                 exec.after(Duration::from_millis(100)).await;
                 continue;
             }
@@ -824,7 +846,7 @@ fn bind(net: &'static Net, number: u16) -> Option<TcpListener> {
     match net.tcp_listen(number) {
         Ok(l) => Some(l),
         Err(e) => {
-            log!("hop: cannot listen on :{number}: {e} HOP_LISTEN_FAIL");
+            say!("hop: cannot listen on :{number}: {e} HOP_LISTEN_FAIL");
             None
         }
     }
@@ -832,11 +854,11 @@ fn bind(net: &'static Net, number: u16) -> Option<TcpListener> {
 
 async fn resident(app: &'static App) {
     let exec: &'static Exec = EXEC.get();
-    log!("hop: resident starting in slot {} HOP_BOOT", app.slot());
+    say!("hop: resident starting in slot {} HOP_BOOT", app.slot());
     let net = match appnet::up(app) {
         Ok(n) => n,
         Err(e) => {
-            log!("hop: no network, no API: {e} HOP_NET_FAIL");
+            say!("hop: no network, no API: {e} HOP_NET_FAIL");
             return;
         }
     };
@@ -847,16 +869,16 @@ async fn resident(app: &'static App) {
         Err(e) => {
             // Fail closed, zoals de Go-kern: de bewoner blijft leven (de
             // heartbeat loopt) maar opent geen API.
-            log!("hop: REFUSING to start agent/leader: {e} HOPOS_API_NO_AUTH");
+            say!("hop: REFUSING to start agent/leader: {e} HOPOS_API_NO_AUTH");
             core::future::pending::<()>().await;
             return;
         }
     };
     if cfg.insecure {
-        log!("hop: WARNING API authentication is OFF (HOPOS_INSECURE=1) HOPOS_API_INSECURE");
+        say!("hop: WARNING API authentication is OFF (HOPOS_INSECURE=1) HOPOS_API_INSECURE");
     }
     if cfg.insecure_ignored {
-        log!("hop: HOPOS_INSECURE=1 ignored: HOPOS_APIKEY is set, the API authenticates");
+        say!("hop: HOPOS_INSECURE=1 ignored: HOPOS_APIKEY is set, the API authenticates");
     }
     // De lock van de cluster (`HOPOS_LOCK_URL`, of `HOPOS_LOCK_TYPE=s3`); zonder
     // blijft de node de standalone leader. Een lock die niet klopt, is een
@@ -869,25 +891,25 @@ async fn resident(app: &'static App) {
     ) {
         Ok(c) => c,
         Err(e) => {
-            log!("hop: REFUSING to start agent/leader: {e} HOP_LOCK_BAD");
+            say!("hop: REFUSING to start agent/leader: {e} HOP_LOCK_BAD");
             core::future::pending::<()>().await;
             return;
         }
     };
     if cfg.memory_defaulted {
-        log!(
+        say!(
             "hop: HOPOS_MEMORY not set; planning against {} bytes HOP_MEMORY_DEFAULT",
             cfg.memory
         );
     }
     if app.wall_ns().is_none() {
-        log!("hop: no wall clock from the kernel; task times count from boot HOP_NO_CLOCK");
+        say!("hop: no wall clock from the kernel; task times count from boot HOP_NO_CLOCK");
     }
 
     // De tijdserver: `HOPOS_NTP` (`host` of `host:poort`), anders pool.ntp.org.
     let (ntp_host, ntp_port) = sntp::server_from(app.env(sntp::ENV_NTP));
     if let Err(e) = exec.spawn(clock_task(net, exec, ntp_host, ntp_port)) {
-        log!("hop: cannot spawn the clock task: {e}; no SNTP, https refused HOP_SNTP_FAIL");
+        say!("hop: cannot spawn the clock task: {e}; no SNTP, https refused HOP_SNTP_FAIL");
     }
     if let Err(e) = exec.spawn(store_task(
         app,
@@ -896,7 +918,7 @@ async fn resident(app: &'static App) {
         cfg.s3.clone(),
         cfg.cluster.clone(),
     )) {
-        log!(
+        say!(
             "hop: cannot spawn the store task: {e}; app store calls wait and fail HOP_STORE_KERNEL"
         );
     }
@@ -913,11 +935,11 @@ async fn resident(app: &'static App) {
     // downloader voor de kernbundel van een flip (zeldzaam, en die wacht op
     // de kern zelf, crate::flip).
     let Some((pieces_tx, mut pieces)) = PIECES.split() else {
-        log!("hop: the download queue was already taken HOP_SPAWN_FAIL");
+        say!("hop: the download queue was already taken HOP_SPAWN_FAIL");
         return;
     };
     if let Err(e) = exec.spawn(download::download_task(images, &ORDERS, pieces_tx, &WANTED)) {
-        log!("hop: cannot spawn the download task: {e} HOP_SPAWN_FAIL");
+        say!("hop: cannot spawn the download task: {e} HOP_SPAWN_FAIL");
         return;
     }
     let images = HttpImages::new(
@@ -932,7 +954,7 @@ async fn resident(app: &'static App) {
     let seen = match lock::advertised(&cfg, |k| app.env(k).map(String::from)) {
         Ok(c) => c,
         Err(e) => {
-            log!("hop: REFUSING to start agent/leader: {e} HOP_LOCK_BAD");
+            say!("hop: REFUSING to start agent/leader: {e} HOP_LOCK_BAD");
             core::future::pending::<()>().await;
             return;
         }
@@ -947,7 +969,7 @@ async fn resident(app: &'static App) {
             match start_cluster(app, net, exec, &seen, cc, specs).await {
                 Ok(parts) => Node::new_clustered(&seen, sys, images, now(app, exec), parts),
                 Err(e) => {
-                    log!("hop: cannot start the cluster: {e} HOP_SPAWN_FAIL");
+                    say!("hop: cannot start the cluster: {e} HOP_SPAWN_FAIL");
                     return;
                 }
             }
@@ -957,6 +979,9 @@ async fn resident(app: &'static App) {
     // van deze, vóór de veger en vóór de eerste registratie bij een leader.
     // Een blob in kerngeheugen sterft met de boot, dus geen spook van een
     // vorige (7726782). Wat daarna nog draait, is van niemand.
+    while let Some(l) = HOP_LOG.try_recv() {
+        node.hop_line(&l);
+    }
     let kept = node.restore(now(app, exec)).await;
     node.sweep_strays().await;
     flush(&mut node);
@@ -970,7 +995,7 @@ async fn resident(app: &'static App) {
         && let Some(specs) = init_specs(&cfg, net).await
     {
         if let Err(e) = node.seed_init_jobs(&specs, now(app, exec)).await {
-            log!("hop: init jobs not seeded: {e} HOP_INIT_FAIL");
+            say!("hop: init jobs not seeded: {e} HOP_INIT_FAIL");
         }
         flush(&mut node);
     }
@@ -1006,11 +1031,11 @@ async fn resident(app: &'static App) {
             spawned = exec.spawn(work(pool, i, exec, hub, first_slot + i, port, client));
         }
         if let Err(e) = spawned {
-            log!("hop: cannot spawn the listeners: {e} HOP_SPAWN_FAIL");
+            say!("hop: cannot spawn the listeners: {e} HOP_SPAWN_FAIL");
             return;
         }
     }
-    log!(
+    say!(
         "hop: agent up node={} cluster={} agent=:{} leader=:{} cores={} system={} HOP_UP",
         cfg.node_id,
         cfg.cluster,
@@ -1052,6 +1077,10 @@ async fn resident(app: &'static App) {
                 Question::StreamDone => node.stream_done(),
             }
             flush(&mut node);
+        }
+        // De regels van de andere taken van Hop naar de ring van `hop`.
+        while let Some(l) = HOP_LOG.try_recv() {
+            node.hop_line(&l);
         }
         // De antwoorden van de taken van de cluster (lease, link, staat,
         // dispatch); standalone blijft de inbox leeg.

@@ -493,3 +493,32 @@ fn store_ops_speak_the_wire_of_abi() {
         [0x47, 0x47, 0x48, 0x48, 0x4A, 0x4A, 0x47, 0x49, 0x4A]
     );
 }
+
+#[test]
+fn the_kernel_hands_out_its_own_lines_on_slot_0() {
+    let (mut s, k) = sys(4);
+    k.0.borrow_mut()
+        .kern_logs
+        .push_back(b"HOPOS_TICK 7 late_ms=0".to_vec());
+    let mut buf = [0u8; 64];
+    assert_eq!(bl(s.next_kern_line(&mut buf)), Ok(Some(22)));
+    assert_eq!(&buf[..22], b"HOPOS_TICK 7 late_ms=0");
+    assert_eq!(bl(s.next_kern_line(&mut buf)), Ok(None));
+    // De frame: NEXT_LOG met off 0.
+    let f = k.0.borrow().frames.last().unwrap().clone();
+    let req = hopabi::decode_req(&f[systemapi::HEADER_LEN..]).unwrap();
+    assert_eq!((req.op, req.off), (PrivOp::NextLog.op(), 0));
+}
+
+#[test]
+fn an_older_kernel_refuses_slot_0_and_the_connection_stays() {
+    let (mut s, k) = sys(4);
+    k.0.borrow_mut().no_kern_logs = true;
+    let mut buf = [0u8; 64];
+    assert!(matches!(
+        bl(s.next_kern_line(&mut buf)),
+        Err(SysError::Refused(_))
+    ));
+    bl(s.set_clock(7)).unwrap();
+    assert_eq!(k.0.borrow().dials, 1);
+}

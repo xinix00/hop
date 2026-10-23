@@ -37,7 +37,9 @@ pub mod time;
 pub use error::{Error, NAME_BYTES, Name};
 pub use job::{Artifact, CheckType, Driver, HealthCheck, Job, UpdatePolicy};
 pub use map::Map;
-pub use task::{Agent, HOP_SLOT, KERN_SLOT, SysUsage, Task, TaskState, Telemetry};
+pub use task::{
+    Agent, HOP_SLOT, HOP_TASK, KERN_SLOT, KERN_TASK, SysUsage, Task, TaskState, Telemetry,
+};
 pub use time::{Nanos, Time};
 
 /// Het resultaat van elke faalbare handeling in deze crate.

@@ -49,7 +49,10 @@ use core::fmt;
 use core::future::Future;
 
 pub use env::{attr_env_vars, env_key, port_env_vars};
-pub use hopos::{HOP_STOP_TIMEOUT_MS, HopRunner, MAX_CONCURRENT_DOWNLOADS};
+pub use hopos::{
+    HOP_STOP_TIMEOUT_MS, HopRunner, KERN_LOG_RETRY_MS, KernLogNote, MAX_CONCURRENT_DOWNLOADS,
+    SYSTEM_LOG_LINES,
+};
 pub use logs::{LogPolicy, LogRing, LogStore};
 pub use store::{StoreOp, StoreStatus, StoreTask};
 pub use system::{

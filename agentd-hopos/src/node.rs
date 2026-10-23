@@ -761,8 +761,21 @@ impl<S: SystemApi + Store, I: Images> Node<S, I> {
     }
 
     /// De regels voor de console sinds de vorige keer.
+    ///
+    /// Ze gaan ook in de ring van de systeemtaak `hop` (`/logs/hop/stdout`):
+    /// in het proces, niet via de console van de kern.
     pub fn take_lines(&mut self) -> Vec<String> {
-        core::mem::take(&mut self.lines)
+        let lines = core::mem::take(&mut self.lines);
+        for l in &lines {
+            self.runner.system_line(types::HOP_TASK, l);
+        }
+        lines
+    }
+
+    /// Een regel van Hop die niet uit de node kwam (de kloktaak, de
+    /// store-taak, de start van de binary): ook in de ring van `hop`.
+    pub fn hop_line(&mut self, line: &str) {
+        self.runner.system_line(types::HOP_TASK, line);
     }
 
     /// Eén keer een regel over iets dat nog niet aangesloten is, niet per tik.
@@ -1185,6 +1198,16 @@ impl<S: SystemApi + Store, I: Images> Node<S, I> {
         self.run_actions(now, actions).await;
         self.drain(now).await;
         self.runner.pump_logs(now / MILLISECOND).await;
+        match self.runner.pump_kern_logs(now / MILLISECOND).await {
+            Some(runner::KernLogNote::Refused(e)) => self.lines.push(format!(
+                "hop: this kernel does not hand out its own log lines ({e}); /logs/kern/stdout stays empty, asking again every {} s HOP_KERN_LOG_NONE",
+                runner::KERN_LOG_RETRY_MS / 1000
+            )),
+            Some(runner::KernLogNote::Back) => self.lines.push(String::from(
+                "hop: the kernel hands out its own log lines now; /logs/kern/stdout has them HOP_KERN_LOG_ON",
+            )),
+            None => {}
+        }
         self.cluster_tick(now);
         self.collect_events();
         self.keep_state(now).await;

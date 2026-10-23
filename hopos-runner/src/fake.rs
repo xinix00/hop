@@ -110,6 +110,11 @@ pub struct KernState {
     pub restart_ok: bool,
     /// Elke aangenomen `HOP_RESTART`: (slot of 0, som, termijn in ms).
     pub restarts: Vec<(u64, String, u64)>,
+    /// De consoleregels van de kern zelf (`NEXT_LOG` op slot 0).
+    pub kern_logs: VecDeque<Vec<u8>>,
+    /// Een kern van vóór de kernlogs (v3.0.16): `NEXT_LOG` op slot 0 is een
+    /// slot buiten bereik.
+    pub no_kern_logs: bool,
 }
 
 /// Eén store-call van een app in de nep-kern. De bestanden van de app zijn
@@ -396,8 +401,15 @@ impl FakeKern {
                 };
                 ok(0, &info.encode())
             }
+            Some(PrivOp::NextLog) if req.off == 0 && k.no_kern_logs => {
+                err("slot 0 out of range 1..64")
+            }
             Some(PrivOp::NextLog) => {
-                let line = k.slots.get_mut(&req.off).and_then(|s| s.logs.pop_front());
+                let line = if req.off == 0 {
+                    k.kern_logs.pop_front()
+                } else {
+                    k.slots.get_mut(&req.off).and_then(|s| s.logs.pop_front())
+                };
                 match line {
                     Some(mut l) => {
                         l.truncate(usize::try_from(req.n).unwrap_or(usize::MAX));

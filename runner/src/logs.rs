@@ -166,10 +166,16 @@ impl LogStore {
 
     /// Zet verse ringen klaar voor `task_id`; een hergebruikt id krijgt nooit de oude regels.
     pub fn open(&mut self, task_id: &str) {
+        self.open_with(task_id, self.policy.tail_lines);
+    }
+
+    /// [`LogStore::open`] met `lines` regels per stroom in plaats van het beleid.
+    pub fn open_with(&mut self, task_id: &str, lines: usize) {
         self.retired.remove(task_id);
-        let n = self.policy.tail_lines;
-        self.live
-            .insert(String::from(task_id), (LogRing::new(n), LogRing::new(n)));
+        self.live.insert(
+            String::from(task_id),
+            (LogRing::new(lines), LogRing::new(lines)),
+        );
     }
 
     /// De ring van een lopende taak om in te schrijven.

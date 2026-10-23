@@ -147,7 +147,8 @@ hop `v3.0.0` (`hostnet`), HopOS `v3.0.0` (`applib` with
 - Saved clusters, live updates over SSE, agent failover and fallback polling.
 - Agent CPU, memory, temperature and task counts.
 - Jobs with draggable priority, creation, redeployment and deletion.
-- Job details, task status and live stdout/stderr logs.
+- Job details, task status and live stdout/stderr logs, also of a node's
+  system tasks: `kern` (the console of HopOS itself) and `hop` (Hop's own lines).
 - Direct links to `#agents`, `#agents/<encoded-id>`, `#jobs` and `#jobs/<encoded-name>`.
 - `?name=NODE&ip=IP` prefills the cluster form without connecting automatically.
 - Responsive tables and keyboard-accessible forms, confirmations and dialogs.

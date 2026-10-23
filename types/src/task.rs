@@ -198,6 +198,11 @@ impl Task {
     }
 }
 
+/// Het id (en de jobnaam) van de systeemtaak van de kern: [`Agent::system_tasks`],
+/// en de logring van de kern zelf op een HopOS-node (`/logs/kern/stdout`).
+pub const KERN_TASK: &str = "kern";
+/// Het id van de systeemtaak van Hop zelf, en de ring van zijn eigen regels.
+pub const HOP_TASK: &str = "hop";
 /// Het slot van de kern: [`Agent::system_tasks`] zet het als pid van `kern`.
 pub const KERN_SLOT: i64 = 0;
 /// Het slot dat de kern Hop geeft: de pid van `hop` in [`Agent::system_tasks`].
@@ -379,8 +384,8 @@ impl Agent {
     pub fn system_tasks(&self) -> Result<Vec<Task>> {
         let mut out = Vec::new();
         for (name, pid, u) in [
-            ("kern", KERN_SLOT, &self.telemetry.kern),
-            ("hop", HOP_SLOT, &self.telemetry.hop),
+            (KERN_TASK, KERN_SLOT, &self.telemetry.kern),
+            (HOP_TASK, HOP_SLOT, &self.telemetry.hop),
         ] {
             if !u.is_known() {
                 continue;

@@ -263,6 +263,25 @@ pub trait SystemApi {
     /// laat komt, mist de oudste regels.
     fn next_log_line(&mut self, slot: Slot, buf: &mut [u8]) -> impl Future<Output = Option<usize>>;
 
+    /// `NEXT_LOG` op slot 0: de volgende consoleregel van de kern zelf (niet
+    /// die van de apps), zonder regeleinde.
+    ///
+    /// `Ok(None)` als er niets klaarstaat, of als de weg naar de kern even
+    /// wegviel (een flip). Een fout is een kern die de vraag weigert: een
+    /// kern van vóór de kernlogs (HopOS v3.0.16 en eerder) noemt slot 0 een
+    /// slot buiten bereik. De standaard is zo'n kern.
+    fn next_kern_line(
+        &mut self,
+        buf: &mut [u8],
+    ) -> impl Future<Output = Result<Option<usize>, SysError>> {
+        let _ = buf;
+        async {
+            Err(SysError::Refused(String::from(
+                "this kernel has no log of its own",
+            )))
+        }
+    }
+
     /// `SET_CLOCK`: zet de klok van de node (Unix-nanoseconden).
     fn set_clock(&mut self, unix_ns: u64) -> impl Future<Output = Result<(), SysError>>;
 

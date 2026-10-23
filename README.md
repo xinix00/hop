@@ -101,6 +101,14 @@ hop image hopos-rpi4-headless.img --keep --write /dev/rdisk4        # new image,
 hop image hopos-o6n-headless.flip --config my-node.cfg              # a bundle: prints the new sha256
 ```
 
+On a HopOS node the two system tasks have logs too: `kern` is the kernel's
+own console (Hop pumps `NEXT_LOG` on slot 0 every tick; a kernel up to
+HopOS v3.0.16 refuses that, Hop says so once with `HOP_KERN_LOG_NONE` and
+asks again every 60 s) and `hop` is Hop's own lines, kept in the process.
+`GET /logs/kern/stdout` and `/logs/hop/stdout` on the agent, or
+`/v1/agents/{id}/logs/kern/stdout` through the leader (the dashboard's Logs
+button), 200 lines each.
+
 Streams (`hop events`, `hop logs -f`) hold a connection thread on the node
 while they run, so a node allows only a few at once (4 on a host, 2 on
 HopOS) and says so with a 503. Calls to the lease and state backends (S3,

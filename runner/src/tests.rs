@@ -842,3 +842,34 @@ fn env_key_and_vars() {
     assert_eq!(env_key("node.os"), "NODE_OS");
     assert_eq!(env_key("http-port"), "HTTP_PORT");
 }
+
+#[test]
+fn the_system_tasks_have_their_rings_from_the_start() {
+    let mut r = runner(2, &[]);
+    assert!(r.logs(0, types::KERN_TASK, Stream::Stdout).is_some());
+    r.system_line(types::HOP_TASK, "hop: agent up HOP_UP");
+    assert_eq!(tail(&r, 0, types::HOP_TASK), ["hop: agent up HOP_UP"]);
+    // Ruimer dan een app: 200 regels.
+    for i in 0..300 {
+        r.system_line(types::HOP_TASK, &i.to_string());
+    }
+    let t = tail(&r, 0, types::HOP_TASK);
+    assert_eq!(t.len(), SYSTEM_LOG_LINES);
+    assert_eq!(t.last().map(String::as_str), Some("299"));
+}
+
+#[test]
+fn a_kernel_without_its_own_log_is_asked_again_only_after_a_minute() {
+    // FakeSys heeft de standaard van de trait: een kern zonder eigen log.
+    let mut r = runner(2, &[]);
+    assert!(matches!(
+        bl(r.pump_kern_logs(0)),
+        Some(KernLogNote::Refused(_))
+    ));
+    // De volgende rondes: stil, en geen vraag aan de kern.
+    assert_eq!(bl(r.pump_kern_logs(1_000)), None);
+    assert_eq!(bl(r.pump_kern_logs(KERN_LOG_RETRY_MS - 1)), None);
+    // Na de minuut opnieuw gevraagd, nog steeds geweigerd: geen tweede melding.
+    assert_eq!(bl(r.pump_kern_logs(KERN_LOG_RETRY_MS)), None);
+    assert!(tail(&r, 0, types::KERN_TASK).is_empty());
+}

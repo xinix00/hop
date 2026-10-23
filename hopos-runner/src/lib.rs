@@ -477,6 +477,18 @@ impl<C: Call> SystemApi for KernSys<C> {
         }
     }
 
+    async fn next_kern_line(&mut self, buf: &mut [u8]) -> Result<Option<usize>, SysError> {
+        let max = u64::try_from(buf.len()).unwrap_or(u64::MAX);
+        match self.plain(PrivOp::NextLog, 0, max, buf).await {
+            Ok((resp, n)) if resp.size == 1 => Ok(Some(n)),
+            Ok(_) => Ok(None),
+            // Een foutstatus is de kern die slot 0 weigert (v3.0.16 en
+            // eerder); de weg die even wegvalt (een flip) is niets klaar.
+            Err(e @ sys::Error::Call { .. }) => Err(sys_error(&e)),
+            Err(_) => Ok(None),
+        }
+    }
+
     async fn next_store(&mut self, wait_ms: u64) -> Result<Option<runner::StoreTask>, SysError> {
         self.wire_next_store(wait_ms).await
     }
