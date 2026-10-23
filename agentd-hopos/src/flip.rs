@@ -4,7 +4,7 @@
 //!
 //! De weg (HopOS `hopos/src/flip.rs` is de kernkant):
 //!
-//! 1. START_SLOT met de jobnaam [`FLIP_BUNDLE_JOB`]: de kern reserveert een
+//! 1. START_SLOT met de jobnaam [`FLIP_BUNDLE_JOB`] (uit `abi`): de kern reserveert een
 //!    partitie en neemt de bytes daarna RAUW aan, zonder ELF-plaatsing en
 //!    zonder start;
 //! 2. de download (dezelfde [`Images`] als een artifact) stroomt erin via
@@ -34,7 +34,7 @@
 //! de leader nog.
 //!
 //! Dezelfde stroom draagt een nieuw image van Hop zelf ([`fetch_raw`] met
-//! [`hopos_runner::state::HOP_IMAGE_JOB`], zie [`crate::restart`]).
+//! [`abi::systemapi::HOP_IMAGE_JOB`], zie [`crate::restart`]).
 //!
 //! Wat Hop al weet, vraagt hij niet: zegt het board-contract van de kern
 //! (`HOPOS_COLD_FLIP`, [`crate::env::ColdFlip`]) dat koud niet kan (`no`,
@@ -46,16 +46,11 @@ use alloc::string::String;
 use core::future::Future;
 
 use abi::layout::ABI_TAIL;
-use abi::systemapi::{FLIP_COLD, PrivOp};
+use abi::systemapi::{FLIP_BUNDLE_JOB, FLIP_COLD, PrivOp};
 use hopos_runner::{Call, KernSys};
 use runner::{Slot, StartSpec, Streamed, SystemApi};
 
 use crate::node::{Images, Sink};
-
-/// De jobnaam waarmee de kern een slot voor een flip-bundel reserveert
-/// (`kern::system::FLIP_BUNDLE_JOB` in HopOS). Hier als tekst tot de
-/// getagde HopOS hem in `abi` draagt.
-pub const FLIP_BUNDLE_JOB: &str = "hopos.flip-bundle";
 
 /// Hoe lang de FLIP-call mag duren: de kern hasht en legt de nieuwe kern
 /// neer voor hij antwoordt (op QEMU ruim onder een seconde).
@@ -95,8 +90,8 @@ impl<C: Call> KernFlip for KernSys<C> {
 /// De download als stroom in het gereserveerde slot.
 struct Bundle<'a, S> {
     sys: &'a mut S,
-    /// De jobnaam waarmee de kern het slot rauw reserveert.
-    job: &'static str,
+    /// De jobnaam waarmee de kern het slot rauw reserveert (uit `abi`).
+    job: &'static [u8],
     /// Wat er stroomt, voor de fouttekst ("bundle", "image").
     what: &'static str,
     slot: Option<Slot>,
@@ -117,7 +112,7 @@ impl<S: SystemApi> Sink for Bundle<'_, S> {
             env: Default::default(),
             mounts: Default::default(),
             ports: Default::default(),
-            job: String::from(self.job),
+            job: String::from_utf8_lossy(self.job).into_owned(),
         };
         let what = self.what;
         let slot = self
@@ -160,7 +155,7 @@ pub async fn fetch_raw<S, I>(
     sys: &mut S,
     images: &mut I,
     url: &str,
-    job: &'static str,
+    job: &'static [u8],
     what: &'static str,
 ) -> Result<Slot, String>
 where

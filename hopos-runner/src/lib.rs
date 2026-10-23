@@ -4,8 +4,8 @@
 //! ([`runner::HopRunner`]) is sans-I/O en roept de kern via de trait
 //! [`runner::SystemApi`]; deze crate is de rand die daar bytes van maakt: een
 //! `Call`-frame met een `hopabi::Req` en de juiste opcode uit
-//! [`abi::systemapi::PrivOp`] (0x40 tot en met 0x4A, en 0x4B tot en met 0x4D
-//! voor de staat en de herstart van Hop, zie [`state`]), en het antwoord
+//! [`abi::systemapi::PrivOp`] (0x40 tot en met 0x4D; de staat en de herstart
+//! van Hop staan in [`state`]), en het antwoord
 //! terug naar de typen van de runner ([`abi::systemapi::StreamResp`],
 //! [`abi::systemapi::SlotInfo`], de logregel).
 //!

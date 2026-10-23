@@ -44,18 +44,22 @@ use alloc::format;
 use alloc::string::String;
 use core::future::Future;
 
-use hopos_runner::state::OP_HOP_RESTART;
+use abi::systemapi::{HOP_RESTART_GRACE_MS, PrivOp};
 use hopos_runner::{Call, KernSys};
 use runner::{Slot, SystemApi};
 
 use crate::node::Images;
 
-pub use hopos_runner::state::HOP_IMAGE_JOB;
+pub use abi::systemapi::HOP_IMAGE_JOB;
 
 /// Hoe lang Hop na het OK van de kern hoogstens wacht tot zijn antwoord
-/// de deur uit is: ruim onder de stoptermijn van de kern (3 s), zodat de
-/// staat en het net-afscheid er nog in passen.
+/// de deur uit is: ruim onder de stoptermijn van de kern
+/// ([`HOP_RESTART_GRACE_MS`], 3 s, want Hop vraagt `n` = 0), zodat de staat
+/// en het net-afscheid er nog in passen.
 pub const REPLY_GRACE: core::time::Duration = core::time::Duration::from_secs(1);
+
+// De wachttijd op het antwoord is hoogstens de helft van de termijn.
+const _: () = assert!(REPLY_GRACE.as_secs() * 2000 <= HOP_RESTART_GRACE_MS);
 
 /// Waarom Hop na een aangenomen herstart vertrekt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,7 +134,7 @@ impl<C: Call> KernRestart for KernSys<C> {
         grace_ms: u64,
     ) -> Result<(), String> {
         let req = applib::sys::Req {
-            op: OP_HOP_RESTART,
+            op: PrivOp::HopRestart.op(),
             seq: 0,
             off: slot.map_or(0, |s| u64::from(s.0)),
             n: grace_ms,

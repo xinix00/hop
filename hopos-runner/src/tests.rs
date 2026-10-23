@@ -306,7 +306,7 @@ fn the_state_goes_to_the_kernel_and_comes_back() {
     assert_eq!(bl(s.load()), Ok(Some(b"{}".to_vec())));
     // De frames: de opnummers van de werkboom van HopOS.
     let ops = k.0.borrow().ops.clone();
-    assert_eq!(ops[..2], [0x4C, 0x4B]);
+    assert_eq!(ops[..2], [PrivOp::StateGet.op(), PrivOp::StatePut.op()]);
     // Nul bytes wist.
     bl(s.save(b"")).unwrap();
     assert_eq!(bl(s.load()), Ok(None));
@@ -316,21 +316,21 @@ fn the_state_goes_to_the_kernel_and_comes_back() {
 fn a_state_bigger_than_one_bite_never_leaves_hop() {
     use agent::Store;
     let (mut s, k) = sys(4);
-    let big = alloc::vec![b'x'; crate::state::HOP_STATE_MAX + 1];
+    let big = alloc::vec![b'x'; abi::systemapi::HOP_STATE_MAX + 1];
     assert!(matches!(
         bl(s.save(&big)),
         Err(agent::StoreError::TooBig { .. })
     ));
     assert_eq!(k.0.borrow().state_puts, 0);
     // Precies de grens gaat wel, en komt heel terug.
-    let edge = alloc::vec![b'y'; crate::state::HOP_STATE_MAX];
+    let edge = alloc::vec![b'y'; abi::systemapi::HOP_STATE_MAX];
     bl(s.save(&edge)).unwrap();
     assert_eq!(bl(s.load()).unwrap().unwrap().len(), edge.len());
 }
 
 #[test]
 fn an_older_kernel_refuses_the_state_ops() {
-    // De kern van v3.0.14 kent 0x4B..0x4D niet: een foutstatus, geen
+    // De kern van v3.0.14 kent STATE_PUT, STATE_GET en HOP_RESTART niet: een foutstatus, geen
     // verbroken verbinding. Hop hoort "geweigerd" en draait door als nu.
     use agent::Store;
     let (mut s, k) = sys(4);

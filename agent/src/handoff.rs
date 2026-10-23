@@ -1,7 +1,9 @@
 //! Staat die een herstart van Hop overleeft: de agent-staat als JSON naar buiten en terug.
 //!
 //! Op HopOS draaien de apps door als Hop zelf herstart (`POST /restart`,
-//! een crash die de kern opvangt, een nieuw image van Hop). Een lege agent
+//! met hetzelfde of een nieuw image). Een crash van Hop is dat niet: de kern
+//! herstart een falende Hop niet, de watchdog reset de node en de koude
+//! boot begint zonder blob. Een lege agent
 //! kent zijn taken dan niet meer: de veger stopt ze als bewoners van
 //! niemand en de leader plaatst alles opnieuw. Met deze overdracht legt
 //! Hop zijn jobs en taken bij de kern neer ([`Store`], op HopOS een blob in

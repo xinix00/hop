@@ -1,41 +1,23 @@
 //! De staat van Hop bij de kern: [`agent::Store`] over `STATE_PUT` en `STATE_GET`.
 //!
 //! De kern bewaart één blob voor Hop in zijn eigen geheugen. Het overleeft
-//! een herstart van Hop (`HOP_RESTART`, of een crash die de kern opvangt)
-//! en sterft met de boot, zodat een staat van een vorige boot nooit een
-//! bewoner van deze boot voor de zijne kan houden. De kern leest het niet.
+//! een herstart van Hop (`HOP_RESTART`) en sterft met de boot, zodat een
+//! staat van een vorige boot nooit een bewoner van deze boot voor de zijne
+//! kan houden. De kern leest het niet. Een crash van Hop herstart de kern
+//! niet: een falende Hop is een falende node, de watchdog reset hem, en de
+//! koude boot begint zonder blob.
 //!
-//! De opnummers, de maat en de jobnaam van een nieuw image staan hier als
-//! getal en tekst tot de getagde HopOS ze in `abi` draagt (de werkboom heeft
-//! ze als `PrivOp::StatePut`, `StateGet`, `HopRestart`, `HOP_STATE_MAX` en
-//! `HOP_IMAGE_JOB`); Hop pint `abi` op een tag zonder. Een oudere kern kent
-//! de ops niet en antwoordt met een foutstatus: dat is
+//! De opnummers en de maat komen uit `abi` ([`PrivOp::StatePut`],
+//! [`PrivOp::StateGet`], [`HOP_STATE_MAX`], HopOS v3.0.16). Een oudere kern
+//! kent de ops niet en antwoordt met een foutstatus: dat is
 //! [`agent::StoreError::Refused`], en Hop draait dan zoals vóór de kern-staat.
 
 use alloc::vec::Vec;
 
+use abi::systemapi::{HOP_STATE_MAX, PrivOp};
 use applib::sys;
 
 use crate::{Call, KernSys};
-
-/// `PrivOp::StatePut`: `data` het hele blob, vervangend en atomair; nul bytes wist.
-pub const OP_STATE_PUT: u8 = 0x4B;
-
-/// `PrivOp::StateGet`: `n` de offset; het antwoord `size` de maat van het
-/// hele blob (0: er ligt niets), `data` de bytes vanaf `n`.
-pub const OP_STATE_GET: u8 = 0x4C;
-
-/// `PrivOp::HopRestart`: `off` 0 of het slot met een nieuw image, `path` de
-/// SHA-256 als hex, `n` de stoptermijn in ms (0: de standaard van de kern).
-pub const OP_HOP_RESTART: u8 = 0x4D;
-
-/// De grootste staat die de kern bewaart (`HOP_STATE_MAX`): één I/O-hap.
-pub const HOP_STATE_MAX: usize = sys::MAX_CHUNK;
-
-/// De jobnaam waarmee Hop een slot reserveert voor een nieuw image van
-/// zichzelf (`HOP_IMAGE_JOB`): de kern neemt de bytes rauw aan, zonder
-/// plaatsing en zonder start, tot `HOP_RESTART` ze opeist.
-pub const HOP_IMAGE_JOB: &str = "hopos.hop-image";
 
 /// Een fout van de client als fout van de staat-opslag.
 ///
@@ -62,7 +44,7 @@ impl<C: Call> agent::Store for KernSys<C> {
             });
         }
         let req = sys::Req {
-            op: OP_STATE_PUT,
+            op: PrivOp::StatePut.op(),
             seq: 0,
             off: 0,
             n: 0,
@@ -94,7 +76,7 @@ impl<C: Call> agent::Store for KernSys<C> {
         loop {
             let off = u64::try_from(at).unwrap_or(u64::MAX);
             let req = sys::Req {
-                op: OP_STATE_GET,
+                op: PrivOp::StateGet.op(),
                 seq: 0,
                 off: 0,
                 n: off,

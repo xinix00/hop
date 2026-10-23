@@ -44,9 +44,9 @@ leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
 leans3http = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
 leanh2 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
 leanrand = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.12" }
-applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.14" }
-sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.14" }
-abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.14" }
+applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.16" }
+sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.16" }
+abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.16" }
 types = { path = "types" }
 auth = { path = "auth" }
 api = { path = "api" }

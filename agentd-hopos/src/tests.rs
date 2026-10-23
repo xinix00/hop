@@ -1429,7 +1429,13 @@ fn an_older_kernel_keeps_no_state_and_refuses_a_restart() {
         .collect();
     assert_eq!(none.len(), 1, "{lines:?}");
     // Niet elke tik opnieuw: alleen op het ritme.
-    let calls = |k: &FakeKern| k.0.borrow().ops.iter().filter(|&&o| o == 0x4B).count();
+    let calls = |k: &FakeKern| {
+        k.0.borrow()
+            .ops
+            .iter()
+            .filter(|&&o| o == PrivOp::StatePut.op())
+            .count()
+    };
     let before = calls(&k);
     for s in 2..9 {
         tick(&mut n, T0 + s * SECOND);
@@ -1450,7 +1456,10 @@ fn an_older_kernel_keeps_no_state_and_refuses_a_restart() {
         lines.iter().any(|l| l.contains("HOP_RESTART_FAIL")),
         "{lines:?}"
     );
-    assert!(!k.0.borrow().ops.contains(&0x4D), "no HOP_RESTART asked");
+    assert!(
+        !k.0.borrow().ops.contains(&PrivOp::HopRestart.op()),
+        "no HOP_RESTART asked"
+    );
     assert!(k.0.borrow().restarts.is_empty());
 }
 
@@ -1488,7 +1497,7 @@ fn restart_with_the_same_image() {
         assert_eq!(st.restarts, [(0, String::new(), 0)]);
         // De staat ging vlak vóór de vraag naar de kern, zonder tik.
         let at = |op: u8| st.ops.iter().rposition(|&o| o == op).unwrap();
-        assert!(at(0x4B) < at(0x4D));
+        assert!(at(PrivOp::StatePut.op()) < at(PrivOp::HopRestart.op()));
         assert!(String::from_utf8_lossy(&st.state).contains("\"web\""));
     }
     let lines = n.take_lines();
@@ -1554,7 +1563,7 @@ fn a_refused_restart_is_a_502_and_cleans_the_image_slot() {
     let body = format!(r#"{{"url":"http://images/nope","sha256":"{sum}"}}"#);
     let (status, _) = http(&mut n, Port::Agent, wire("POST", "/restart", &body));
     assert_eq!(status, 502);
-    assert!(!k.0.borrow().ops[before..].contains(&0x4D));
+    assert!(!k.0.borrow().ops[before..].contains(&PrivOp::HopRestart.op()));
 }
 
 /// Geen net: een doorgifte kan hier niet (de herstart is een gewoon antwoord).

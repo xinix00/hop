@@ -4,8 +4,8 @@ version = 4
 
 [[package]]
 name = "abi"
-version = "3.0.14"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.14#8b16608d1e1887e8c387dce9cdd4a71df7a5deb8"
+version = "3.0.16"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.16#9372652ff4bae7c6e8adf24add994364be03347b"
 dependencies = [
  "bounded",
  "dev",
@@ -74,8 +74,8 @@ dependencies = [
 
 [[package]]
 name = "applib"
-version = "3.0.14"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.14#8b16608d1e1887e8c387dce9cdd4a71df7a5deb8"
+version = "3.0.16"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.16#9372652ff4bae7c6e8adf24add994364be03347b"
 dependencies = [
  "abi",
  "bounded",
@@ -94,8 +94,8 @@ version = "3.0.13"
 
 [[package]]
 name = "bounded"
-version = "3.0.14"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.14#8b16608d1e1887e8c387dce9cdd4a71df7a5deb8"
+version = "3.0.16"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.16#9372652ff4bae7c6e8adf24add994364be03347b"
 
 [[package]]
 name = "cli"
@@ -128,8 +128,8 @@ dependencies = [
 
 [[package]]
 name = "dev"
-version = "3.0.14"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.14#8b16608d1e1887e8c387dce9cdd4a71df7a5deb8"
+version = "3.0.16"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.16#9372652ff4bae7c6e8adf24add994364be03347b"
 
 [[package]]
 name = "discovery"
@@ -140,8 +140,8 @@ dependencies = [
 
 [[package]]
 name = "executor"
-version = "3.0.14"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.14#8b16608d1e1887e8c387dce9cdd4a71df7a5deb8"
+version = "3.0.16"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.16#9372652ff4bae7c6e8adf24add994364be03347b"
 dependencies = [
  "dev",
  "sync",
@@ -149,8 +149,8 @@ dependencies = [
 
 [[package]]
 name = "heap"
-version = "3.0.14"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.14#8b16608d1e1887e8c387dce9cdd4a71df7a5deb8"
+version = "3.0.16"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.16#9372652ff4bae7c6e8adf24add994364be03347b"
 
 [[package]]
 name = "hop-gui"
@@ -320,8 +320,8 @@ dependencies = [
 
 [[package]]
 name = "netdev"
-version = "3.0.14"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.14#8b16608d1e1887e8c387dce9cdd4a71df7a5deb8"
+version = "3.0.16"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.16#9372652ff4bae7c6e8adf24add994364be03347b"
 dependencies = [
  "sync",
 ]
@@ -350,8 +350,8 @@ dependencies = [
 
 [[package]]
 name = "sync"
-version = "3.0.14"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.14#8b16608d1e1887e8c387dce9cdd4a71df7a5deb8"
+version = "3.0.16"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.16#9372652ff4bae7c6e8adf24add994364be03347b"
 dependencies = [
  "bounded",
 ]
