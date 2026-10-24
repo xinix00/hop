@@ -115,6 +115,13 @@ pub struct KernState {
     /// Een kern van vóór de kernlogs (v3.0.16): `NEXT_LOG` op slot 0 is een
     /// slot buiten bereik.
     pub no_kern_logs: bool,
+    /// Zoveel calls krijgen geen antwoord: de verbinding gaat dicht, zoals
+    /// een kern die een verbinding vlak na de start weigert. De client
+    /// herhaalt een call één keer na een transportfout, dus twee is één
+    /// mislukte call.
+    pub drop_calls: u32,
+    /// `SET_CLOCK` krijgt een foutstatus: een echte weigering van de kern.
+    pub clock_refused: bool,
 }
 
 /// Eén store-call van een app in de nep-kern. De bestanden van de app zijn
@@ -258,6 +265,14 @@ impl FakeConn {
                 continue;
             }
             let payload = frame.get(HEADER_LEN..).unwrap_or_default();
+            {
+                let mut k = self.kern.0.borrow_mut();
+                if k.drop_calls > 0 {
+                    // Geen antwoord: de volgende lees is een EOF.
+                    k.drop_calls -= 1;
+                    continue;
+                }
+            }
             let out = match hopabi::decode_req(payload) {
                 Ok(req) => self.kern.handle(&req),
                 Err(_) => answer(0, 0, STATUS_ERROR, 0, b"bad request"),
@@ -418,6 +433,7 @@ impl FakeKern {
                     None => ok(0, b""),
                 }
             }
+            Some(PrivOp::SetClock) if k.clock_refused => err("the clock is not yours to set"),
             Some(PrivOp::SetClock) => {
                 k.clock = req.n;
                 ok(0, b"")

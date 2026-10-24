@@ -123,6 +123,10 @@ pub enum Kept {
     /// is, is geen lege staat: dan geen init-jobs (Go: nooit zaaien op een
     /// opslagfout).
     Unreadable,
+    /// De kern antwoordde niet (de verbinding): de binary probeert het zo
+    /// opnieuw ([`crate::KERNEL_BACKOFF`]); geeft hij het op, dan is het
+    /// [`Node::state_unreachable`] en geen schone start.
+    Unreachable,
 }
 
 impl Kept {
@@ -493,6 +497,7 @@ impl<S: SystemApi + Store, I: Images> Node<S, I> {
                 ));
                 return Kept::Unsupported;
             }
+            Err(StoreError::Io) => return Kept::Unreachable,
             Err(e) => {
                 self.lines.push(format!(
                     "hop: the kernel's state for Hop not read: {e}; starting empty HOP_KERNEL_STATE_FAIL"
@@ -514,6 +519,15 @@ impl<S: SystemApi + Store, I: Images> Node<S, I> {
         drop(blob);
         let n = self.adopt(now, h).await;
         Kept::Adopted(n)
+    }
+
+    /// De binary gaf het op: de kern antwoordde ook na `tries` pogingen niet
+    /// op STATE_GET. Hop begint leeg (en zaait geen init-jobs).
+    pub fn state_unreachable(&mut self, tries: usize) {
+        self.lines.push(format!(
+            "hop: the kernel's state for Hop not read: {} ({tries} tries); starting empty HOP_KERNEL_STATE_FAIL",
+            StoreError::Io
+        ));
     }
 
     /// De overname zelf: de kooien bij de runner, de records bij de agent,

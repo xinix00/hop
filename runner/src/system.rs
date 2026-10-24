@@ -152,6 +152,11 @@ pub enum SysError {
     NoCapacity(String),
     /// De kern weigert om een andere reden.
     Refused(String),
+    /// De kern antwoordde niet: de verbinding viel weg of werd geweigerd,
+    /// of de termijn verstreek. Geen oordeel van de kern; later kan het
+    /// gewoon lukken (de kern die vlak na een herstart van Hop een
+    /// verbinding weigert, ORION 24-10).
+    Unreachable(String),
     /// De stop is niet bevestigd binnen de termijn.
     NotConfirmed,
 }
@@ -161,6 +166,7 @@ impl fmt::Display for SysError {
         match self {
             SysError::NoCapacity(why) => write!(f, "no free core to place the cage: {why}"),
             SysError::Refused(why) => write!(f, "refused: {why}"),
+            SysError::Unreachable(why) => write!(f, "the kernel did not answer: {why}"),
             SysError::NotConfirmed => f.write_str("stop not confirmed"),
         }
     }

@@ -24,8 +24,52 @@
 use alloc::string::String;
 use core::fmt;
 use core::future::Future;
+use core::time::Duration;
 
 use crate::fetch::Resolve;
+
+/// Hoe vaak de kloktaak `SET_CLOCK` probeert als de kern niet antwoordt
+/// ([`runner::SysError::Unreachable`]), met [`crate::KERNEL_BACKOFF`]
+/// ertussen: kort, want zonder klok weigert TLS elke https-download (ook de
+/// init-jobs).
+pub const SET_CLOCK_TRIES: u32 = crate::KERNEL_BACKOFF.len() as u32 + 1;
+
+/// Zet de klok van de kern met `SET_CLOCK`, en probeert het opnieuw zolang
+/// de kern niet antwoordt; geeft het aantal pogingen.
+///
+/// Een herstarte Hop kreeg op ijzer (ORION, 24-10) vlak na zijn start een
+/// geweigerde verbinding ("system call transport: connection closed"), en
+/// wachtte daarna de volle `NTP_RETRY` van de binary (300 s) zonder klok. Een
+/// transportfout is geen weigering: binnen een paar seconden opnieuw, met
+/// de tijd van de sample op het moment van elke poging (`unix_ns`). Een
+/// echte weigering van de kern komt meteen terug.
+pub async fn set_clock<S, N>(
+    sys: &mut S,
+    nap: &N,
+    mut unix_ns: impl FnMut() -> u64,
+) -> Result<(u64, u32), runner::SysError>
+where
+    S: runner::SystemApi,
+    N: crate::mail::Nap,
+{
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        let ns = unix_ns();
+        match sys.set_clock(ns).await {
+            Ok(()) => return Ok((ns, tries)),
+            Err(runner::SysError::Unreachable(_)) if tries < SET_CLOCK_TRIES => {
+                let i = usize::try_from(tries - 1).unwrap_or(usize::MAX);
+                let wait = crate::KERNEL_BACKOFF
+                    .get(i)
+                    .copied()
+                    .unwrap_or(Duration::from_secs(2));
+                nap.nap(wait).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
 
 /// De NTP-poort.
 pub const PORT: u16 = 123;

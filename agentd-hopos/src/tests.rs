@@ -1812,3 +1812,83 @@ fn hop_keeps_its_own_lines_in_the_ring_of_hop() {
         Some("hop: agent up node=n1 HOP_UP")
     );
 }
+
+// ---- Een kern die vlak na de start niet antwoordt (ORION, 24-10) ----------------
+
+/// Een dutje dat niet slaapt maar onthoudt hoe lang.
+#[derive(Default)]
+struct RecNap(RefCell<Vec<Duration>>);
+
+impl crate::mail::Nap for RecNap {
+    async fn nap(&self, d: Duration) {
+        self.0.borrow_mut().push(d);
+    }
+}
+
+#[test]
+fn set_clock_tries_again_when_the_kernel_drops_the_connection() {
+    let k = FakeKern::new(4);
+    // Eén call zonder antwoord (de client herhaalt hem zelf één keer).
+    k.0.borrow_mut().drop_calls = 2;
+    let mut sys = KernSys::new(k.client(), 1);
+    let nap = RecNap::default();
+    let mut t = 1_790_000_000_000_000_000u64;
+    let r = block_on(crate::sntp::set_clock(&mut sys, &nap, || {
+        t += 1;
+        t
+    }));
+    // De tweede poging lukt na een kwart seconde, met de tijd van dat moment.
+    assert_eq!(r, Ok((1_790_000_000_000_000_002, 2)));
+    assert_eq!(*nap.0.borrow(), [Duration::from_millis(250)]);
+    assert_eq!(k.0.borrow().clock, 1_790_000_000_000_000_002);
+}
+
+#[test]
+fn set_clock_gives_up_after_its_tries_and_a_refusal_comes_back_at_once() {
+    let k = FakeKern::new(4);
+    k.0.borrow_mut().drop_calls = 1_000;
+    let mut sys = KernSys::new(k.client(), 1);
+    let nap = RecNap::default();
+    let r = block_on(crate::sntp::set_clock(&mut sys, &nap, || 7));
+    assert!(matches!(r, Err(runner::SysError::Unreachable(_))), "{r:?}");
+    assert_eq!(*nap.0.borrow(), crate::KERNEL_BACKOFF, "6.25 s in all");
+    // Een echte weigering van de kern: meteen terug, geen tweede poging.
+    let k = FakeKern::new(4);
+    k.0.borrow_mut().clock_refused = true;
+    let mut sys = KernSys::new(k.client(), 1);
+    let nap = RecNap::default();
+    let r = block_on(crate::sntp::set_clock(&mut sys, &nap, || 7));
+    assert!(matches!(r, Err(runner::SysError::Refused(_))), "{r:?}");
+    assert!(nap.0.borrow().is_empty());
+    assert_eq!(k.0.borrow().ops.len(), 1);
+}
+
+#[test]
+fn a_restore_against_a_silent_kernel_is_unreachable_and_tries_again() {
+    let (mut n, k) = placed_for_a_restart();
+    tick(&mut n, T0 + SECOND);
+    drop(n);
+    k.0.borrow_mut().drop_calls = 2;
+    let mut again = next_hop(&k);
+    let kept = block_on(again.restore(T0 + 2 * SECOND));
+    assert_eq!(kept, Kept::Unreachable);
+    assert!(
+        !kept.is_clean(),
+        "no init jobs on a kernel that did not answer"
+    );
+    assert!(
+        again.take_lines().is_empty(),
+        "quiet until the binary gives up"
+    );
+    // De volgende poging (de binary, na een kwart seconde) neemt hem over.
+    assert_eq!(block_on(again.restore(T0 + 3 * SECOND)), Kept::Adopted(1));
+    // Geeft de binary het op, dan één regel.
+    let mut third = next_hop(&k);
+    third.state_unreachable(6);
+    assert!(
+        third
+            .take_lines()
+            .iter()
+            .any(|l| l.contains("(6 tries); starting empty HOP_KERNEL_STATE_FAIL"))
+    );
+}

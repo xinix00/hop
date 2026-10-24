@@ -201,6 +201,9 @@ fn core_class(s: &str) -> Result<CoreClass, SysError> {
 
 /// Een fout van de client als fout van de kern.
 ///
+/// Een transportfout, een termijn of een protocolfout is geen oordeel van de
+/// kern maar een kern die niet antwoordde: [`SysError::Unreachable`].
+///
 /// De kern zegt "vol" alleen in tekst: `no free run of N app core(s)` (geen
 /// core), `... full` (geen stroomplek) of een partitie die niet past. Dat is
 /// een plaatsingsfout (de taak hoort op een andere node), geen crash; alles
@@ -221,6 +224,9 @@ pub fn sys_error(e: &sys::Error) -> SysError {
             } else {
                 SysError::Refused(text.to_string())
             }
+        }
+        e @ (sys::Error::Transport(_) | sys::Error::Timeout | sys::Error::Protocol(_)) => {
+            SysError::Unreachable(alloc::format!("{e}"))
         }
         other => SysError::Refused(alloc::format!("{other}")),
     }

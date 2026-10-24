@@ -71,6 +71,20 @@ pub use handoff::Handoff;
 pub use hub::{Answer, Hub, Question};
 pub use node::{Cluster, ClusterParts, Images, Kept, Node, Port, Sink};
 
+/// Hoe lang Hop wacht tussen pogingen als de kern bij de start niet
+/// antwoordt (een geweigerde of verbroken system-verbinding, geen weigering
+/// van de op): de klok ([`sntp::set_clock`]), de staat (`Node::restore`) en
+/// de init-jobs. Samen 6,25 s; daarna geeft de stap het op zoals voorheen.
+/// Gezien op ijzer (ORION, 24-10): een herstarte Hop kreeg vlak na zijn
+/// start "system call transport: connection closed".
+pub const KERNEL_BACKOFF: [core::time::Duration; 5] = [
+    core::time::Duration::from_millis(250),
+    core::time::Duration::from_millis(500),
+    core::time::Duration::from_secs(1),
+    core::time::Duration::from_secs(2),
+    core::time::Duration::from_millis(2500),
+];
+
 /// De versie die de agent aan de leader meldt.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
