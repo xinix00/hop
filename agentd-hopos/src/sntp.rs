@@ -24,50 +24,48 @@
 use alloc::string::String;
 use core::fmt;
 use core::future::Future;
-use core::time::Duration;
 
 use crate::fetch::Resolve;
 
-/// Hoe vaak de kloktaak `SET_CLOCK` probeert als de kern niet antwoordt
-/// ([`runner::SysError::Unreachable`]), met [`crate::KERNEL_BACKOFF`]
-/// ertussen: kort, want zonder klok weigert TLS elke https-download (ook de
-/// init-jobs).
-pub const SET_CLOCK_TRIES: u32 = crate::KERNEL_BACKOFF.len() as u32 + 1;
+/// Wat de kloktaak met één synchronisatie doet ([`apply`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClockStep {
+    /// De klok staat: `SET_CLOCK` lukte met deze Unix-nanoseconden.
+    Synced(u64),
+    /// SNTP faalde (het net, de server): luid, en later opnieuw.
+    Sntp(SntpError),
+    /// De kern antwoordde niet op een latere `SET_CLOCK` (de klok stond al):
+    /// luid, en bij de volgende synchronisatie opnieuw.
+    Later(runner::SysError),
+    /// Hard: de kern weigerde `SET_CLOCK` (dat mag hij nooit), of hij
+    /// antwoordde niet op de eerste. Hop stopt; de watchdog reset de node.
+    Fatal(runner::SysError),
+}
 
-/// Zet de klok van de kern met `SET_CLOCK`, en probeert het opnieuw zolang
-/// de kern niet antwoordt; geeft het aantal pogingen.
+/// Zet de klok van de kern uit één synchronisatie (`got`), op monotone tijd `now`.
 ///
-/// Een herstarte Hop kreeg op ijzer (ORION, 24-10) vlak na zijn start een
-/// geweigerde verbinding ("system call transport: connection closed"), en
-/// wachtte daarna de volle `NTP_RETRY` van de binary (300 s) zonder klok. Een
-/// transportfout is geen weigering: binnen een paar seconden opnieuw, met
-/// de tijd van de sample op het moment van elke poging (`unix_ns`). Een
-/// echte weigering van de kern komt meteen terug.
-pub async fn set_clock<S, N>(
+/// Geen herhaallus (Derek, 24-10): de kern plaatst een nieuwe Hop pas als
+/// de oude weg is, en sinds HopOS v3.0.19 krijgt die vanaf zijn eerste
+/// instructie zijn verbindingen. Een `SET_CLOCK` die bij de start niet lukt,
+/// is dus een kapotte node, geen pech: hard falen. `synced` zegt of de klok
+/// in deze Hop al eens stond; dan is een kern die even niet antwoordt (een
+/// flip) een latere fout en geen reden om te stoppen. Een echte weigering
+/// is altijd hard.
+pub async fn apply<S: runner::SystemApi>(
     sys: &mut S,
-    nap: &N,
-    mut unix_ns: impl FnMut() -> u64,
-) -> Result<(u64, u32), runner::SysError>
-where
-    S: runner::SystemApi,
-    N: crate::mail::Nap,
-{
-    let mut tries = 0;
-    loop {
-        tries += 1;
-        let ns = unix_ns();
-        match sys.set_clock(ns).await {
-            Ok(()) => return Ok((ns, tries)),
-            Err(runner::SysError::Unreachable(_)) if tries < SET_CLOCK_TRIES => {
-                let i = usize::try_from(tries - 1).unwrap_or(usize::MAX);
-                let wait = crate::KERNEL_BACKOFF
-                    .get(i)
-                    .copied()
-                    .unwrap_or(Duration::from_secs(2));
-                nap.nap(wait).await;
-            }
-            Err(e) => return Err(e),
-        }
+    got: Result<Sample, SntpError>,
+    now: u64,
+    synced: bool,
+) -> ClockStep {
+    let sample = match got {
+        Ok(s) => s,
+        Err(e) => return ClockStep::Sntp(e),
+    };
+    let unix_ns = sample.unix_at(now);
+    match sys.set_clock(unix_ns).await {
+        Ok(()) => ClockStep::Synced(unix_ns),
+        Err(e @ runner::SysError::Unreachable(_)) if synced => ClockStep::Later(e),
+        Err(e) => ClockStep::Fatal(e),
     }
 }
 

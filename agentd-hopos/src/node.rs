@@ -109,6 +109,14 @@ const COLD_FLIP_WAIT: Nanos = 30 * SECOND;
 /// krijgt op dit ritme ook zijn tweede kans (een flip naar een nieuwe kern).
 pub(crate) const STATE_REFRESH: Nanos = 10 * SECOND;
 
+/// De exitcode van een Hop die stopt omdat de kern bij de start niet
+/// antwoordde of iets weigerde wat hij nooit weigert (`HOP_KERNEL_GONE`):
+/// geen 0, dus de kern laat hem liggen (`HOPOS_HOP_EXIT`) en de watchdog
+/// reset de node. Geen herhaallus: de kern plaatst een nieuwe Hop pas als
+/// de oude weg is en geeft hem vanaf zijn eerste instructie zijn
+/// verbindingen (HopOS v3.0.19, fb81b13).
+pub const EXIT_KERNEL: u64 = 3;
+
 /// Wat [`Node::restore`] bij de start aantrof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kept {
@@ -123,9 +131,10 @@ pub enum Kept {
     /// is, is geen lege staat: dan geen init-jobs (Go: nooit zaaien op een
     /// opslagfout).
     Unreadable,
-    /// De kern antwoordde niet (de verbinding): de binary probeert het zo
-    /// opnieuw ([`crate::KERNEL_BACKOFF`]); geeft hij het op, dan is het
-    /// [`Node::state_unreachable`] en geen schone start.
+    /// De kern antwoordde niet op STATE_GET (de verbinding, geen weigering):
+    /// een harde fout. De binary stopt Hop met [`EXIT_KERNEL`]; leeg
+    /// beginnen zou de veger elke app laten stoppen omdat de kern even
+    /// zweeg. De watchdog reset de node, en de koude boot begint schoon.
     Unreachable,
 }
 
@@ -497,7 +506,12 @@ impl<S: SystemApi + Store, I: Images> Node<S, I> {
                 ));
                 return Kept::Unsupported;
             }
-            Err(StoreError::Io) => return Kept::Unreachable,
+            Err(e @ StoreError::Io) => {
+                self.lines.push(format!(
+                    "hop: the kernel did not answer STATE_GET ({e}); stopping, an empty start would stop every app HOP_KERNEL_GONE step=restore"
+                ));
+                return Kept::Unreachable;
+            }
             Err(e) => {
                 self.lines.push(format!(
                     "hop: the kernel's state for Hop not read: {e}; starting empty HOP_KERNEL_STATE_FAIL"
@@ -519,15 +533,6 @@ impl<S: SystemApi + Store, I: Images> Node<S, I> {
         drop(blob);
         let n = self.adopt(now, h).await;
         Kept::Adopted(n)
-    }
-
-    /// De binary gaf het op: de kern antwoordde ook na `tries` pogingen niet
-    /// op STATE_GET. Hop begint leeg (en zaait geen init-jobs).
-    pub fn state_unreachable(&mut self, tries: usize) {
-        self.lines.push(format!(
-            "hop: the kernel's state for Hop not read: {} ({tries} tries); starting empty HOP_KERNEL_STATE_FAIL",
-            StoreError::Io
-        ));
     }
 
     /// De overname zelf: de kooien bij de runner, de records bij de agent,

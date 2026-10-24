@@ -48,7 +48,10 @@
 //! `HOP_CLOCK_SYNCED`, `HOP_INIT_SEEDED`, `HOP_ADOPTED n=N`,
 //! `HOP_STRAY_STOPPED slot=N`, `HOP_RESTART`, `HOP_RESTART_ACCEPTED`,
 //! `HOP_RESTART_LEAVING why=replied|grace|bell`, `HOP_STOPPING`,
-//! `HOP_KERN_LOG_ON`, `HOP_KERN_LOG_NONE` (een kern zonder eigen log), en de weigeringen en degradaties `HOP_RESTART_FAIL`,
+//! `HOP_KERN_LOG_ON`, `HOP_KERN_LOG_NONE` (een kern zonder eigen log),
+//! `HOP_KERNEL_GONE step=restore|clock|init` (de kern antwoordde bij de
+//! start niet of weigerde SET_CLOCK: Hop stopt met exitcode `EXIT_KERNEL`
+//! en de watchdog reset de node; geen herhaallus), en de weigeringen en degradaties `HOP_RESTART_FAIL`,
 //! `HOP_KERNEL_STATE_NONE`, `HOP_KERNEL_STATE_FAIL`, `HOP_ADOPT_SKIPPED`,
 //! `HOPOS_API_NO_AUTH`, `HOPOS_API_INSECURE`, `HOP_NET_FAIL`,
 //! `HOP_SNTP_FAIL`, `HOP_CLOCK_FAIL`, `HOP_TLS_ENTROPY_WEAK`, `HOP_TLS_ENTROPY_HW`,
@@ -92,8 +95,8 @@ use agentd_hopos::mail::{DispatchQueue, Inbox, LeaseQueue, LinkQueue, Mail, Nap,
 use agentd_hopos::restart;
 use agentd_hopos::sntp::{self, NtpLink, PACKET};
 use agentd_hopos::{
-    Answer, BootConfig, ClusterParts, Connect, Handoff, HttpImages, Hub, Images, KERNEL_BACKOFF,
-    Kept, Node, Port, Question, Resolve,
+    Answer, BootConfig, ClusterParts, Connect, EXIT_KERNEL, Handoff, HttpImages, Hub, Images, Kept,
+    Node, Port, Question, Resolve,
 };
 use applib::appnet::{self, Endpoint, Net, NetError, TcpListener, TcpStream};
 use applib::rand::{JITTER_ROUNDS, Origin, Rng};
@@ -144,11 +147,6 @@ const NTP_EVERY: Duration = Duration::from_secs(3600);
 /// Na een mislukte synchronisatie eerder opnieuw: een node die boot voor
 /// zijn uplink er is, hoeft geen uur op een klok te wachten.
 const NTP_RETRY: Duration = Duration::from_secs(300);
-
-/// Na een kern die ook na [`sntp::SET_CLOCK_TRIES`] pogingen niet antwoordde,
-/// zo snel een nieuwe synchronisatie: geen weigering, dus geen
-/// [`NTP_RETRY`], want zonder klok wacht elke https-download.
-const CLOCK_UNREACHABLE_RETRY: Duration = Duration::from_secs(30);
 
 /// Zoveel mislukkingen op rij krijgen een eigen regel; daarna één per
 /// twaalf (eens per uur bij [`NTP_RETRY`]).
@@ -348,7 +346,13 @@ impl NtpLink for UdpLink {
 /// Een eigen system-verbinding per synchronisatie, die daarna weer dichtgaat:
 /// de kern laat een slot twee verbindingen toe, en de eigenaar-taak houdt
 /// de eerste; een uur lang een tweede openhouden voor één call is zonde.
-async fn clock_task(net: &'static Net, exec: &'static Exec, server: String, port: u16) {
+async fn clock_task(
+    app: &'static App,
+    net: &'static Net,
+    exec: &'static Exec,
+    server: String,
+    port: u16,
+) {
     let mut fails: u32 = 0;
     let mut seq: u64 = 0;
     loop {
@@ -364,44 +368,36 @@ async fn clock_task(net: &'static Net, exec: &'static Exec, server: String, port
             },
         )
         .await;
-        let wait = match got {
-            Ok(sample) => {
-                let mut sys = KernSys::new(net.system_client(), 1);
-                // Elke poging met de tijd van nu uit dezelfde sample: die
-                // blijft vers, de monotone klok loopt mee.
-                let at = || sample.unix_at(exec.now());
-                match sntp::set_clock(&mut sys, &ExecNap(exec), at).await {
-                    Ok((unix_ns, tries)) => {
-                        CLOCK_SYNCED.store(true, Relaxed);
-                        fails = 0;
-                        let again = if tries > 1 {
-                            format!(" after {tries} tries")
-                        } else {
-                            String::new()
-                        };
-                        say!(
-                            "hop: clock set from {server} (stratum {}, delay {} us) to {} s{again} HOP_CLOCK_SYNCED",
-                            sample.stratum,
-                            sample.delay_ns / 1000,
-                            unix_ns / 1_000_000_000
-                        );
-                        NTP_EVERY
-                    }
-                    Err(e @ runner::SysError::Unreachable(_)) => {
-                        say!(
-                            "hop: SET_CLOCK: {e} ({} tries); a new sync in {} s HOP_CLOCK_FAIL",
-                            sntp::SET_CLOCK_TRIES,
-                            CLOCK_UNREACHABLE_RETRY.as_secs()
-                        );
-                        CLOCK_UNREACHABLE_RETRY
-                    }
-                    Err(e) => {
-                        say!("hop: SET_CLOCK refused by the kernel: {e} HOP_CLOCK_FAIL");
-                        NTP_RETRY
-                    }
-                }
+        let mut sys = KernSys::new(net.system_client(), 1);
+        let stratum = got.as_ref().map_or(0, |s| s.stratum);
+        let delay_us = got.as_ref().map_or(0, |s| s.delay_ns / 1000);
+        let synced = CLOCK_SYNCED.load(Relaxed);
+        let wait = match sntp::apply(&mut sys, got, exec.now(), synced).await {
+            sntp::ClockStep::Synced(unix_ns) => {
+                CLOCK_SYNCED.store(true, Relaxed);
+                fails = 0;
+                say!(
+                    "hop: clock set from {server} (stratum {stratum}, delay {delay_us} us) to {} s HOP_CLOCK_SYNCED",
+                    unix_ns / 1_000_000_000
+                );
+                NTP_EVERY
             }
-            Err(e) => {
+            sntp::ClockStep::Later(e) => {
+                say!(
+                    "hop: SET_CLOCK: {e}; the clock stays as it was until the next sync HOP_CLOCK_FAIL"
+                );
+                NTP_RETRY
+            }
+            sntp::ClockStep::Fatal(e) => {
+                // Een kern die SET_CLOCK weigert, of bij de start niet
+                // antwoordt, is een kapotte node: hard, de watchdog reset.
+                say!(
+                    "hop: SET_CLOCK failed at the start: {e}; stopping (exit {EXIT_KERNEL}) HOP_KERNEL_GONE step=clock"
+                );
+                app.shutdown(EXIT_KERNEL).await;
+                return;
+            }
+            sntp::ClockStep::Sntp(e) => {
                 fails = fails.saturating_add(1);
                 if fails <= NTP_LOUD || fails.is_multiple_of(12) {
                     say!(
@@ -671,33 +667,32 @@ async fn wake(
 
 /// De init-jobs van deze boot: uit de env, of anders uit
 /// [`INIT_JOBS_FILE`] in het volume. `None` als er geen zijn.
-async fn init_specs(cfg: &BootConfig, net: &'static Net) -> Option<String> {
+///
+/// Een kern die op de stat niet antwoordt, is geen ontbrekend bestand maar
+/// een kapotte node: hard stoppen ([`EXIT_KERNEL`]), niet stil zonder
+/// init-jobs verder.
+async fn init_specs(app: &'static App, cfg: &BootConfig, net: &'static Net) -> Option<String> {
     if let Some(j) = &cfg.init_jobs {
         return Some(j.clone());
     }
     let mut c = net.system_client();
-    // Een kern die vlak na de start niet antwoordt, is geen ontbrekend
-    // bestand: kort opnieuw ([`KERNEL_BACKOFF`]), dan pas opgeven.
-    let mut waits = KERNEL_BACKOFF.iter();
-    let size = loop {
-        match c.stat(INIT_JOBS_FILE).await {
-            Ok(s) => break usize::try_from(s).unwrap_or(usize::MAX),
-            Err(applib::sys::Error::NotFound { .. }) => return None,
-            Err(e) => {
-                let transient = matches!(
-                    e,
-                    applib::sys::Error::Transport(_)
-                        | applib::sys::Error::Timeout
-                        | applib::sys::Error::Protocol(_)
-                );
-                match waits.next() {
-                    Some(&w) if transient => EXEC.get().after(w).await,
-                    _ => {
-                        say!("hop: {INIT_JOBS_FILE}: {e}; no init jobs HOP_INIT_FAIL");
-                        return None;
-                    }
-                }
-            }
+    let size = match c.stat(INIT_JOBS_FILE).await {
+        Ok(s) => usize::try_from(s).unwrap_or(usize::MAX),
+        Err(applib::sys::Error::NotFound { .. }) => return None,
+        Err(
+            e @ (applib::sys::Error::Transport(_)
+            | applib::sys::Error::Timeout
+            | applib::sys::Error::Protocol(_)),
+        ) => {
+            say!(
+                "hop: the kernel did not answer the stat of {INIT_JOBS_FILE} ({e}); stopping (exit {EXIT_KERNEL}) HOP_KERNEL_GONE step=init"
+            );
+            app.shutdown(EXIT_KERNEL).await;
+            return None;
+        }
+        Err(e) => {
+            say!("hop: {INIT_JOBS_FILE}: {e}; no init jobs HOP_INIT_FAIL");
+            return None;
         }
     };
     if size > INIT_FILE_MAX {
@@ -943,7 +938,7 @@ async fn resident(app: &'static App) {
 
     // De tijdserver: `HOPOS_NTP` (`host` of `host:poort`), anders pool.ntp.org.
     let (ntp_host, ntp_port) = sntp::server_from(app.env(sntp::ENV_NTP));
-    if let Err(e) = exec.spawn(clock_task(net, exec, ntp_host, ntp_port)) {
+    if let Err(e) = exec.spawn(clock_task(app, net, exec, ntp_host, ntp_port)) {
         say!("hop: cannot spawn the clock task: {e}; no SNTP, https refused HOP_SNTP_FAIL");
     }
     if let Err(e) = exec.spawn(store_task(
@@ -1000,7 +995,7 @@ async fn resident(app: &'static App) {
         Some(cc) => {
             // Geclusterd: de init-jobs zaait wie leider wordt op een schone
             // clusterstaat, niet de boot van deze node.
-            let specs = init_specs(&cfg, net).await;
+            let specs = init_specs(app, &cfg, net).await;
             match start_cluster(app, net, exec, &seen, cc, specs).await {
                 Ok(parts) => Node::new_clustered(&seen, sys, images, now(app, exec), parts),
                 Err(e) => {
@@ -1017,18 +1012,13 @@ async fn resident(app: &'static App) {
     while let Some(l) = HOP_LOG.try_recv() {
         node.hop_line(&l);
     }
-    let mut kept = node.restore(now(app, exec)).await;
-    let mut tries = 1;
-    for wait in KERNEL_BACKOFF {
-        if kept != Kept::Unreachable {
-            break;
-        }
-        exec.after(wait).await;
-        kept = node.restore(now(app, exec)).await;
-        tries += 1;
-    }
+    let kept = node.restore(now(app, exec)).await;
     if kept == Kept::Unreachable {
-        node.state_unreachable(tries);
+        // Nooit leeg beginnen omdat de kern zweeg: de veger zou elke app
+        // stoppen. Hard; de watchdog reset de node.
+        flush(&mut node);
+        app.shutdown(EXIT_KERNEL).await;
+        return;
     }
     node.sweep_strays().await;
     flush(&mut node);
@@ -1039,7 +1029,7 @@ async fn resident(app: &'static App) {
     }
     if !clustered
         && kept.is_clean()
-        && let Some(specs) = init_specs(&cfg, net).await
+        && let Some(specs) = init_specs(app, &cfg, net).await
     {
         if let Err(e) = node.seed_init_jobs(&specs, now(app, exec)).await {
             say!("hop: init jobs not seeded: {e} HOP_INIT_FAIL");
