@@ -4,8 +4,8 @@ version = 4
 
 [[package]]
 name = "abi"
-version = "3.0.18"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.18#4411c8140720e7fef33f32f9e3946683bf7e53b3"
+version = "3.0.19"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.19#cda342f2248e01178ff39b9c416c8bf879f40cdc"
 dependencies = [
  "bounded",
  "dev",
@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "agent"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "config",
  "types",
@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "agentd"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "agent",
  "api",
@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "agentd-hopos"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "abi",
  "agent",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "api"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "agent",
  "auth",
@@ -74,8 +74,8 @@ dependencies = [
 
 [[package]]
 name = "applib"
-version = "3.0.18"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.18#4411c8140720e7fef33f32f9e3946683bf7e53b3"
+version = "3.0.19"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.19#cda342f2248e01178ff39b9c416c8bf879f40cdc"
 dependencies = [
  "abi",
  "bounded",
@@ -90,16 +90,16 @@ dependencies = [
 
 [[package]]
 name = "auth"
-version = "3.0.16"
+version = "3.0.17"
 
 [[package]]
 name = "bounded"
-version = "3.0.18"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.18#4411c8140720e7fef33f32f9e3946683bf7e53b3"
+version = "3.0.19"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.19#cda342f2248e01178ff39b9c416c8bf879f40cdc"
 
 [[package]]
 name = "cli"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "auth",
  "hostnet",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "cloudflared-lean"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "applib",
  "leanh2",
@@ -121,27 +121,27 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "types",
 ]
 
 [[package]]
 name = "dev"
-version = "3.0.18"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.18#4411c8140720e7fef33f32f9e3946683bf7e53b3"
+version = "3.0.19"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.19#cda342f2248e01178ff39b9c416c8bf879f40cdc"
 
 [[package]]
 name = "discovery"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "types",
 ]
 
 [[package]]
 name = "executor"
-version = "3.0.18"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.18#4411c8140720e7fef33f32f9e3946683bf7e53b3"
+version = "3.0.19"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.19#cda342f2248e01178ff39b9c416c8bf879f40cdc"
 dependencies = [
  "dev",
  "sync",
@@ -149,12 +149,12 @@ dependencies = [
 
 [[package]]
 name = "heap"
-version = "3.0.18"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.18#4411c8140720e7fef33f32f9e3946683bf7e53b3"
+version = "3.0.19"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.19#cda342f2248e01178ff39b9c416c8bf879f40cdc"
 
 [[package]]
 name = "hop-gui"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "applib",
  "hostnet",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "hop-http"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "api",
  "applib",
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "hopdns"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "applib",
  "hoplib",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "hoplb"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "applib",
  "hoplib",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "hoplib"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "api",
  "applib",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "hoplockserver"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "applib",
  "auth",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "hopos-runner"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "abi",
  "agent",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "hopprom"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "abi",
  "applib",
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "hostnet"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "leanhttp",
  "leanhttps",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "leader"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "config",
  "types",
@@ -320,15 +320,15 @@ dependencies = [
 
 [[package]]
 name = "netdev"
-version = "3.0.18"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.18#4411c8140720e7fef33f32f9e3946683bf7e53b3"
+version = "3.0.19"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.19#cda342f2248e01178ff39b9c416c8bf879f40cdc"
 dependencies = [
  "sync",
 ]
 
 [[package]]
 name = "runner"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "hostnet",
  "leanhttp",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "store"
-version = "3.0.16"
+version = "3.0.17"
 dependencies = [
  "config",
  "discovery",
@@ -350,12 +350,12 @@ dependencies = [
 
 [[package]]
 name = "sync"
-version = "3.0.18"
-source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.18#4411c8140720e7fef33f32f9e3946683bf7e53b3"
+version = "3.0.19"
+source = "git+https://github.com/xinix00/HopOS.git?tag=v3.0.19#cda342f2248e01178ff39b9c416c8bf879f40cdc"
 dependencies = [
  "bounded",
 ]
 
 [[package]]
 name = "types"
-version = "3.0.16"
+version = "3.0.17"

@@ -44,9 +44,9 @@ leans3 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.14" }
 leans3http = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.14" }
 leanh2 = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.14" }
 leanrand = { git = "https://github.com/xinix00/lean.git", tag = "v3.1.14" }
-applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.18" }
-sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.18" }
-abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.18" }
+applib = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.19" }
+sync = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.19" }
+abi = { git = "https://github.com/xinix00/HopOS.git", tag = "v3.0.19" }
 types = { path = "types" }
 auth = { path = "auth" }
 api = { path = "api" }
@@ -56,7 +56,7 @@ store = { path = "store" }
 hoplib = { path = "hoplib" }
 
 [workspace.package]
-version = "3.0.16"
+version = "3.0.17"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT"
